@@ -9,3 +9,6 @@ Win32
 
 # Local editor state
 /.vscode/
+
+# Agent progress notes
+progress.md

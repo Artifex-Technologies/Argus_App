@@ -1,8 +1,8 @@
-# Argus App
+# Argus_App
 
 **An operator console for the [Flipper Zero](https://flipperzero.one/), built for authorized penetration-testing and red-team engagements.**
 
-Argus App is a fork of the official [qFlipper](https://github.com/flipperdevices/qFlipper) desktop companion (Qt 6 / C++ / QML, GPLv3). It keeps everything qFlipper does — firmware update/repair, screen streaming, backups — and extends it into a full desktop console for operating the device and analyzing what it captures:
+Argus_App is a fork of the official [qFlipper](https://github.com/flipperdevices/qFlipper) desktop companion (Qt 6 / C++ / QML, GPLv3). It keeps everything qFlipper does — firmware update/repair, screen streaming, backups — and extends it into a full desktop console for operating the device and analyzing what it captures:
 
 - **Richer device control & live data streams** — talk to the Flipper over its RPC/serial link, not just for updates.
 - **Offload & datastore** — use the desktop as external storage/compute so the Flipper isn't bottlenecked by its own flash and MCU.
@@ -145,7 +145,7 @@ See [contrib](./contrib) for available options.
 - `driver-tool` - DFU driver installation tool for Windows (based on `libwdi`).
 - `docker` - Docker configuration files.
 - `installer-assets` - Supplementary data for deployment.
-- `docs` - Argus engineering docs (architecture, roadmap).
+- `docs` - Chymaera engineering docs (architecture, roadmap).
 
 ## Reporting bugs
 qFlipper is a project under active development. Please report any encountered bugs to make it better!
@@ -160,4 +160,4 @@ The (mostly) complete guide is located [here](./.github/ISSUE_TEMPLATE/bug_repor
 
 ## License and attribution
 
-Argus App is a fork of [qFlipper](https://github.com/flipperdevices/qFlipper) by Flipper Devices Inc. and is distributed under the **GNU General Public License v3** — see [LICENSE](./LICENSE). Full credit for the base application goes to the qFlipper authors; the Argus additions build on their work under the same license.
+Argus_App is a fork of [qFlipper](https://github.com/flipperdevices/qFlipper) by Flipper Devices Inc. and is distributed under the **GNU General Public License v3** — see [LICENSE](./LICENSE). Full credit for the base application goes to the qFlipper authors; the Chymaera additions build on their work under the same license.
