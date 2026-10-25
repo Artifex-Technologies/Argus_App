@@ -29,15 +29,13 @@ unix:!macx {
 
 # Argus versions read "ARG-<upstream qFlipper>r<N>", e.g. ARG-1.3.3r1, matching Argus_Firmware.
 # Update UPSTREAM_VERSION by hand when merging upstream; N restarts at 1 (ARG-1.3.4r1).
-# Our half comes from the nearest ARG-<upstream>r* tag, plus "+N" commits since it.
+# Our half comes from the nearest ARG-<upstream>r* tag; later commits keep that name
+# (no "+N" suffix, by maintainer choice), and APP_COMMIT tells such builds apart.
 UPSTREAM_VERSION = 1.3.3
 VERSION_BASE = ARG-$$UPSTREAM_VERSION
 
 GIT_VERSION = $$system("git describe --tags --abbrev=0 --match=$${VERSION_BASE}r*","lines", HAS_VERSION)
-equals(HAS_VERSION, 0) {
-    GIT_AHEAD = $$system("git rev-list --count $${GIT_VERSION}..HEAD")
-    !equals(GIT_AHEAD, 0): GIT_VERSION = $${GIT_VERSION}+$${GIT_AHEAD}
-} else {
+!equals(HAS_VERSION, 0) {
     GIT_VERSION = $${VERSION_BASE}-dev
 }
 

@@ -131,8 +131,8 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
   changes (`upstream/dev` has only 3 CI/signing commits since). Nothing to merge.
 - **App version format** is now `ARG-<upstream>r<N>` (e.g. `ARG-1.3.3r1`), matching
   Argus_Firmware. Base is `UPSTREAM_VERSION` in `qflipper_common.pri` (bump by hand on an
-  upstream merge); N comes from the nearest `ARG-1.3.3r*` tag, `+N` commits after it, and
-  `ARG-1.3.3-dev` untagged. Windows manifests get the numeric `UPSTREAM_VERSION`.
+  upstream merge); N comes from the nearest `ARG-1.3.3r*` tag, and
+  `ARG-1.3.3-dev` untagged. No `+N` suffix (maintainer choice, 2026-10-24). Windows manifests get the numeric `UPSTREAM_VERSION`.
 - **Custom-firmware warning:** `DeviceInfo.firmware.fork` now carries
   `firmware.origin.fork`; when it is not `Official`, the Update/Install confirmation warns
   that official firmware will replace it. Firmware side: keep `FIRMWARE_ORIGIN` non-`Official`.
