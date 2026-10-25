@@ -126,6 +126,20 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-10-24 — Versioning, custom-firmware warning, Linux build verified
+- **Upstream check:** qFlipper 1.3.3 is still the latest; our tree is 1.3.3 + additive
+  changes (`upstream/dev` has only 3 CI/signing commits since). Nothing to merge.
+- **App version format** is now `ARG-<upstream>r<N>` (e.g. `ARG-1.3.3r1`), matching
+  Argus_Firmware. Base is `UPSTREAM_VERSION` in `qflipper_common.pri` (bump by hand on an
+  upstream merge); N comes from the nearest `ARG-1.3.3r*` tag, `+N` commits after it, and
+  `ARG-1.3.3-dev` untagged. Windows manifests get the numeric `UPSTREAM_VERSION`.
+- **Custom-firmware warning:** `DeviceInfo.firmware.fork` now carries
+  `firmware.origin.fork`; when it is not `Official`, the Update/Install confirmation warns
+  that official firmware will replace it. Firmware side: keep `FIRMWARE_ORIGIN` non-`Official`.
+- **Official apps** are installed via lab.flipper.net / the mobile app (qFlipper has no
+  catalog). Compatibility depends on the firmware keeping upstream's API version (88.2).
+- Built and selftested on CachyOS (Qt 6.12): 11/11. Note left in `Argus_Firmware/PROGRESS.md`.
+
 <!-- Append entries at the top of this list. Format:
 ### YYYY-MM-DD — short title
 - what changed / why / what others need to know

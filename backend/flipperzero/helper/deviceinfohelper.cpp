@@ -175,7 +175,8 @@ void VCPDeviceInfoHelper::fetchDeviceInfoLegacy()
             operation->value(QByteArrayLiteral("firmware_commit")),
             operation->value(QByteArrayLiteral("firmware_branch")),
             branchToChannelName(operation->value(QByteArrayLiteral("firmware_branch"))),
-            QDateTime::fromString(operation->value(QByteArrayLiteral("firmware_build_date")), "dd-MM-yyyy").date()
+            QDateTime::fromString(operation->value(QByteArrayLiteral("firmware_build_date")), "dd-MM-yyyy").date(),
+            operation->value(QByteArrayLiteral("firmware_origin_fork"))
         };
 
         m_deviceInfo.hardware = {
@@ -226,7 +227,8 @@ void VCPDeviceInfoHelper::fetchDeviceInfoProperty()
             operation->value(QByteArrayLiteral("firmware.commit.hash")),
             operation->value(QByteArrayLiteral("firmware.branch.name")),
             branchToChannelName(operation->value(QByteArrayLiteral("firmware.branch.name"))),
-            QDateTime::fromString(operation->value(QByteArrayLiteral("firmware.build.date")), "dd-MM-yyyy").date()
+            QDateTime::fromString(operation->value(QByteArrayLiteral("firmware.build.date")), "dd-MM-yyyy").date(),
+            operation->value(QByteArrayLiteral("firmware.origin.fork"))
         };
 
         m_deviceInfo.hardware = {

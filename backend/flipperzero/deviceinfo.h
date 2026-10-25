@@ -42,6 +42,7 @@ struct SoftwareInfo {
     Q_PROPERTY(QString branch MEMBER branch)
     Q_PROPERTY(QString channel MEMBER channel)
     Q_PROPERTY(QDate date MEMBER date)
+    Q_PROPERTY(QString fork MEMBER fork)
 
 public:
     QString version;
@@ -49,6 +50,7 @@ public:
     QString branch;
     QString channel;
     QDate date;
+    QString fork; // firmware.origin.fork, "Official" on stock firmware (Argus)
 
     // Needed in order to work with QVariant. See HardwareInfo above.
     bool operator !=(const SoftwareInfo &other) const { Q_UNUSED(other) return true; }

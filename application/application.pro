@@ -62,18 +62,8 @@ unix|win32 {
 }
 
 win32 {
-    equals(HAS_VERSION, 0) {
-        RC_SUFFIX = -rc
-
-        contains(GIT_VERSION, .*$${RC_SUFFIX}.*) {
-            # Remove -rc suffix as it isn't allowed in Windows manifest
-            TOKENS = $$split(GIT_VERSION, -)
-            VERSION = $$first(TOKENS)
-        } else {
-            VERSION = $$GIT_VERSION
-        }
-
-    } else: VERSION = 0.0.0
+    # The Windows manifest only takes a numeric version, so it carries the upstream base
+    VERSION = $$UPSTREAM_VERSION
 }
 
 macx: ICON = assets/icons/$${NAME}.icns

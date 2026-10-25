@@ -351,7 +351,7 @@ AbstractOverlay {
                 customText: qsTr("Update"),
                 message: qsTr("New firmware <font color=\"%1\">%2</font><br/>will be installed")
                          .arg(releaseButton.linkColor)
-                         .arg(releaseButton.text),
+                         .arg(releaseButton.text) + customFirmwareWarning(),
             };
 
         const canUpdate = deviceInfo.storage.isExternalPresent ||
@@ -362,6 +362,19 @@ AbstractOverlay {
         } else {
             sdWarningDialog.open();
         }
+    }
+
+    // Argus: the update channels serve official firmware, which replaces a fork such as Argus
+    function customFirmwareWarning() {
+        const fork = deviceInfo.firmware.fork;
+        if(fork.length === 0 || fork === "Official") {
+            return "";
+        }
+
+        return qsTr("<br/><br/><font color=\"%1\">This replaces the %2 firmware<br/>(%3) on this Flipper.</font>")
+               .arg(Theme.color.lightred2)
+               .arg(fork)
+               .arg(deviceInfo.firmware.version);
     }
 
     function installFromFile() {
