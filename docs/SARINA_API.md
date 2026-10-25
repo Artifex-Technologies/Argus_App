@@ -44,6 +44,7 @@ responses. Every response has a boolean `ok`; failures carry `"error"`.
 | `capture.import` | `path` (req) | `summary` |
 | `device.status` | — | `connected`, `name` |
 | `capture.pull` | `path` (req, e.g. `/ext/nfc`) | `started`, `path` |
+| `capture.pullAll` | — | `started`, `paths` (the folders it will read) |
 
 ### `device.status` and `capture.pull` (added 2026-09-12)
 
@@ -54,6 +55,24 @@ datastore, parsing any `.nfc`/`.sub` captures it finds. It is **read-only** — 
 reads files off the device. It is **asynchronous**: the response confirms the pull
 *started*; watch `log.tail` (source `device`) for progress and completion. Requires a
 device attached to the app (the GUI, or `qFlipper-cli chymaera pull`/`watch`).
+
+### `capture.pullAll` and capture integrity (v1.2, added 2026-10-24)
+
+`capture.pullAll` pulls every known capture folder in one go: `/ext/nfc`, `/ext/subghz`,
+`/ext/lfrfid`, `/ext/infrared`, `/ext/ibutton`, `/ext/apps_data/marauder/pcaps`,
+`/ext/apps_data/marauder/logs`, and the Argus apps' `/ext/rf_monitor`, `/ext/wifi_scan`,
+`/ext/ld2450`. The response lists them in `paths`. Like `capture.pull` it is
+**read-only** and **asynchronous**: watch `log.tail` for a final `Pulled …: N new, M
+already stored, K failed` entry. Only one pull runs at a time; a second request fails until it ends.
+
+- **Allowlist, not the whole card.** Secrets such as `/ext/u2f` and `apps_data/totp` are
+  never read. Sub-trees named `assets` (key dictionaries, Keeloq manufacturer keys) and
+  `.cache` are skipped inside every folder, by `capture.pull` too.
+- **No duplicates.** Every file gets a SHA-256 on arrival. A file whose digest was already
+  recorded from the same device path is not stored again, so pulling repeatedly is safe.
+- **Nothing is dropped.** Files the Flipper-format parsers don't understand (Marauder
+  `.pcap`, CSV logs, `.log`) are recorded unparsed with type `pcap`, `csv`, `log` or `file`.
+- Folders missing on the device are skipped silently. Folders that exist but are empty are fine.
 
 ### Event entry shape (`log.tail` / persisted events)
 
@@ -73,13 +92,20 @@ device attached to the app (the GUI, or `qFlipper-cli chymaera pull`/`watch`).
 ```jsonc
 {
   "id": 12, "session_id": 3, "ts": 1789045402145,
-  "type": "nfc",              // nfc|subghz|generic
+  "type": "nfc",              // nfc|subghz|generic|pcap|csv|log|file
   "name": "office_badge.nfc",
-  "source_path": "/…/office_badge.nfc",
+  "source_path": "/ext/nfc/office_badge.nfc",  // device path (or local path for capture.import)
   "size": 512,
-  "meta": "{…}"               // JSON string: the parsed file summary
+  "meta": "{…}",              // JSON string: the parsed file summary ({"kind":…} only when unparsed)
+  "sha256": "9ff752d4…",      // v1.2: hex digest of the file as received; null on older rows
+  "local_path": "/home/…/Argus/chymaera/pulls/20261024-210030/ext/nfc/office_badge.nfc"
+                              // v1.2: the kept copy on this machine; null on older rows
 }
 ```
+
+The datastore (and the `pulls/` folder of received files) lives at
+`~/.local/share/Argus/chymaera/` on Linux, shared by the GUI and `qFlipper-cli` since
+v1.2. Before that each executable had its own copy under `Flipper Devices Inc/`.
 
 ## Quick test
 

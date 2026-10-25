@@ -33,5 +33,5 @@ private:
     // Device-backed commands — these reach a connected Flipper via
     // ApplicationBackend and therefore run the event loop.
     static int cmdWatch(QCoreApplication &app, const QStringList &args);
-    static int cmdPull(QCoreApplication &app, const QStringList &args);
+    static int cmdPull(QCoreApplication &app, const QStringList &args, bool all = false);
 };

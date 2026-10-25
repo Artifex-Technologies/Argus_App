@@ -189,7 +189,8 @@ qint64 ChymaeraDatastore::logEvent(Severity severity, Source source, const QStri
 }
 
 qint64 ChymaeraDatastore::addCapture(const QString &type, const QString &name, const QString &sourcePath,
-                                     qint64 size, const QString &metaJson)
+                                     qint64 size, const QString &metaJson,
+                                     const QString &sha256, const QString &localPath)
 {
     if(!m_open) {
         setError(QStringLiteral("Datastore is not open"));
@@ -199,7 +200,8 @@ qint64 ChymaeraDatastore::addCapture(const QString &type, const QString &name, c
     auto db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "INSERT INTO captures(session_id, ts, type, name, source_path, size, meta) VALUES(?, ?, ?, ?, ?, ?, ?)"));
+        "INSERT INTO captures(session_id, ts, type, name, source_path, size, meta, sha256, local_path)"
+        " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     q.addBindValue(m_currentSessionId < 0 ? QVariant() : QVariant(m_currentSessionId));
     q.addBindValue(QDateTime::currentMSecsSinceEpoch());
     q.addBindValue(type);
@@ -207,6 +209,8 @@ qint64 ChymaeraDatastore::addCapture(const QString &type, const QString &name, c
     q.addBindValue(sourcePath);
     q.addBindValue(size);
     q.addBindValue(metaJson);
+    q.addBindValue(sha256.isEmpty() ? QVariant() : QVariant(sha256));
+    q.addBindValue(localPath.isEmpty() ? QVariant() : QVariant(localPath));
 
     if(!q.exec()) {
         setError(QStringLiteral("Cannot add capture: %1").arg(q.lastError().text()));
@@ -214,6 +218,21 @@ qint64 ChymaeraDatastore::addCapture(const QString &type, const QString &name, c
     }
 
     return q.lastInsertId().toLongLong();
+}
+
+bool ChymaeraDatastore::hasCapture(const QString &sha256, const QString &sourcePath) const
+{
+    if(!m_open || sha256.isEmpty()) {
+        return false;
+    }
+
+    auto db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral("SELECT 1 FROM captures WHERE sha256 = ? AND source_path = ? LIMIT 1"));
+    q.addBindValue(sha256);
+    q.addBindValue(sourcePath);
+
+    return q.exec() && q.next();
 }
 
 QVariantList ChymaeraDatastore::recentEvents(int limit) const
@@ -258,7 +277,8 @@ QVariantList ChymaeraDatastore::captures(int limit) const
     auto db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "SELECT id, session_id, ts, type, name, source_path, size, meta FROM captures ORDER BY id DESC LIMIT ?"));
+        "SELECT id, session_id, ts, type, name, source_path, size, meta, sha256, local_path"
+        " FROM captures ORDER BY id DESC LIMIT ?"));
     q.addBindValue(limit);
 
     if(!q.exec()) {
@@ -275,6 +295,8 @@ QVariantList ChymaeraDatastore::captures(int limit) const
         row[QStringLiteral("source_path")] = q.value(5);
         row[QStringLiteral("size")] = q.value(6);
         row[QStringLiteral("meta")] = q.value(7);
+        row[QStringLiteral("sha256")] = q.value(8);
+        row[QStringLiteral("local_path")] = q.value(9);
         out.append(row);
     }
 
@@ -334,6 +356,30 @@ bool ChymaeraDatastore::ensureSchema()
     for(const auto &sql : statements) {
         if(!q.exec(sql)) {
             setError(QStringLiteral("Schema error: %1").arg(q.lastError().text()));
+            return false;
+        }
+    }
+
+    // Columns added after v0.1; databases created earlier get them here.
+    QStringList captureColumns;
+    if(q.exec(QStringLiteral("PRAGMA table_info(captures)"))) {
+        while(q.next()) {
+            captureColumns.append(q.value(1).toString());
+        }
+    }
+
+    QStringList migrations;
+    if(!captureColumns.contains(QStringLiteral("sha256"))) {
+        migrations.append(QStringLiteral("ALTER TABLE captures ADD COLUMN sha256 TEXT"));
+    }
+    if(!captureColumns.contains(QStringLiteral("local_path"))) {
+        migrations.append(QStringLiteral("ALTER TABLE captures ADD COLUMN local_path TEXT"));
+    }
+    migrations.append(QStringLiteral("CREATE INDEX IF NOT EXISTS idx_captures_sha256 ON captures(sha256)"));
+
+    for(const auto &sql : qAsConst(migrations)) {
+        if(!q.exec(sql)) {
+            setError(QStringLiteral("Schema migration error: %1").arg(q.lastError().text()));
             return false;
         }
     }

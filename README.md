@@ -16,7 +16,7 @@ This is a work in progress. See the current design and status:
 - **[docs/ROADMAP.md](./docs/ROADMAP.md)** — the phased plan and what's done vs. planned.
 - **[docs/SARINA_API.md](./docs/SARINA_API.md)** — the local control API (Sarina) command reference.
 
-**Landed so far:** an operator **console** with a live event log; a SQLite **datastore** for sessions/events/captures; a **Wireshark exporter** (`.pcap`/`.pcapng`); **Flipper capture parsing** (`.nfc`, `.sub`); the loopback **Sarina control API** (v1.1); a **live device stream** and **pull to datastore** (`/ext/nfc`, `/ext/subghz`), also headless through `qFlipper-cli chymaera watch|pull`; and a **warning before official firmware replaces a fork** (see below). See the roadmap for what's next.
+**Landed so far:** an operator **console** with a live event log; a SQLite **datastore** for sessions/events/captures; a **Wireshark exporter** (`.pcap`/`.pcapng`); **Flipper capture parsing** (`.nfc`, `.sub`); the loopback **Sarina control API** (v1.1); a **live device stream** and **pull all captures** to the datastore (NFC, Sub-GHz, RFID, IR, iButton, Marauder pcaps/logs, Argus app logs) with a SHA-256 per file and no duplicates on repeat pulls, also headless through `qFlipper-cli chymaera watch|pull|pull-all`; and a **warning before official firmware replaces a fork** (see below). See the roadmap for what's next.
 
 ## Versions
 

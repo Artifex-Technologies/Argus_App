@@ -14,7 +14,8 @@ SOURCES += \
     $$PWD/eventlog/chymaeraeventlog.cpp \
     $$PWD/exporters/pcapexporter.cpp \
     $$PWD/exporters/flipperfileformat.cpp \
-    $$PWD/sarina/sarinaserver.cpp
+    $$PWD/sarina/sarinaserver.cpp \
+    $$PWD/sync/capturesync.cpp
 
 HEADERS += \
     $$PWD/chymaeratypes.h \
@@ -23,4 +24,5 @@ HEADERS += \
     $$PWD/eventlog/chymaeraeventlog.h \
     $$PWD/exporters/pcapexporter.h \
     $$PWD/exporters/flipperfileformat.h \
-    $$PWD/sarina/sarinaserver.h
+    $$PWD/sarina/sarinaserver.h \
+    $$PWD/sync/capturesync.h

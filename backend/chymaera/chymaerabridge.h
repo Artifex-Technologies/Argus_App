@@ -2,6 +2,7 @@
 
 #include <QUrl>
 #include <QVector>
+#include <QStringList>
 #include <QObject>
 #include <QString>
 #include <QPointer>
@@ -17,6 +18,7 @@ namespace Chymaera {
 
 class ChymaeraDatastore;
 class SarinaServer;
+class CaptureSync;
 
 /* The Chymaera façade: the single object the GUI (as the "Chymaera" QML
  * singleton) and headless callers talk to. It owns and wires together the
@@ -38,6 +40,7 @@ class Bridge : public QObject
     Q_PROPERTY(QString version READ version CONSTANT)
     Q_PROPERTY(bool deviceConnected READ isDeviceConnected NOTIFY deviceChanged)
     Q_PROPERTY(QString deviceName READ deviceName NOTIFY deviceChanged)
+    Q_PROPERTY(bool pulling READ isPulling NOTIFY pullingChanged)
 
 public:
     explicit Bridge(QObject *parent = nullptr);
@@ -55,6 +58,7 @@ public:
 
     bool isDeviceConnected() const;
     QString deviceName() const;
+    bool isPulling() const;
 
     /* Device integration (Roadmap Phase 1/2). Observe a connected Flipper's
      * lifecycle into the event log, and pull files off it into the datastore.
@@ -91,6 +95,12 @@ public:
     // device is attached; completion is reported via pullFinished().
     Q_INVOKABLE bool pullPath(const QString &remotePath);
 
+    // Pull every known capture folder (CaptureSync::defaultRoots()) in one go.
+    // Folders missing on the device are skipped; files already stored (same
+    // SHA-256 from the same device path) are not stored again. Read-only.
+    Q_INVOKABLE bool pullAll();
+    static QStringList pullAllRoots();
+
     // The control-API command dispatcher (also reused by the CLI/tests).
     QJsonObject handleApiRequest(const QJsonObject &request);
 
@@ -101,16 +111,19 @@ signals:
     void deviceChanged();
     void pullStarted(const QString &remotePath);
     void pullFinished(bool ok, int fileCount);
+    void pullingChanged();
 
 private:
-    QString recordCapture(const QString &parsePath, const QString &displayName, const QString &origin);
-    int ingestDirectory(const QString &localDir, const QString &remotePath);
+    QString recordCapture(const QString &parsePath, const QString &displayName, const QString &origin,
+                          bool *duplicate = nullptr);
+    bool startPull(const QStringList &remoteRoots, const QString &label);
 
     ChymaeraDatastore *m_datastore;
     ChymaeraEventLog *m_eventLog;
     SarinaServer *m_server;
 
     QPointer<Flipper::FlipperZero> m_device;
+    QPointer<CaptureSync> m_sync;
     QVector<QMetaObject::Connection> m_deviceConnections;
 };
 

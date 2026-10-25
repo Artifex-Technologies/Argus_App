@@ -110,21 +110,39 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Cross-repo contracts (keep authoritative)
 
-- **Sarina control API (v1.1):** loopback-only, newline-delimited JSON over TCP,
+- **Sarina control API (v1.2):** loopback-only, newline-delimited JSON over TCP,
   default port **44700**, optional shared token. Full command + payload spec in
   **[docs/SARINA_API.md](docs/SARINA_API.md)**. Owner: this repo. Off by default; a
   client must start it (`Chymaera.startServer(port, token)` or the console UI).
   Commands are additive — propose new ones here + in the spec before building on them.
   v1.1 (2026-09-12) added **`device.status`** and **`capture.pull`** — both read-only
-  (pull only downloads files off the device). Everything in the API remains read/observe
-  + light control; nothing transmits, flashes, or mutates device state.
+  (pull only downloads files off the device). v1.2 (2026-10-24) added
+  **`capture.pullAll`** (read-only, allowlisted folders, secrets never read) and two
+  capture-record fields, **`sha256`** and **`local_path`**. Everything in the API remains
+  read/observe + light control; nothing transmits, flashes, or mutates device state.
 - **Data exchange format:** captures/events live in a SQLite datastore
-  (`status.datastorePath`). Consume them **through the API** (`log.tail`,
+  (`status.datastorePath`; `~/.local/share/Argus/chymaera/` on Linux, shared by GUI and CLI). Consume them **through the API** (`log.tail`,
   `capture.list`), not by opening the DB file, so schema changes stay behind the
   contract. Event and capture record shapes are in `docs/SARINA_API.md`. Owner: this repo.
 - **Shared endpoints/ports:** `127.0.0.1:44700` (Sarina control API, when enabled).
 
 ### Coordination Log (newest first)
+
+### 2026-10-24 — "Pull all captures" over USB, evidence hashes, shared datastore (API v1.2)
+- **`capture.pullAll`** / `qFlipper-cli chymaera pull-all` / a console button copy every
+  capture folder off the Flipper (list in `docs/SARINA_API.md`). Secrets (`/ext/u2f`,
+  `apps_data/totp`) are never read; `assets`/`.cache` sub-trees are skipped.
+  Tested against a real Flipper on Argus firmware: 10 files in, a second run stored 0.
+- **Captures now carry `sha256` and `local_path`.** Repeat pulls are de-duplicated by
+  digest + device path. Files the parsers don't understand (`.pcap`, `.csv`, `.log`) are
+  kept as types `pcap`/`csv`/`log`/`file` instead of being dropped.
+- **Datastore moved** to `~/.local/share/Argus/chymaera/`, shared by the GUI and CLI. They
+  used to write separate DBs, so CLI pulls were invisible to the GUI's API. Old DBs
+  under `~/.local/share/Flipper Devices Inc/` are left in place, not migrated.
+- **@Sarina:** additive only. `capture.list` rows gain two fields; `local_path` is
+  what lets you hand a `.pcap` to Wireshark/tshark. New types may appear in `type`.
+- **@Argus_Firmware:** the pull reads `/ext/rf_monitor`, `/ext/wifi_scan`, `/ext/ld2450`
+  and Marauder's `apps_data/marauder/{pcaps,logs}`. Tell us here if those paths move.
 
 ### 2026-10-24 — Versioning, custom-firmware warning, Linux build verified
 - **Upstream check:** qFlipper 1.3.3 is still the latest; our tree is 1.3.3 + additive

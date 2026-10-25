@@ -7,6 +7,8 @@
 #include <QDateTime>
 #include <QJsonArray>
 #include <QDirIterator>
+#include <QSharedPointer>
+#include <QCryptographicHash>
 #include <QJsonDocument>
 #include <QStandardPaths>
 #include <QLoggingCategory>
@@ -15,13 +17,11 @@
 #include "chymaera/datastore/chymaeradatastore.h"
 #include "chymaera/sarina/sarinaserver.h"
 #include "chymaera/exporters/flipperfileformat.h"
+#include "chymaera/sync/capturesync.h"
 
 #include "flipperzero/flipperzero.h"
 #include "flipperzero/devicestate.h"
 #include "flipperzero/protobufsession.h"
-#include "flipperzero/utilityinterface.h"
-#include "abstractoperation.h"
-#include "flipperzero/utility/directorydownloadoperation.h"
 
 Q_LOGGING_CATEGORY(LOG_CHYMAERA, "CHYMAERA")
 
@@ -99,8 +99,10 @@ QString Bridge::version() const
 
 QString Bridge::defaultDatastorePath()
 {
-    const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    return QDir(base).filePath(QStringLiteral("chymaera/chymaera.db"));
+    // One location for the GUI and the CLI alike (AppDataLocation differs per
+    // executable), so captures pulled headlessly show up in the console and API.
+    const QString base = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+    return QDir(base).filePath(QStringLiteral("Argus/chymaera/chymaera.db"));
 }
 
 void Bridge::log(const QString &message)
@@ -166,16 +168,60 @@ void Bridge::stopServer()
     m_eventLog->append(Severity::Notice, Source::Sarina, QStringLiteral("Control API stopped"));
 }
 
-QString Bridge::recordCapture(const QString &parsePath, const QString &displayName, const QString &origin)
+// Kind for a file the Flipper-format parsers do not understand (pcap, csv...).
+static QString rawKindForSuffix(const QString &suffix)
 {
-    const QVariantMap info = FlipperFiles::parseAuto(parsePath);
-    if(info.isEmpty()) {
-        m_eventLog->append(Severity::Warning, Source::Capture,
-                           QStringLiteral("Could not parse capture: %1").arg(displayName));
+    if(suffix == QStringLiteral("pcap") || suffix == QStringLiteral("pcapng")) {
+        return QStringLiteral("pcap");
+    } else if(suffix == QStringLiteral("csv")) {
+        return QStringLiteral("csv");
+    } else if(suffix == QStringLiteral("log") || suffix == QStringLiteral("txt")) {
+        return QStringLiteral("log");
+    } else {
+        return QStringLiteral("file");
+    }
+}
+
+static QString sha256OfFile(const QString &path)
+{
+    QFile f(path);
+    if(!f.open(QIODevice::ReadOnly)) {
         return QString();
     }
 
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData(&f);
+    return QString::fromLatin1(hash.result().toHex());
+}
+
+QString Bridge::recordCapture(const QString &parsePath, const QString &displayName, const QString &origin,
+                              bool *duplicate)
+{
+    if(duplicate) {
+        *duplicate = false;
+    }
+
     const QFileInfo fi(parsePath);
+    const QString sha256 = sha256OfFile(parsePath);
+    if(sha256.isEmpty()) {
+        m_eventLog->append(Severity::Warning, Source::Capture,
+                           QStringLiteral("Cannot read capture: %1").arg(displayName));
+        return QString();
+    }
+
+    if(m_datastore->hasCapture(sha256, origin)) {
+        if(duplicate) {
+            *duplicate = true;
+        }
+        return QString();
+    }
+
+    QVariantMap info = FlipperFiles::parseAuto(parsePath);
+    if(info.isEmpty()) {
+        // Not a Flipper-format file: keep it as evidence anyway, unparsed.
+        info[QStringLiteral("kind")] = rawKindForSuffix(fi.suffix().toLower());
+    }
+
     const QString kind = info.value(QStringLiteral("kind")).toString();
 
     QString summary;
@@ -188,13 +234,16 @@ QString Bridge::recordCapture(const QString &parsePath, const QString &displayNa
                       .arg(info.value(QStringLiteral("protocol")).toString(),
                            info.value(QStringLiteral("frequency")).toString(),
                            info.value(QStringLiteral("rawSampleCount")).toString());
-    } else {
+    } else if(kind == QStringLiteral("generic")) {
         summary = QStringLiteral("%1 (%2)")
                       .arg(info.value(QStringLiteral("filetype")).toString(), displayName);
+    } else {
+        summary = QStringLiteral("%1 %2 (%3 bytes)").arg(kind, displayName).arg(fi.size());
     }
 
     const QByteArray metaJson = QJsonDocument(QJsonObject::fromVariantMap(info)).toJson(QJsonDocument::Compact);
-    m_datastore->addCapture(kind, displayName, origin, fi.size(), QString::fromUtf8(metaJson));
+    m_datastore->addCapture(kind, displayName, origin, fi.size(), QString::fromUtf8(metaJson),
+                            sha256, fi.absoluteFilePath());
     m_eventLog->append(Severity::Info, Source::Capture,
                        QStringLiteral("Recorded capture: %1").arg(summary), origin);
     return summary;
@@ -202,7 +251,9 @@ QString Bridge::recordCapture(const QString &parsePath, const QString &displayNa
 
 QString Bridge::importCapture(const QString &path)
 {
-    return recordCapture(path, QFileInfo(path).fileName(), path);
+    bool duplicate = false;
+    const QString summary = recordCapture(path, QFileInfo(path).fileName(), path, &duplicate);
+    return duplicate ? QStringLiteral("Already recorded: %1").arg(QFileInfo(path).fileName()) : summary;
 }
 
 QString Bridge::importCaptureUrl(const QUrl &fileUrl)
@@ -282,20 +333,43 @@ void Bridge::detachDevice()
     emit deviceChanged();
 }
 
+bool Bridge::isPulling() const
+{
+    return !m_sync.isNull();
+}
+
 bool Bridge::pullPath(const QString &remotePath)
+{
+    return startPull({remotePath}, remotePath);
+}
+
+bool Bridge::pullAll()
+{
+    return startPull(CaptureSync::defaultRoots(), QStringLiteral("all capture folders"));
+}
+
+QStringList Bridge::pullAllRoots()
+{
+    return CaptureSync::defaultRoots();
+}
+
+bool Bridge::startPull(const QStringList &remoteRoots, const QString &label)
 {
     if(m_device.isNull()) {
         m_eventLog->append(Severity::Warning, Source::Device,
-                           QStringLiteral("Cannot pull %1: no device attached").arg(remotePath));
+                           QStringLiteral("Cannot pull %1: no device attached").arg(label));
         return false;
     }
 
-    // Local staging directory next to the datastore.
+    if(isPulling()) {
+        m_eventLog->append(Severity::Warning, Source::Device,
+                           QStringLiteral("Cannot pull %1: a pull is already running").arg(label));
+        return false;
+    }
+
+    // Local staging directory next to the datastore; files keep their device paths below it.
     const QString base = QDir(QFileInfo(m_datastore->path()).absolutePath()).filePath(QStringLiteral("pulls"));
-    QString safeLeaf = remotePath;
-    safeLeaf.replace(QLatin1Char('/'), QLatin1Char('_'));
-    const QString localDir = QDir(base).filePath(
-        QStringLiteral("%1%2").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss")), safeLeaf));
+    const QString localDir = QDir(base).filePath(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss")));
 
     if(!QDir().mkpath(localDir)) {
         m_eventLog->append(Severity::Error, Source::Device,
@@ -304,40 +378,63 @@ bool Bridge::pullPath(const QString &remotePath)
     }
 
     m_eventLog->append(Severity::Notice, Source::Device,
-                       QStringLiteral("Pulling %1 from device…").arg(remotePath));
-    emit pullStarted(remotePath);
+                       QStringLiteral("Pulling %1 from device…").arg(label));
+    emit pullStarted(label);
 
-    AbstractOperation *op = m_device->utility()->downloadDirectory(localDir, remotePath.toUtf8());
+    auto *sync = new CaptureSync(m_device, remoteRoots, localDir, this);
+    m_sync = sync;
+    emit pullingChanged();
 
-    connect(op, &AbstractOperation::finished, this, [this, op, localDir, remotePath]() {
-        if(op->isError()) {
-            m_eventLog->append(Severity::Error, Source::Device,
-                               QStringLiteral("Pull of %1 failed: %2").arg(remotePath, op->errorString()));
-            emit pullFinished(false, 0);
-            return;
-        }
+    auto newCount = QSharedPointer<int>::create(0);
+    auto duplicateCount = QSharedPointer<int>::create(0);
 
-        const int count = ingestDirectory(localDir, remotePath);
-        m_eventLog->append(Severity::Notice, Source::Device,
-                           QStringLiteral("Pulled %1: %2 file(s) ingested").arg(remotePath).arg(count));
-        emit pullFinished(true, count);
+    connect(sync, &CaptureSync::rootMissing, this, [this](const QString &root, const QString &reason) {
+        m_eventLog->append(Severity::Info, Source::Device,
+                           QStringLiteral("Skipped %1: not on the device or unreadable").arg(root), reason);
     });
 
-    return true;
-}
+    connect(sync, &CaptureSync::fileReceived, this, [this, newCount, duplicateCount](const QString &localPath, const QString &remotePath) {
+        bool duplicate = false;
+        const QString summary = recordCapture(localPath, QFileInfo(localPath).fileName(), remotePath, &duplicate);
+        if(duplicate) {
+            ++*duplicateCount;
+            QFile::remove(localPath); // already kept from an earlier pull
+        } else if(!summary.isEmpty()) {
+            ++*newCount;
+        }
+    });
 
-int Bridge::ingestDirectory(const QString &localDir, const QString &remotePath)
-{
-    int count = 0;
-    QDirIterator it(localDir, QDir::Files, QDirIterator::Subdirectories);
-    while(it.hasNext()) {
-        const QString localFile = it.next();
-        const QString name = QFileInfo(localFile).fileName();
-        const QString origin = QStringLiteral("%1/%2").arg(remotePath, name);
-        recordCapture(localFile, name, origin);
-        ++count;
-    }
-    return count;
+    connect(sync, &CaptureSync::fileFailed, this, [this](const QString &remotePath, const QString &reason) {
+        m_eventLog->append(Severity::Warning, Source::Device,
+                           QStringLiteral("Could not read %1").arg(remotePath), reason);
+    });
+
+    connect(sync, &CaptureSync::finished, this, [this, sync, label, localDir, newCount, duplicateCount](bool ok) {
+        const auto severity = ok ? Severity::Notice : Severity::Warning;
+        m_eventLog->append(severity, Source::Device,
+                           QStringLiteral("Pulled %1: %2 new, %3 already stored, %4 failed (%5 bytes read)")
+                               .arg(label).arg(*newCount).arg(*duplicateCount)
+                               .arg(sync->failedCount()).arg(sync->byteCount()),
+                           localDir);
+
+        // Leave no empty staging folders behind when everything was a duplicate.
+        QDirIterator it(localDir, QDir::Dirs | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+        QStringList dirs;
+        while(it.hasNext()) {
+            dirs.prepend(it.next());
+        }
+        for(const auto &dir : qAsConst(dirs)) {
+            QDir().rmdir(dir);
+        }
+        QDir().rmdir(localDir);
+
+        sync->deleteLater();
+        emit pullingChanged();
+        emit pullFinished(ok, *newCount);
+    });
+
+    sync->start();
+    return true;
 }
 
 bool Bridge::exportEventLog(const QString &path)
@@ -393,7 +490,8 @@ QJsonObject Bridge::handleApiRequest(const QJsonObject &request)
             QStringLiteral("log.tail"), QStringLiteral("log.add"),
             QStringLiteral("session.start"), QStringLiteral("session.end"),
             QStringLiteral("capture.list"), QStringLiteral("capture.import"),
-            QStringLiteral("device.status"), QStringLiteral("capture.pull")
+            QStringLiteral("device.status"), QStringLiteral("capture.pull"),
+            QStringLiteral("capture.pullAll")
         };
         return ok({ {QStringLiteral("commands"), cmds} });
 
@@ -466,6 +564,14 @@ QJsonObject Bridge::handleApiRequest(const QJsonObject &request)
         }
         // Asynchronous: watch log.tail / pullFinished for completion.
         return ok({ {QStringLiteral("started"), true}, {QStringLiteral("path"), path} });
+
+    } else if(cmd == QStringLiteral("capture.pullAll")) {
+        if(!pullAll()) {
+            return fail(QStringLiteral("no device attached, a pull is already running, or staging failed"));
+        }
+        // Asynchronous, like capture.pull.
+        return ok({ {QStringLiteral("started"), true},
+                    {QStringLiteral("paths"), QJsonArray::fromStringList(pullAllRoots())} });
     }
 
     return fail(QStringLiteral("unknown command: %1").arg(cmd));

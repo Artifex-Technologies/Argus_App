@@ -95,13 +95,18 @@ Rectangle {
             }
             Item { Layout.fillWidth: true }
             Button {
+                text: Chymaera.pulling ? qsTr("Pulling…") : qsTr("Pull all captures")
+                enabled: Chymaera.deviceConnected && !Chymaera.pulling
+                onClicked: Chymaera.pullAll()
+            }
+            Button {
                 text: qsTr("Pull NFC")
-                enabled: Chymaera.deviceConnected
+                enabled: Chymaera.deviceConnected && !Chymaera.pulling
                 onClicked: Chymaera.pullPath("/ext/nfc")
             }
             Button {
                 text: qsTr("Pull Sub-GHz")
-                enabled: Chymaera.deviceConnected
+                enabled: Chymaera.deviceConnected && !Chymaera.pulling
                 onClicked: Chymaera.pullPath("/ext/subghz")
             }
         }

@@ -43,6 +43,9 @@ Goal: use the desktop as external storage/compute so the Flipper isn't bottlenec
       downloads a device directory (via `utility()->downloadDirectory`) and ingests/parses
       captures. GUI buttons (Pull NFC / Pull Sub-GHz) + `qFlipper-cli chymaera pull <path>`
       + API `capture.pull`.
+- [x] **Pull everything** in one action (`Bridge::pullAll`, `capture.pullAll`, `chymaera
+      pull-all`): allowlisted capture folders, SHA-256 per file, repeat pulls de-duplicated,
+      unparsed files (pcap/csv/log) kept. Tested on a real device 2026-10-24.
 - [ ] Auto-pull on connect / background sync + a mirror view in the GUI (currently manual).
 
 ## Phase 3 — Analysis-tool bridges  🚧

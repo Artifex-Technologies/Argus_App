@@ -82,6 +82,8 @@ int ChymaeraCli::run(QCoreApplication &app, const QStringList &sub)
         return cmdWatch(app, rest);
     } else if(cmd == QStringLiteral("pull")) {
         return cmdPull(app, rest);
+    } else if(cmd == QStringLiteral("pull-all")) {
+        return cmdPull(app, rest, true);
     }
 
     printUsage();
@@ -98,7 +100,9 @@ void ChymaeraCli::printUsage()
           << "  parse <file>          Parse a Flipper file (.nfc/.sub/...) and print JSON\n"
           << "  import <file>         Parse and record a capture in the datastore\n"
           << "  watch [seconds]       Stream live device events from a connected Flipper\n"
-          << "  pull <remotePath>     Pull a device directory (e.g. /ext/nfc) into the datastore\n";
+          << "  pull <remotePath>     Pull a device directory (e.g. /ext/nfc) into the datastore\n"
+          << "  pull-all              Pull every capture folder (NFC, Sub-GHz, RFID, IR, iButton,\n"
+          << "                        Marauder pcaps/logs, Argus app logs); skips files already stored\n";
     out().flush();
 }
 
@@ -349,15 +353,15 @@ int ChymaeraCli::cmdWatch(QCoreApplication &app, const QStringList &args)
     return app.exec();
 }
 
-int ChymaeraCli::cmdPull(QCoreApplication &app, const QStringList &args)
+int ChymaeraCli::cmdPull(QCoreApplication &app, const QStringList &args, bool all)
 {
-    if(args.isEmpty()) {
+    if(!all && args.isEmpty()) {
         out() << "Usage: qFlipper-cli chymaera pull <remotePath>   (e.g. /ext/nfc)\n";
         out().flush();
         return 1;
     }
 
-    const QString remote = args.first();
+    const QString remote = all ? QStringLiteral("all capture folders") : args.first();
 
     ApplicationBackend backend;
     Bridge bridge;
@@ -378,12 +382,12 @@ int ChymaeraCli::cmdPull(QCoreApplication &app, const QStringList &args)
     });
 
     QObject::connect(&backend, &ApplicationBackend::backendStateChanged, &app,
-                     [&app, &backend, &bridge, &rc, &triggered, remote]() {
+                     [&app, &backend, &bridge, &rc, &triggered, remote, all]() {
         const auto state = backend.backendState();
         if(!triggered && state == ApplicationBackend::BackendState::Ready && backend.device()) {
             triggered = true;
             bridge.attachDevice(backend.device());
-            if(!bridge.pullPath(remote)) {
+            if(!(all ? bridge.pullAll() : bridge.pullPath(remote))) {
                 rc = 1;
                 app.quit();
             }

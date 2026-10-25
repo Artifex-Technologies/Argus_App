@@ -44,8 +44,15 @@ public:
     qint64 logEvent(Severity severity, Source source, const QString &message, const QString &detail = QString());
 
     // Record a capture/artifact (an NFC dump, a Sub-GHz file, a pulled file...).
+    // sha256 is the hex digest of the file as received (evidence integrity);
+    // localPath is where that copy is kept on this machine.
     qint64 addCapture(const QString &type, const QString &name, const QString &sourcePath,
-                      qint64 size, const QString &metaJson = QString());
+                      qint64 size, const QString &metaJson = QString(),
+                      const QString &sha256 = QString(), const QString &localPath = QString());
+
+    // True if a capture with this digest was already recorded from sourcePath,
+    // so a repeated pull does not store the same file twice.
+    bool hasCapture(const QString &sha256, const QString &sourcePath) const;
 
     // Read-back helpers used by the control API and CLI. Each element is a
     // QVariantMap keyed by column name.
