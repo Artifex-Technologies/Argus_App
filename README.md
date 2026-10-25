@@ -16,7 +16,17 @@ This is a work in progress. See the current design and status:
 - **[docs/ROADMAP.md](./docs/ROADMAP.md)** — the phased plan and what's done vs. planned.
 - **[docs/SARINA_API.md](./docs/SARINA_API.md)** — the local control API (Sarina) command reference.
 
-**Landed so far:** an operator **console** with a live event log; a SQLite **datastore** for sessions/events/captures; a **Wireshark exporter** (`.pcap`/`.pcapng`); **Flipper capture parsing** (`.nfc`, `.sub`); and the loopback **Sarina control API**. See the roadmap for what's next.
+**Landed so far:** an operator **console** with a live event log; a SQLite **datastore** for sessions/events/captures; a **Wireshark exporter** (`.pcap`/`.pcapng`); **Flipper capture parsing** (`.nfc`, `.sub`); the loopback **Sarina control API** (v1.1); a **live device stream** and **pull to datastore** (`/ext/nfc`, `/ext/subghz`), also headless through `qFlipper-cli chymaera watch|pull`; and a **warning before official firmware replaces a fork** (see below). See the roadmap for what's next.
+
+## Versions
+
+Argus_App versions read `ARG-<upstream qFlipper>r<N>`, the same scheme as [Argus_Firmware](https://github.com/Artifex-Technologies/Argus_Firmware) (`ARG-1.4.3r1`). The current one is **`ARG-1.3.3r1`**, based on qFlipper 1.3.3, which is still upstream's latest release. The upstream half is `UPSTREAM_VERSION` in [`qflipper_common.pri`](./qflipper_common.pri), bumped by hand when we merge a new upstream release (N restarts at 1). Our half comes from the nearest `ARG-<upstream>r*` git tag. Builds after a tag keep its name, with no `+N` suffix; the commit hash in the log tells them apart. An untagged tree builds as `ARG-1.3.3-dev`.
+
+## Using it with Argus firmware
+
+- **Firmware updates.** The app's Update/Install button installs **official** firmware from Flipper's update channels. When the connected Flipper runs a fork (its `firmware.origin.fork` is not `Official`, e.g. `Argus`), the confirmation dialog says the fork will be replaced. To install Argus firmware, use *Install from file* with an Argus `.tgz` update package, or flash from the firmware repo.
+- **Official Flipper apps.** qFlipper has no app catalog. Install apps from [lab.flipper.net](https://lab.flipper.net/apps) (Chrome/Edge, WebSerial) or the Flipper mobile app. They work on Argus firmware as long as it keeps upstream's app API version (88.2 today). Close Argus while installing, since it holds the serial port.
+- **Self-update.** The built-in application updater checks *upstream* qFlipper releases, so it would offer to replace Argus with stock qFlipper if upstream ships a newer one. There is no switch for it in the UI: build with `DEFINES+=DISABLE_APPLICATION_UPDATES`, or set `CheckApplicatonUpdates=false` (upstream's spelling) in `~/.config/Flipper Devices Inc/qFlipper.ini` on Linux.
 
 > Intended for authorized security engagements only — general-purpose capture, analysis, and reporting on systems you are permitted to test.
 
@@ -32,6 +42,8 @@ qFlipper is completely open source and based on [Qt](https://www.qt.io/) framewo
 <img alt="qFlipper" width="450" src="https://cdn.flipperzero.one/qflipper_logo_with_connected_flipper.png" />
 
 ## Download
+
+There are no prebuilt Argus_App downloads yet; build it from source (below). The link below is for stock qFlipper, which does not include the Argus additions.
 
 Download official qFlipper builds here: [update.flipperzero.one](https://update.flipperzero.one/)
 
@@ -80,6 +92,17 @@ Compile qFlipper by running:
 docker compose exec dev ./build_linux.sh
 ```
 
+#### Arch / CachyOS / Labyrinth OS (quickest path)
+```sh
+sudo pacman -S --needed qt6-base qt6-declarative qt6-svg qt6-5compat qt6-serialport qt6-tools libusb sqlite
+git clone --recursive https://github.com/Artifex-Technologies/Argus_App.git
+cd Argus_App && mkdir build && cd build
+qmake6 ../qFlipper.pro CONFIG+=release
+make -j$(nproc)
+./qFlipper-cli chymaera selftest   # should print SELF-TEST PASSED
+```
+This produces `build/qFlipper` (GUI) and `build/qFlipper-cli` without installing anything. After creating a new version tag, run `make qmake_all` before `make`, or the binaries keep the old version string. Details and test results are in [docs/LINUX_BUILD.md](./docs/LINUX_BUILD.md).
+
 #### Standalone build
 Build requirements:
 - Qt5 >= 5.15.0 or Qt6 >= 6.3.0
@@ -121,6 +144,34 @@ Resulting image can be found in: `build_mac/qFlipper.dmg`
 ## Run
 
 ### Linux
+
+Before the first run, let your user reach the Flipper. This installs udev rules for the Flipper's serial port, its DFU mode and the Wi-Fi devboard, and asks for your sudo password:
+```sh
+sh setup_rules.sh        # from the repo root; choose [I]nstall, then replug the Flipper
+```
+
+From a standalone build, run `build/qFlipper` directly. To get an **Argus** entry in the app menu that runs your build (rebuilds take effect at once, no sudo):
+```sh
+ln -sfn "$PWD/build/qFlipper"     ~/.local/bin/argus
+ln -sfn "$PWD/build/qFlipper-cli" ~/.local/bin/argus-cli
+install -Dm644 application/assets/icons/Argus-512.png ~/.local/share/icons/hicolor/512x512/apps/argus.png
+cat > ~/.local/share/applications/argus.desktop <<EOF2
+[Desktop Entry]
+Type=Application
+Name=Argus
+GenericName=Flipper Zero operator console
+Exec=$PWD/build/qFlipper
+Icon=argus
+StartupWMClass=qFlipper
+Categories=Development;
+Terminal=false
+EOF2
+```
+On Labyrinth OS, the Yggdrasil panel reads the app list only when it starts, so restart it once to see the new entry: `systemctl --user restart 'app-yggdrasil\x2dpanel@autostart.service'`.
+
+**Never run `qFlipper-cli` with no arguments while a Flipper is attached** unless you mean it: that performs a firmware update/repair (official firmware).
+
+From the AppImage (`build_linux.sh`):
 ```sh
 ./build/qFlipper-x86_64.AppImage
 ```
@@ -157,6 +208,7 @@ The (mostly) complete guide is located [here](./.github/ISSUE_TEMPLATE/bug_repor
 * Sometimes Flipper's serial port doesn't get recognised by the OS, which leads to firmware update errors. This is a firmware issue.
 * On some systems, there is noticeable flicker during opening, closing or resizing of the log area.
 * Release source archives are automatically generated by Github and are unsuitable for building as they do not contain submodules.
+* `qFlipper-cli --version` (and `--help`) sometimes crashes on exit: the startup update check is still running on a network thread when the program quits. It's harmless, and real commands are not affected.
 
 ## License and attribution
 

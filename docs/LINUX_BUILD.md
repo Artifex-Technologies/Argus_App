@@ -27,5 +27,12 @@ Produces `build/qFlipper` (GUI) and `build/qFlipper-cli`. The `--recursive` matt
 - `CustomDialog.qml:59:13: Binding loop detected for property "width"`
 - Not tested: a real device (screen streaming, RPC, backups), the console view and datastore in the GUI, the Wireshark export from a live session, the NFC/RF bridges.
 
+## Update 2026-10-24 (CachyOS / Labyrinth OS, Qt 6.12, with a Flipper attached)
+- Rebuilt at `ARG-1.3.3r1`; `chymaera selftest` still 11 of 11.
+- **Submodules copied from Windows are not checkouts.** If `3rdparty/nanopb` or `driver-tool/libwdi` exist but `git submodule status` shows a leading `-`, they are plain (CRLF) copies: move them aside and run `git submodule update --init --recursive`.
+- **Device access:** the Flipper shows up as `/dev/ttyACM0`, owned by `root:uucp`. Until `sh setup_rules.sh` installs the udev rules, the app cannot open it (a "No such file" error from `./setup_rules.sh` means you are not in the repo root; the script is not executable, so run it with `sh`).
+- **Menu entry:** see "Run" in the README for the user-local `argus` launcher. The Yggdrasil panel needs a restart to list a newly added app.
+- **Not yet checked:** the GUI against a live device (screen streaming, file manager, backups, the console view) and the custom-firmware warning dialog.
+
 ## Next
-A `PKGBUILD` (so it can be installed and updated like any package; the Labyrinth app store candidate list), and a udev rules check with `setup_rules.sh` on a machine with a Flipper.
+A `PKGBUILD` (so it can be installed and updated like any package; the Labyrinth app store candidate list). The udev rules are now confirmed working with a Flipper attached.
