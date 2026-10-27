@@ -49,6 +49,10 @@ GIT_TIMESTAMP = $$system("git log -1 --pretty=format:%ct","lines", HAS_TIMESTAMP
     GIT_TIMESTAMP = 0
 }
 
+# Argus is installed from source or by pacman: it never updates itself from upstream qFlipper's feed, whose AppImage it would
+# download and run (2026-10-27 audit)
+DEFINES += DISABLE_APPLICATION_UPDATES
+
 DEFINES += APP_NAME=\\\"$$NAME\\\" \
            APP_VERSION=\\\"$$GIT_VERSION\\\" \
            APP_COMMIT=\\\"$$GIT_COMMIT\\\" \
