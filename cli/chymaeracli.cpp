@@ -1,4 +1,5 @@
 #include "chymaeracli.h"
+#include "chymaera/sync/capturesync.h"
 
 #include <QDir>
 #include <QFile>
@@ -387,6 +388,12 @@ int ChymaeraCli::cmdPull(QCoreApplication &app, const QStringList &args, bool al
         if(!triggered && state == ApplicationBackend::BackendState::Ready && backend.device()) {
             triggered = true;
             bridge.attachDevice(backend.device());
+            if(!all && !Chymaera::CaptureSync::isCaptureRoot(remote)) {
+                out() << "Only the capture folders may be pulled: " << Chymaera::CaptureSync::defaultRoots().join(", ") << "\n";
+                rc = 1;
+                app.quit();
+                return;
+            }
             if(!(all ? bridge.pullAll() : bridge.pullPath(remote))) {
                 rc = 1;
                 app.quit();

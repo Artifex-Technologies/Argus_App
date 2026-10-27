@@ -69,6 +69,20 @@ QStringList CaptureSync::defaultRoots()
     };
 }
 
+bool CaptureSync::isCaptureRoot(const QString &remotePath)
+{
+    if(!remotePath.startsWith(QLatin1Char('/')) || remotePath.split(QLatin1Char('/')).contains(QStringLiteral(".."))) {
+        return false;
+    }
+    const QString clean = QDir::cleanPath(remotePath);
+    for(const QString &root : defaultRoots()) {
+        if(clean == root || clean.startsWith(root + QLatin1Char('/'))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool CaptureSync::isExcluded(const QByteArray &remotePath)
 {
     static const QList<QByteArray> excludedDirs = {

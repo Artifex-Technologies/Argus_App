@@ -38,6 +38,9 @@ public:
 
     // True for a path inside an excluded sub-tree ("assets", ".cache").
     static bool isExcluded(const QByteArray &remotePath);
+    // Whether a path may be pulled at all: one of defaultRoots() or below one, after normalising, with no "..". Everything
+    // else on the device (/int with its Bluetooth bonding keys, U2F and TOTP secrets) is never copied off it.
+    static bool isCaptureRoot(const QString &remotePath);
 
     void start();
 

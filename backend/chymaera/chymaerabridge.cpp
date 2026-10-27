@@ -340,6 +340,9 @@ bool Bridge::isPulling() const
 
 bool Bridge::pullPath(const QString &remotePath)
 {
+    if(!CaptureSync::isCaptureRoot(remotePath)) {
+        return false; // only the capture folders leave the device (see CaptureSync::isCaptureRoot)
+    }
     return startPull({remotePath}, remotePath);
 }
 
@@ -558,6 +561,10 @@ QJsonObject Bridge::handleApiRequest(const QJsonObject &request)
         const QString path = request.value(QStringLiteral("path")).toString();
         if(path.isEmpty()) {
             return fail(QStringLiteral("path is required"));
+        }
+        if(!CaptureSync::isCaptureRoot(path)) {
+            return fail(QStringLiteral("only the capture folders may be pulled: %1")
+                            .arg(CaptureSync::defaultRoots().join(QStringLiteral(", "))));
         }
         if(!pullPath(path)) {
             return fail(QStringLiteral("no device attached or staging failed"));
