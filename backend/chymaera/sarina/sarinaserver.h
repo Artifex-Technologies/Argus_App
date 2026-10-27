@@ -68,6 +68,7 @@ private:
     QHash<QTcpSocket *, QByteArray> m_buffers;
     RequestHandler m_handler;
     QString m_token;
+    QString m_tokenFile; // written when the token was generated here; removed on stop
 };
 
 }

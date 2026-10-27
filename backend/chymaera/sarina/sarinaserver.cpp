@@ -5,6 +5,10 @@
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QLoggingCategory>
+#include <QDir>
+#include <QFile>
+#include <QRandomGenerator>
+#include <QStandardPaths>
 
 Q_LOGGING_CATEGORY(LOG_SARINA, "SARINA")
 
@@ -38,6 +42,34 @@ bool SarinaServer::start(quint16 port)
         stop();
     }
 
+    // Loopback is not a boundary between accounts: every local user (and the sarina service account) can connect. With no
+    // token given, one is made here and written where only this account can read it ($XDG_RUNTIME_DIR/argus/token, 0600);
+    // Sarina's console clients read it from there.
+    if(m_token.isEmpty()) {
+        const QString runtime = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+        if(runtime.isEmpty()) {
+            emit errorOccured(QStringLiteral("No private runtime folder for the control token; not starting"));
+            return false;
+        }
+        const QString dir = runtime + QStringLiteral("/argus");
+        QDir().mkpath(dir);
+        QFile::setPermissions(dir, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        quint32 words[8];
+        QRandomGenerator::system()->fillRange(words);
+        const QString token = QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(words), sizeof(words)).toHex());
+        QFile f(dir + QStringLiteral("/token"));
+        f.remove();
+        if(!f.open(QIODevice::WriteOnly | QIODevice::NewOnly)
+           || !f.setPermissions(QFile::ReadOwner | QFile::WriteOwner)
+           || f.write(token.toLatin1()) != token.size()) {
+            emit errorOccured(QStringLiteral("Cannot write the control token to %1; not starting").arg(f.fileName()));
+            return false;
+        }
+        f.close();
+        m_token = token;
+        m_tokenFile = f.fileName();
+    }
+
     // Loopback only — never expose the control API on the network.
     if(!m_server->listen(QHostAddress::LocalHost, port)) {
         const auto msg = QStringLiteral("Cannot listen on 127.0.0.1:%1: %2")
@@ -67,6 +99,11 @@ void SarinaServer::stop()
 
     if(m_server->isListening()) {
         m_server->close();
+    }
+    if(!m_tokenFile.isEmpty()) {
+        QFile::remove(m_tokenFile);
+        m_tokenFile.clear();
+        m_token.clear();
     }
 
     emit listeningChanged();
@@ -155,8 +192,14 @@ void SarinaServer::processLine(QTcpSocket *socket, const QByteArray &line)
 
     const QJsonObject request = doc.object();
 
-    // Token check (when configured).
-    if(!m_token.isEmpty() && request.value(QStringLiteral("token")).toString() != m_token) {
+    // Token check: always set once listening; compared in constant time.
+    const QByteArray given = request.value(QStringLiteral("token")).toString().toUtf8();
+    const QByteArray want = m_token.toUtf8();
+    unsigned char diff = given.size() == want.size() ? 0 : 1;
+    for(qsizetype i = 0; i < want.size(); ++i) {
+        diff |= static_cast<unsigned char>(want[i] ^ (i < given.size() ? given[i] : 0));
+    }
+    if(m_token.isEmpty() || diff != 0) {
         sendObject(socket, {
             {QStringLiteral("ok"), false},
             {QStringLiteral("error"), QStringLiteral("unauthorized")}
