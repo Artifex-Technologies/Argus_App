@@ -21,6 +21,9 @@ namespace Chymaera {
  * roots that hold no files, and mirrors the full remote path locally
  * (<staging>/ext/nfc/x.nfc) so files from different roots never collide. */
 
+// Where a file named by the device goes in the staging folder; empty when the name would lead outside it.
+QString stagedPath(const QString &stagingDir, const QString &remotePath);
+
 class CaptureSync : public QObject
 {
     Q_OBJECT

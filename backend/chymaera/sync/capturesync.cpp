@@ -9,6 +9,30 @@
 #include "flipperzero/rpc/storagereadoperation.h"
 #include "flipperzero/utility/getfiletreeoperation.h"
 
+// Where a file from the device goes in the staging folder, or an empty string when its name would lead outside it (a "..",
+// a backslash or a NUL in a part of the name, or a path that cleans to somewhere else).
+QString Chymaera::stagedPath(const QString &stagingDir, const QString &remotePath)
+{
+    if(remotePath.contains(QChar(0)) || remotePath.contains(QLatin1Char('\\'))) {
+        return QString();
+    }
+    const auto parts = remotePath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    if(parts.isEmpty()) {
+        return QString();
+    }
+    for(const auto &part : parts) {
+        if(part == QLatin1String(".") || part == QLatin1String("..")) {
+            return QString();
+        }
+    }
+    const auto root = QDir::cleanPath(QDir(stagingDir).absolutePath());
+    const auto local = QDir::cleanPath(root + QLatin1Char('/') + parts.join(QLatin1Char('/')));
+    if(!local.startsWith(root + QLatin1Char('/'))) {
+        return QString();
+    }
+    return local;
+}
+
 using namespace Chymaera;
 using namespace Flipper;
 using namespace Zero;
@@ -146,7 +170,14 @@ void CaptureSync::readNextFile()
 
     const auto fileInfo = m_queue.takeFirst();
     const auto remotePath = QString::fromUtf8(fileInfo.absolutePath);
-    const auto localPath = QDir(m_stagingDir).filePath(remotePath.mid(1));
+    // the names come from the device: a hostile or spoofed one could send "../" to write anywhere in the home folder
+    const auto localPath = stagedPath(m_stagingDir, remotePath);
+    if(localPath.isEmpty()) {
+        ++m_failedCount;
+        emit fileFailed(remotePath, QStringLiteral("refused: the device sent a name that leads outside the staging folder"));
+        readNextFile();
+        return;
+    }
 
     if(!QDir().mkpath(QFileInfo(localPath).absolutePath())) {
         ++m_failedCount;
