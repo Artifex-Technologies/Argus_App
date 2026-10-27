@@ -142,6 +142,7 @@ Rectangle {
                         font.family: "Share Tech Mono"
                     }
                     Text {
+                        textFormat: Text.PlainText
                         text: (model.sourceName || "").toUpperCase()
                         color: Theme.color.lightorange3
                         font.pixelSize: 12
@@ -150,6 +151,8 @@ Rectangle {
                     }
                     Text {
                         Layout.fillWidth: true
+                        // device, file and radio text: shown as it is, never read as markup
+                        textFormat: Text.PlainText
                         text: model.message + (model.detail ? "  —  " + model.detail : "")
                         color: root.severityColor(model.severityName)
                         font.pixelSize: 12

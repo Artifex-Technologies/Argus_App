@@ -338,6 +338,11 @@ AbstractOverlay {
        onTriggered: installFromFile()
     }
 
+    // a firmware name can come from a file or the update feed: escaped before it goes into rich text
+    function escapeHtml(t) {
+        return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
     function updateButtonFunc() {
         const channelName = Preferences.updateChannel;
         const messageObj = deviceState.isRecoveryMode ? {
@@ -345,13 +350,13 @@ AbstractOverlay {
                 customText: qsTr("Repair"),
                 message : qsTr("Firmware <font color=\"%1\">%2</font><br/>will be installed")
                           .arg(releaseButton.linkColor)
-                          .arg(releaseButton.text)
+                          .arg(escapeHtml(releaseButton.text))
             } : {
                 title : qsTr("Update firmware?"),
                 customText: qsTr("Update"),
                 message: qsTr("New firmware <font color=\"%1\">%2</font><br/>will be installed")
                          .arg(releaseButton.linkColor)
-                         .arg(releaseButton.text) + customFirmwareWarning(),
+                         .arg(escapeHtml(releaseButton.text)) + customFirmwareWarning(),
             };
 
         const canUpdate = deviceInfo.storage.isExternalPresent ||
