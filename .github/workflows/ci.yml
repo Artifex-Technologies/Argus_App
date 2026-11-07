@@ -1,7 +1,9 @@
 name: 'CI'
 
+# Manual only (2026-11-07): this is Flipper's CI, written for Flipper's own build machines (self-hosted runners) and
+# images we do not have, so on our account every automatic run failed. Start it from Actions > Run workflow.
 on:
-  push:
+  workflow_dispatch:
 
 jobs:
   build_linux:
