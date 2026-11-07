@@ -66,7 +66,9 @@ Goal: let the assistant drive the app and query captured data, scriptably.
       over TCP, with a pluggable request handler.
 - [x] Commands: `ping`, `help`, `status`, `log.tail`, `log.add`, `session.start/end`,
       `capture.list`, `capture.import`.
-- [x] Auth: loopback binding + non-loopback peer rejection + optional shared token.
+- [x] Auth: loopback binding + non-loopback peer rejection + a token on every request
+      (always required since 2026-10-27; made and written to `$XDG_RUNTIME_DIR/argus/token`
+      when none is given).
 - [x] Documented in `docs/SARINA_API.md` and recorded in `CLAUDE.md` Cross-repo contracts.
 - [x] Headless CLI surface: `qFlipper-cli chymaera <serve|selftest|parse|import>` — runs
       without a GUI/display (WSL/SSH/CI friendly). `selftest` verifies the whole subsystem.

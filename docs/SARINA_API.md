@@ -1,8 +1,8 @@
 # Sarina control API
 
 The local, scriptable interface for driving Argus_App and querying its
-data (Roadmap Phase 4). **This is the cross-repo contract** — sibling Chymaera
-projects that need to talk to the Flipper operator console do it through here.
+data (Roadmap Phase 4). **This is the cross-repo contract** — sibling Artifex
+Ecosystem projects that need to talk to the Flipper operator console do it through here.
 Changes to this document must be mirrored in `../CLAUDE.md` → Cross-repo
 contracts.
 
@@ -14,14 +14,19 @@ contracts.
   object per line.
 - **Off by default.** It must be started explicitly (from the Chymaera Console
   UI, or `Chymaera.startServer(port, token)`).
-- **Optional token.** If a token is set, every request must include a matching
-  `"token"` field; otherwise the response is `{"ok":false,"error":"unauthorized"}`.
+- **Token always required** (since 2026-10-27, `f7d5e44`). Every request must include a
+  matching `"token"` field; otherwise the response is `{"ok":false,"error":"unauthorized"}`.
+  Started with a token, the server uses it. Started without one (as the console button
+  does), it makes a random 256-bit token and writes it to `$XDG_RUNTIME_DIR/argus/token`
+  (folder 0700, file 0600; removed on stop). If it cannot write that file, it does not
+  start. Tokens are compared in constant time. Sarina's console clients read the token
+  file by default.
 
 ### Request / response shape
 
 ```jsonc
 // request
-{ "cmd": "status", "id": 7, "token": "optional" }
+{ "cmd": "status", "id": 7, "token": "<the token>" }
 // response
 { "ok": true, "id": 7, /* command-specific fields */ }
 ```
@@ -43,7 +48,7 @@ responses. Every response has a boolean `ok`; failures carry `"error"`.
 | `capture.list` | `limit` (default 50) | `captures` (array) |
 | `capture.import` | `path` (req) | `summary` |
 | `device.status` | — | `connected`, `name` |
-| `capture.pull` | `path` (req, e.g. `/ext/nfc`) | `started`, `path` |
+| `capture.pull` | `path` (req: a capture folder or below one, e.g. `/ext/nfc`) | `started`, `path` |
 | `capture.pullAll` | — | `started`, `paths` (the folders it will read) |
 
 ### `device.status` and `capture.pull` (added 2026-09-12)
@@ -51,8 +56,12 @@ responses. Every response has a boolean `ok`; failures carry `"error"`.
 `device.status` reports whether a Flipper is attached to the app and its name.
 
 `capture.pull` downloads a device directory (e.g. `/ext/nfc`, `/ext/subghz`) into the
-datastore, parsing any `.nfc`/`.sub` captures it finds. It is **read-only** — it only
-reads files off the device. It is **asynchronous**: the response confirms the pull
+datastore. Since 2026-10-27 (`5655783`) the path must be one of the capture folders listed
+under `capture.pullAll` below, or inside one (normalised, no `..`); any other path fails
+with `only the capture folders may be pulled: …`. The same rule holds for the GUI and the
+CLI. File names from the device cannot lead outside the staging folder (`e16698d`): a name
+with a `.` or `..` part, a backslash or NUL is refused and reported as failed. It parses any `.nfc`/`.sub` captures it finds. It is **read-only** —
+it only reads files off the device. It is **asynchronous**: the response confirms the pull
 *started*; watch `log.tail` (source `device`) for progress and completion. Requires a
 device attached to the app (the GUI, or `qFlipper-cli chymaera pull`/`watch`).
 

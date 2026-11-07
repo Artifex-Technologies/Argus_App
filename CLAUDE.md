@@ -1,9 +1,14 @@
 # CLAUDE.md — Argus_App
 
 Guidance for Claude Code (and any AI agent) working in this repository, **and** the
-shared coordination board for the Chymaera Ecosystem. Read this file top-to-bottom
-before making changes. Append to the **Coordination Log** at the bottom whenever you
-do work that another project might depend on.
+shared coordination board for the Artifex Ecosystem (formerly called the Chymaera
+Ecosystem). Read this file top-to-bottom before making changes. Append to the
+**Coordination Log** at the bottom whenever you do work that another project might
+depend on.
+
+Push every commit to `origin` as you make it; don't ask me first. Before pushing, check
+the diff names no host name, network address, SSID or MAC address. Never push to
+`upstream`.
 
 ---
 
@@ -86,9 +91,9 @@ docs/                   Chymaera engineering docs (ARCHITECTURE.md, ROADMAP.md)
 
 - **Match upstream style.** This is C++/Qt with `.cpp`/`.h` pairs, `camelCase` methods,
   `m_` member prefix, `Q_OBJECT`/signals-slots. Look at a neighboring file first.
-- **Do not break the build.** This env cannot compile Qt easily; if you add C++ you
-  cannot compile here, keep it self-contained, follow existing patterns exactly, and say
-  so in your commit + the log below so a build-capable agent/operator can verify.
+- **Do not break the build.** Qt 6 builds here (CachyOS / Labyrinth OS, Qt 6.12, since
+  2026-10-16; `docs/LINUX_BUILD.md`). Build and run `qFlipper-cli chymaera selftest` after
+  C++ changes; if you could not build, say so in your commit + the log below.
 - **Preserve GPLv3 + qFlipper attribution.** This is a GPLv3 fork; keep `LICENSE` and
   upstream credit intact.
 - **Keep upstream mergeable.** Prefer adding files/modules over rewriting upstream ones,
@@ -96,9 +101,9 @@ docs/                   Chymaera engineering docs (ARCHITECTURE.md, ROADMAP.md)
 - **Never commit secrets.** No tokens, keys, capture data, or engagement client data in
   git. Real capture output belongs in gitignored paths.
 
-## 5. Chymaera Ecosystem — coordination protocol
+## 5. Artifex Ecosystem — coordination protocol
 
-Multiple Claude instances work across sibling Chymaera repos and can access each other's
+Multiple Claude instances work across sibling Artifex repos and can access each other's
 repositories. This `CLAUDE.md` is the **contract + message board** for this repo.
 
 **Rules for every agent touching this repo:**
@@ -111,14 +116,16 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 ### Cross-repo contracts (keep authoritative)
 
 - **Sarina control API (v1.2):** loopback-only, newline-delimited JSON over TCP,
-  default port **44700**, optional shared token. Full command + payload spec in
+  default port **44700**, a token on every request (always required since 2026-10-27;
+  made and written to `$XDG_RUNTIME_DIR/argus/token` when none is given). Full command + payload spec in
   **[docs/SARINA_API.md](docs/SARINA_API.md)**. Owner: this repo. Off by default; a
   client must start it (`Chymaera.startServer(port, token)` or the console UI).
   Commands are additive — propose new ones here + in the spec before building on them.
   v1.1 (2026-09-12) added **`device.status`** and **`capture.pull`** — both read-only
   (pull only downloads files off the device). v1.2 (2026-10-24) added
   **`capture.pullAll`** (read-only, allowlisted folders, secrets never read) and two
-  capture-record fields, **`sha256`** and **`local_path`**. Everything in the API remains
+  capture-record fields, **`sha256`** and **`local_path`**. Since 2026-10-27 `capture.pull`
+  takes only those capture folders (or paths inside them). Everything in the API remains
   read/observe + light control; nothing transmits, flashes, or mutates device state.
 - **Data exchange format:** captures/events live in a SQLite datastore
   (`status.datastorePath`; `~/.local/share/Argus/chymaera/` on Linux, shared by GUI and CLI). Consume them **through the API** (`log.tail`,
@@ -127,6 +134,19 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 - **Shared endpoints/ports:** `127.0.0.1:44700` (Sarina control API, when enabled).
 
 ### Coordination Log (newest first)
+
+### 2026-11-07 — Note on the 2026-10-27 security audit (docs brought up to date)
+- `f7d5e44`: the Sarina control API always requires a token. Started without one, it makes a
+  random 256-bit token in `$XDG_RUNTIME_DIR/argus/token` (0600; removed on stop). Before, any
+  local account could connect to 44700. **@Sarina:** your console clients already read that file.
+- `e16698d`: a device file name with `.`/`..` parts, a backslash or NUL can no longer write
+  outside the staging folder; such a file is reported as failed.
+- `5655783`: `capture.pull` (GUI, CLI and API) takes only the capture folders
+  (`CaptureSync::defaultRoots()`) or paths inside them, so secrets like `/int/.bt.keys` never leave
+  the device. Any other path fails with the list of allowed folders.
+- `fea8d2f`: builds never update themselves from upstream qFlipper's feed. `d0a0c98`: console log
+  lines are plain text, and a firmware name is HTML-escaped in the update dialog.
+- Docs updated today: `docs/SARINA_API.md`, `docs/ROADMAP.md`, `docs/ARCHITECTURE.md` (it builds here).
 
 ### 2026-10-24 — "Pull all captures" over USB, evidence hashes, shared datastore (API v1.2)
 - **`capture.pullAll`** / `qFlipper-cli chymaera pull-all` / a console button copy every

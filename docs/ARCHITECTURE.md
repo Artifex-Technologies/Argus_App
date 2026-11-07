@@ -90,6 +90,6 @@ Integration points touched (all additive):
 - `application/application.pro`, `cli/cli.pro` — `QT += sql` (backend now uses QtSql).
 - `application/qml.qrc` — the console component.
 
-Build note: this environment cannot compile Qt, so the subsystem has been written to
-match existing patterns but **needs a build pass on a Qt machine** to confirm. QtSql needs
-the SQLite driver plugin (ships with standard Qt; static builds must link it).
+Build note: built on CachyOS / Labyrinth OS with Qt 6.12 (2026-10-16, and on 2026-10-24
+with a Flipper attached; `qFlipper-cli chymaera selftest` 11/11). How: `docs/LINUX_BUILD.md`.
+QtSql needs the SQLite driver plugin (ships with standard Qt; static builds must link it).

@@ -11,7 +11,7 @@ Argus_App is a fork of the official [qFlipper](https://github.com/flipperdevices
 
 This is a work in progress. See the current design and status:
 
-- **[CLAUDE.md](./CLAUDE.md)** — project overview + the Chymaera Ecosystem coordination board (read this first if you're contributing).
+- **[CLAUDE.md](./CLAUDE.md)** — project overview + the Artifex Ecosystem coordination board (read this first if you're contributing).
 - **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)** — how the app is structured and where extensions attach.
 - **[docs/ROADMAP.md](./docs/ROADMAP.md)** — the phased plan and what's done vs. planned.
 - **[docs/SARINA_API.md](./docs/SARINA_API.md)** — the local control API (Sarina) command reference.
