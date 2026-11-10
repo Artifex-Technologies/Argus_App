@@ -50,6 +50,8 @@ responses. Every response has a boolean `ok`; failures carry `"error"`.
 | `device.status` | — | `connected`, `name` |
 | `capture.pull` | `path` (req: a capture folder or below one, e.g. `/ext/nfc`) | `started`, `path` |
 | `capture.pullAll` | — | `started`, `paths` (the folders it will read) |
+| `capture.library` | `query` (optional), `limit` (default 50, max 500) | `total`, `captures` (array, see below) |
+| `capture.explain` | `id` (req: 8+ hex digits of the capture's SHA-256) | `capture`, `explanation` |
 
 ### `device.status` and `capture.pull` (added 2026-09-12)
 
@@ -82,6 +84,47 @@ already stored, K failed` entry. Only one pull runs at a time; a second request 
 - **Nothing is dropped.** Files the Flipper-format parsers don't understand (Marauder
   `.pcap`, CSV logs, `.log`) are recorded unparsed with type `pcap`, `csv`, `log` or `file`.
 - Folders missing on the device are skipped silently. Folders that exist but are empty are fine.
+
+### `capture.library` and `capture.explain` (v1.3, added 2026-11-09)
+
+Read-only access to Argus's **capture library**: the Sub-GHz, infrared, NFC, 125 kHz RFID and
+iButton files Argus has seen on the card (its "Read from Flipper"), in the console's pulls and in
+every SD card snapshot, indexed by content (one entry per SHA-256). The library is built in the
+Argus tools window (Captures tab) or with `argus-tools capture index`; until then both commands
+fail with `the capture library has not been built yet (capture index)`.
+
+- **Captures are private and stay on this PC.** Both commands answer over the loopback API only,
+  and carry **header facts, never payloads**: no Sub-GHz key codes, RAW timings, IR signal data,
+  card blocks/pages or RFID/iButton data. Locations name the card path and the snapshot id (or
+  `card`), never a local file path.
+- `query` is every whitespace-separated term matching: a plain word matches names, paths,
+  summaries, protocols, signal names and tags; `kind:nfc`, `proto:princeton`, `freq:433.92`
+  (MHz, prefix), `uid:04a1b2` (spaces ignored) and `tag:garage` narrow by field. Empty lists all.
+- `capture.explain` adds a few plain sentences built from the same facts (for example whether a
+  Sub-GHz protocol is fixed- or rolling-code). Tags are set by the person in the Argus window,
+  not through the API.
+
+```jsonc
+// capture.library → captures[i], and capture.explain → capture
+{
+  "id": "4e58f7dfa03d0d94",          // first 16 hex digits of sha256; capture.explain takes 8+
+  "sha256": "4e58f7df…",
+  "kind": "subghz",                  // subghz | subghz_raw | infrared | nfc | rfid | ibutton
+  "name": "garage",
+  "summary": "Sub-GHz Princeton 24-bit key at 433.92 MHz",
+  "fields": {                        // by kind; all optional
+    "frequency_hz": 433920000, "frequency_mhz": "433.92", "preset": "AM650", "protocol": "Princeton",
+    "bits": 24, "te_us": 400, "code_type": "fixed",          // subghz (code_type: fixed | rolling)
+    // subghz_raw: raw_samples, raw_duration_ms
+    // infrared: signal_count, protocols {"NEC": 2, "raw": 1}, signals [{name, type, protocol?, frequency?}]
+    // nfc: device_type, uid, uid_bytes, atqa, sak, mifare_classic_type, blocks, blocks_unread, pages
+    // rfid: key_type, data_bytes   ibutton: protocol
+  },
+  "tags": ["garage"],
+  "locations": [ { "origin": "snapshot", "source": "snap-20261109-171500", "path": "/ext/subghz/garage.sub" },
+                 { "origin": "pull", "source": "card", "path": "/ext/subghz/garage.sub" } ]
+}
+```
 
 ### Event entry shape (`log.tail` / persisted events)
 
@@ -126,7 +169,9 @@ printf '{"cmd":"ping"}\n{"cmd":"status"}\n' | nc 127.0.0.1 44700
 ## Notes for sibling projects
 
 - Treat this as **read/observe + light control**. Destructive device operations
-  are intentionally not exposed here yet.
+  are intentionally not exposed here yet. Argus's app install, snapshot restore and rebuild
+  are deliberately **not** in the API: they write to the card or start Limbo guests, and stay
+  behind the person's confirmation in the Argus window.
 - The datastore behind it is SQLite at `status.datastorePath`; prefer going
   through this API rather than opening the DB file directly, so schema changes
   stay behind the contract.

@@ -10,8 +10,14 @@
 
 #include "chymaera/eventlog/chymaeraeventlog.h"
 
+Q_MOC_INCLUDE("argus/arguscontroller.h")
+
 namespace Flipper {
 class FlipperZero;
+}
+
+namespace Argus {
+class ArgusController;
 }
 
 namespace Chymaera {
@@ -41,6 +47,7 @@ class Bridge : public QObject
     Q_PROPERTY(bool deviceConnected READ isDeviceConnected NOTIFY deviceChanged)
     Q_PROPERTY(QString deviceName READ deviceName NOTIFY deviceChanged)
     Q_PROPERTY(bool pulling READ isPulling NOTIFY pullingChanged)
+    Q_PROPERTY(Argus::ArgusController* argus READ argus CONSTANT)
 
 public:
     explicit Bridge(QObject *parent = nullptr);
@@ -48,6 +55,8 @@ public:
 
     ChymaeraEventLog *eventLog() const;
     ChymaeraDatastore *datastore() const;
+    // Argus features (apps, snapshots, capture library), as Chymaera.argus in QML.
+    Argus::ArgusController *argus() const;
 
     bool isServerRunning() const;
     int serverPort() const;
@@ -121,6 +130,7 @@ private:
     ChymaeraDatastore *m_datastore;
     ChymaeraEventLog *m_eventLog;
     SarinaServer *m_server;
+    Argus::ArgusController *m_argus;
 
     QPointer<Flipper::FlipperZero> m_device;
     QPointer<CaptureSync> m_sync;

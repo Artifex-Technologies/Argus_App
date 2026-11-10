@@ -1,4 +1,5 @@
 #include "chymaeracli.h"
+#include "arguscli.h"
 #include "chymaera/sync/capturesync.h"
 
 #include <QDir>
@@ -86,6 +87,10 @@ int ChymaeraCli::run(QCoreApplication &app, const QStringList &sub)
         return cmdPull(app, rest);
     } else if(cmd == QStringLiteral("pull-all")) {
         return cmdPull(app, rest, true);
+    } else if(cmd == QStringLiteral("argus-test")) {
+        return ArgusCli::runTest(app, rest);
+    } else if(cmd == QStringLiteral("argus")) {
+        return ArgusCli::run(app, rest);
     }
 
     printUsage();
@@ -104,7 +109,9 @@ void ChymaeraCli::printUsage()
           << "  watch [seconds]       Stream live device events from a connected Flipper\n"
           << "  pull <remotePath>     Pull a device directory (e.g. /ext/nfc) into the datastore\n"
           << "  pull-all              Pull every capture folder (NFC, Sub-GHz, RFID, IR, iButton,\n"
-          << "                        Marauder pcaps/logs, Argus app logs); skips files already stored\n";
+          << "                        Marauder pcaps/logs, Argus app logs); skips files already stored\n"
+          << "  argus <command>       Argus features: checkup, snapshot, captures, api (see 'argus' alone)\n"
+          << "  argus-test [fixtures] Test the Argus features end to end against a fake SD card\n";
     out().flush();
 }
 

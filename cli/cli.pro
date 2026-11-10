@@ -49,11 +49,13 @@ INCLUDEPATH += \
 SOURCES += \
         main.cpp \
         cli.cpp \
-        chymaeracli.cpp
+        chymaeracli.cpp \
+        arguscli.cpp
 
 HEADERS += \
     cli.h \
-    chymaeracli.h
+    chymaeracli.h \
+    arguscli.h
 
 unix:!macx {
     target.path = $$PREFIX/bin

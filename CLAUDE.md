@@ -123,7 +123,7 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Cross-repo contracts (keep authoritative)
 
-- **Sarina control API (v1.2):** loopback-only, newline-delimited JSON over TCP,
+- **Sarina control API (v1.3):** loopback-only, newline-delimited JSON over TCP,
   default port **44700**, a token on every request (always required since 2026-10-27;
   made and written to `$XDG_RUNTIME_DIR/argus/token` when none is given). Full command + payload spec in
   **[docs/SARINA_API.md](docs/SARINA_API.md)**. Owner: this repo. Off by default; a
@@ -133,8 +133,14 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
   (pull only downloads files off the device). v1.2 (2026-10-24) added
   **`capture.pullAll`** (read-only, allowlisted folders, secrets never read) and two
   capture-record fields, **`sha256`** and **`local_path`**. Since 2026-10-27 `capture.pull`
-  takes only those capture folders (or paths inside them). Everything in the API remains
+  takes only those capture folders (or paths inside them). v1.3 (2026-11-09) added
+  **`capture.library`** and **`capture.explain`**: read-only views of Argus's capture library
+  (header facts, tags, where seen; never payloads or local paths). Everything in the API remains
   read/observe + light control; nothing transmits, flashes, or mutates device state.
+- **argus-tools CLI (JSON):** `argus-tools/` (Rust) is the logic behind Argus's apps, snapshots,
+  capture library and Limbo rebuilds; one JSON object per command on stdout. Its data lives in
+  `~/.local/share/argus/` (`snapshots/`, `captures/`, `apps/`). Owner: this repo. Not a contract
+  for other repos yet: use the Sarina API.
 - **Data exchange format:** captures/events live in a SQLite datastore
   (`status.datastorePath`; `~/.local/share/Argus/chymaera/` on Linux, shared by GUI and CLI). Consume them **through the API** (`log.tail`,
   `capture.list`), not by opening the DB file, so schema changes stay behind the
@@ -142,6 +148,38 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 - **Shared endpoints/ports:** `127.0.0.1:44700` (Sarina control API, when enabled).
 
 ### Coordination Log (newest first)
+
+### 2026-11-09 — Argus tools: app extractor, check-up, Limbo rebuild, SD snapshots, capture library (API v1.3)
+- New **`argus-tools/`** Rust crate (library + JSON CLI, run through QProcess) and
+  **`backend/argus/`** (device side + `ArgusController`, `Chymaera.argus` in QML), a new window
+  `ArgusToolsWindow.qml` opened by an **ARGUS** button next to LOGS. Hooks into upstream files:
+  that button block in `MainWindow.qml`, one line in `qml.qrc`, two in `cli/cli.pro`.
+- **Apps:** opens .tgz/.zip/.tar/`resources.ths`/.fap as data (own heatshrink decoder), lists
+  each FAP's manifest and its compatibility with the device's API read from `devinfo`
+  (`firmware.api.major/minor`), installs ticked apps to `/ext/apps/<category>/` and asks before
+  overwriting. **Check-up** reads `/ext/apps` and offers compatible copies from a package.
+- **Compatibility = the loader's rule** (major equal, minor not compared, target 7) **plus the
+  exported-symbol table of API 88.2** (`argus-tools/data/`, from `targets/f7/api_symbols.csv`).
+  **@Argus_Firmware:** when the API version or the exported symbols change, regenerate it with
+  `sh argus-tools/data/gen_api_symbols.sh <csv>`. Also a finding for you: the loader reads the
+  whole `.fapmeta` section into the 85-byte manifest struct
+  (`flipper_application_process_manifest_section` reads `size`, not `sizeof`), so a FAP with a
+  larger section overflows firmware memory. Argus refuses such files; the firmware should cap it.
+- **Rebuild:** ufbt in two disposable Limbo validation runs over `agent.sock` (fetch with
+  network, build without). Profiles, image script and the root steps:
+  `argus-tools/limbo/README.md`. **@Limbo:** the .fap comes back through the run's stdout,
+  because runs have no exchange outbox; a run outbox and a per-profile bundle cap (40 KiB today)
+  would remove the two limits described there. Nothing in Limbo was changed.
+- **Snapshots** in `~/.local/share/argus/snapshots` (content-addressed, 0700/0600; MD5 over RPC
+  avoids re-downloading unchanged files), diff, restore one file/folder/all with a confirmation
+  listing every overwrite. **Capture library** + API v1.3 `capture.library`/`capture.explain`.
+- **@Sarina:** two new read-only commands (spec in `docs/SARINA_API.md`); additive.
+- Tests: `cargo test` in `argus-tools/` (50 + proptest + a 200k-iteration mutation fuzz),
+  `qFlipper-cli chymaera argus-test` (26 checks against a fake SD card), and an offscreen UI
+  check (`ARGUS_QML_SMOKE=<package> QT_QPA_PLATFORM=offscreen qFlipper`). **Not tested on a
+  real Flipper** (no device here): RPC read/write/MD5/devinfo, and a real Limbo run.
+- **@CI/release:** the backend's make runs `cargo build --release` in `argus-tools/` when cargo
+  exists (skipped otherwise). A release tarball should ship `argus-tools` next to `qFlipper`.
 
 ### 2026-11-09 — First public release, Linux CI, Docker build fixed
 - Release **`ARG-1.3.3r2`** on GitHub with a Linux x86_64 tarball (Arch Qt 6), built by

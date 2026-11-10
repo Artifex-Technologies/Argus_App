@@ -274,6 +274,15 @@ Item {
             }
         }
 
+        // Argus: app extractor, check-up, rebuild, snapshots, capture library (ArgusToolsWindow.qml)
+        Button {
+            text: qsTr("ARGUS")
+            Layout.preferredWidth: 110
+            Layout.fillHeight: true
+            onClicked: { argusTools.show(); argusTools.raise(); argusTools.requestActivate(); }
+            ArgusToolsWindow { id: argusTools }
+        }
+
         StatusBar {
             id: statusBar
             Layout.fillWidth: true

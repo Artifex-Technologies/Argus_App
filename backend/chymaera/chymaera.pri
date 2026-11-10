@@ -26,3 +26,6 @@ HEADERS += \
     $$PWD/exporters/flipperfileformat.h \
     $$PWD/sarina/sarinaserver.h \
     $$PWD/sync/capturesync.h
+
+# Argus features (app extraction, snapshots, capture library); see backend/argus/argus.pri.
+include(../argus/argus.pri)

@@ -43,17 +43,20 @@ fn device_md5(card: &Path, p: &str) -> String {
 fn take(snaps: &Snapshots, card: &Path, label: &str, now: u64) -> (snapshot::Snapshot, usize) {
     let mut listing = list_card(card);
     let plan = snapshot::plan(snaps, &listing, None).unwrap();
+    let mut confirmed = std::collections::BTreeSet::new();
     for f in &mut listing.files {
-        if plan.verify_md5.contains(&f.path) {
-            f.md5 = Some(device_md5(card, &f.path));
+        if let Some(v) = plan.verify_md5.iter().find(|v| v.path == f.path) {
+            let md5 = device_md5(card, &f.path);
+            if md5 == v.md5 {
+                confirmed.insert(f.path.clone());
+            }
+            f.md5 = Some(md5);
         }
     }
     let staging = tempfile::tempdir().unwrap();
     let mut downloaded = 0;
     for f in &listing.files {
-        let base = plan.verify_md5.contains(&f.path)
-            && snaps.latest().unwrap().unwrap().files.iter().any(|r| r.path == f.path && Some(&r.md5) == f.md5.as_ref());
-        if !base {
+        if !confirmed.contains(&f.path) {
             card_write(staging.path(), &f.path, &std::fs::read(card.join(&f.path[1..])).unwrap());
             downloaded += 1;
         }

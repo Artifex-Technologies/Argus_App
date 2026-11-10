@@ -83,6 +83,7 @@
         <file>assets/gfx/images/success.svg</file>
         <file>components/DeveloperActions.qml</file>
         <file>components/ChymaeraConsole.qml</file>
+        <file>components/ArgusToolsWindow.qml</file>
         <file>assets/gfx/images/error-access.svg</file>
         <file>assets/gfx/images/error-client.svg</file>
         <file>assets/gfx/images/error-cross-eyes.svg</file>

@@ -211,11 +211,19 @@ pub fn summary(s: &Snapshot) -> Summary {
     }
 }
 
+/// A file the device can confirm unchanged: if its MD5 on the card equals `md5` (the previous
+/// snapshot's), it need not be downloaded.
+#[derive(Debug, Clone, Serialize)]
+pub struct Verify {
+    pub path: String,
+    pub md5: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Plan {
     pub base: Option<String>,
     /// Ask the device for these files' MD5; a match means no download.
-    pub verify_md5: Vec<String>,
+    pub verify_md5: Vec<Verify>,
     /// Download these.
     pub download: Vec<String>,
     /// Listed paths Argus will not use (not under the root, or not a valid device path).
@@ -240,7 +248,9 @@ pub fn plan(snaps: &Snapshots, listing: &Listing, base: Option<&str>) -> Result<
             continue;
         }
         match known.get(f.path.as_str()) {
-            Some(rec) if rec.size == f.size && snaps.store.has(&rec.sha256) => p.verify_md5.push(f.path.clone()),
+            Some(rec) if rec.size == f.size && snaps.store.has(&rec.sha256) => {
+                p.verify_md5.push(Verify { path: f.path.clone(), md5: rec.md5.clone() })
+            }
             _ => p.download.push(f.path.clone()),
         }
     }

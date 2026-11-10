@@ -18,6 +18,7 @@
 #include "chymaera/sarina/sarinaserver.h"
 #include "chymaera/exporters/flipperfileformat.h"
 #include "chymaera/sync/capturesync.h"
+#include "argus/arguscontroller.h"
 
 #include "flipperzero/flipperzero.h"
 #include "flipperzero/devicestate.h"
@@ -31,9 +32,11 @@ Bridge::Bridge(QObject *parent):
     QObject(parent),
     m_datastore(new ChymaeraDatastore(this)),
     m_eventLog(new ChymaeraEventLog(this)),
-    m_server(new SarinaServer(this))
+    m_server(new SarinaServer(this)),
+    m_argus(new Argus::ArgusController(this))
 {
     m_eventLog->setDatastore(m_datastore);
+    qRegisterMetaType<Argus::ArgusController*>();
 
     if(m_datastore->open(defaultDatastorePath())) {
         emit datastoreChanged();
@@ -65,6 +68,11 @@ ChymaeraEventLog *Bridge::eventLog() const
 ChymaeraDatastore *Bridge::datastore() const
 {
     return m_datastore;
+}
+
+Argus::ArgusController *Bridge::argus() const
+{
+    return m_argus;
 }
 
 bool Bridge::isServerRunning() const
@@ -314,6 +322,8 @@ void Bridge::attachDevice(Flipper::FlipperZero *device)
         });
     }
 
+    m_argus->attachDevice(m_device);
+
     m_eventLog->append(Severity::Notice, Source::Device,
                        QStringLiteral("Device attached: %1").arg(deviceName()));
     emit deviceChanged();
@@ -328,6 +338,9 @@ void Bridge::detachDevice()
 
     if(!m_device.isNull()) {
         m_eventLog->append(Severity::Notice, Source::Device, QStringLiteral("Device detached"));
+    }
+    if(!m_device.isNull()) {
+        m_argus->detachDevice();
     }
     m_device = nullptr;
     emit deviceChanged();
@@ -494,7 +507,8 @@ QJsonObject Bridge::handleApiRequest(const QJsonObject &request)
             QStringLiteral("session.start"), QStringLiteral("session.end"),
             QStringLiteral("capture.list"), QStringLiteral("capture.import"),
             QStringLiteral("device.status"), QStringLiteral("capture.pull"),
-            QStringLiteral("capture.pullAll")
+            QStringLiteral("capture.pullAll"),
+            QStringLiteral("capture.library"), QStringLiteral("capture.explain")
         };
         return ok({ {QStringLiteral("commands"), cmds} });
 
@@ -579,6 +593,26 @@ QJsonObject Bridge::handleApiRequest(const QJsonObject &request)
         // Asynchronous, like capture.pull.
         return ok({ {QStringLiteral("started"), true},
                     {QStringLiteral("paths"), QJsonArray::fromStringList(pullAllRoots())} });
+
+    } else if(cmd == QStringLiteral("capture.library")) {
+        // v1.3: the capture library (header facts, tags, where seen); read-only, stays on this PC
+        auto r = m_argus->apiCaptureLibrary(request.value(QStringLiteral("query")).toString(),
+                                            request.value(QStringLiteral("limit")).toInt(50));
+        if(!r.value(QStringLiteral("ok")).toBool()) {
+            return fail(r.value(QStringLiteral("error")).toObject().value(QStringLiteral("message")).toString());
+        }
+        return r;
+
+    } else if(cmd == QStringLiteral("capture.explain")) {
+        const QString id = request.value(QStringLiteral("id")).toString();
+        if(id.isEmpty()) {
+            return fail(QStringLiteral("id is required"));
+        }
+        auto r = m_argus->apiCaptureExplain(id);
+        if(!r.value(QStringLiteral("ok")).toBool()) {
+            return fail(r.value(QStringLiteral("error")).toObject().value(QStringLiteral("message")).toString());
+        }
+        return r;
     }
 
     return fail(QStringLiteral("unknown command: %1").arg(cmd));
