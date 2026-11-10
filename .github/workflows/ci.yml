@@ -2,47 +2,11 @@ name: 'CI'
 
 # Manual only (2026-11-07): this is Flipper's CI, written for Flipper's own build machines (self-hosted runners) and
 # images we do not have, so on our account every automatic run failed. Start it from Actions > Run workflow.
+# Its Docker Linux job is gone (2026-11-09): the image's openSUSE repo key returns 404. Linux builds run in linux.yml.
 on:
   workflow_dispatch:
 
 jobs:
-  build_linux:
-    runs-on: ubuntu-latest
-    steps:
-      - name: 'Wipe workspace'
-        run: find ./ -mount -maxdepth 1 -exec rm -rf {} \;
-
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-          fetch-depth: 0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          push: false
-          context: docker
-          tags: qflipper-build:latest
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build application in docker
-        run: docker run --rm --privileged -v $(pwd):/project qflipper-build:latest /project/build_linux.sh
-
-      - name: Publish application
-        uses: actions/upload-artifact@v4
-        with:
-          name: qFlipper-x86_64.AppImage
-          path: |
-                ./build/qFlipper-x86_64.AppImage
-          if-no-files-found: error
-          retention-days: 1
-
   build_mac:
     runs-on: [self-hosted, ARM64, macOS, qFlipper]
     env:
@@ -97,7 +61,7 @@ jobs:
 
   upload:
     name: Upload apps to storage
-    needs: [build_windows, build_mac, build_linux]
+    needs: [build_windows, build_mac]
     runs-on: ubuntu-latest
     steps:
 
@@ -125,9 +89,6 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: qFlipper-x86_64.AppImage
-      - uses: actions/download-artifact@v4
-        with:
           name: qFlipperSetup-64bit.exe
       - uses: actions/download-artifact@v4
         with:
@@ -135,7 +96,6 @@ jobs:
 
       - name: Rename app
         run: |
-            mv qFlipper-x86_64.AppImage ./artifacts/qFlipper-x86_64-${SUFFIX}.AppImage
             mv qFlipperSetup-64bit.exe ./artifacts/qFlipperSetup-64bit-${SUFFIX}.exe
             mv qFlipper-64bit.zip ./artifacts/qFlipper-64bit-${SUFFIX}.zip
             mv qflipper.dmg ./artifacts/qFlipper-${SUFFIX}.dmg

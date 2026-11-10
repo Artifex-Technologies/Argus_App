@@ -1,0 +1,54 @@
+name: 'Linux build'
+
+# Builds Argus_App on GitHub's own runners the docs/LINUX_BUILD.md way: an Arch Linux container,
+# Qt 6 from the distro, qmake6 + make. Runs the subsystem self-test and keeps a relocatable
+# tarball (.github/scripts/package_linux.sh). Upstream's ci.yml needs Flipper's runners and
+# stays manual-only.
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'ARG-*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container: archlinux:base-devel
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git qt6-base qt6-declarative qt6-svg qt6-5compat \
+            qt6-serialport qt6-tools libusb sqlite zlib
+
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0, pinned by commit
+        with:
+          # The version string comes from the nearest ARG-<upstream>r* tag, so tags and history are needed.
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build, self-test and package
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          .github/scripts/package_linux.sh build-release
+
+      - name: Upload the package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2, pinned by commit
+        with:
+          name: argus-app-linux-x86_64
+          path: |
+            build-release/argus-app-*-linux-x86_64.tar.gz
+            build-release/argus-app-*-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
