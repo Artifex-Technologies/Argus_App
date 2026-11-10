@@ -1,0 +1,44 @@
+[package]
+name = "argus-tools-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# cargo-fuzz targets (needs a nightly toolchain and `cargo install cargo-fuzz`):
+#   cd argus-tools/fuzz && cargo +nightly fuzz run fap_inspect
+# The same entry points are exercised on stable by ../tests/fuzz.rs (proptest + a mutation loop).
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+argus-tools = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fap_inspect"
+path = "fuzz_targets/fap_inspect.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "package_scan"
+path = "fuzz_targets/package_scan.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "heatshrink"
+path = "fuzz_targets/heatshrink.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "capture_file"
+path = "fuzz_targets/capture_file.rs"
+test = false
+doc = false
