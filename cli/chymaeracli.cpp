@@ -12,6 +12,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QElapsedTimer>
+#include <QUuid>
 #include <QCoreApplication>
 
 #include "chymaera/chymaerabridge.h"
@@ -198,7 +199,10 @@ int ChymaeraCli::cmdSelfTest()
     // --- Sarina control API round-trip (ping -> pong) ---
     {
         Bridge bridge;
-        bool started = bridge.startServer(0); // ephemeral port
+        // The server always wants a token. Give it one of our own: started without one it would
+        // make one and write it to $XDG_RUNTIME_DIR/argus/token, and the ping below would fail.
+        const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        bool started = bridge.startServer(0, token); // ephemeral port
         check(QStringLiteral("control API listen"), started, QString(), failures);
 
         if(started) {
@@ -213,7 +217,10 @@ int ChymaeraCli::cmdSelfTest()
             while(timer.elapsed() < 3000) {
                 QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
                 if(!sent && sock.state() == QAbstractSocket::ConnectedState) {
-                    sock.write("{\"cmd\":\"ping\"}\n");
+                    QJsonObject ping;
+                    ping.insert(QStringLiteral("cmd"), QStringLiteral("ping"));
+                    ping.insert(QStringLiteral("token"), token);
+                    sock.write(QJsonDocument(ping).toJson(QJsonDocument::Compact) + "\n");
                     sock.flush();
                     sent = true;
                 }
