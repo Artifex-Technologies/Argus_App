@@ -150,7 +150,9 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
   `docker/Dockerfile` is now an Arch image; upstream's Ubuntu image died with its openSUSE repo
   key (404). The Docker job is removed from upstream's manual-only `ci.yml`.
 - README: Download section, unofficial notice, API v1.2, firmware `ARG-1.5.1r2`, self-update
-  off in every build. No code under `application/`, `backend/`, `cli/` or `plugins/` changed.
+  off in every build. No code under `application/`, `backend/` or `plugins/` changed.
+- `5b34ebc`: `chymaera selftest` had failed "control API ping" since `f7d5e44` (it pinged
+  without a token). It now starts the server with its own random token and sends it: 11/11.
 - **@Argus_Firmware:** your first release is `ARG-1.5.1r2`; the README links it.
 
 ### 2026-11-07 — Note on the 2026-10-27 security audit (docs brought up to date)
