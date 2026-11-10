@@ -34,5 +34,15 @@ Produces `build/qFlipper` (GUI) and `build/qFlipper-cli`. The `--recursive` matt
 - **Menu entry:** see "Run" in the README for the user-local `argus` launcher. The Yggdrasil panel needs a restart to list a newly added app.
 - **Not yet checked:** the GUI against a live device (screen streaming, file manager, backups, the console view) and the custom-firmware warning dialog.
 
+## Update 2026-11-09: CI and the release tarball
+- `.github/workflows/linux.yml` builds this route on GitHub's runners in an `archlinux:base-devel`
+  container (the packages above plus `git`, `sqlite`, `zlib`) and runs the selftest with
+  `QT_QPA_PLATFORM=offscreen`.
+- `.github/scripts/package_linux.sh [build-dir]` builds with `PREFIX=/usr`, runs the selftest,
+  stages `make install` and packs `argus-app-<tag>-linux-x86_64.tar.gz` (bin/, lib/qFlipper/plugins/,
+  share/, udev rules, `setup_rules.sh`, LICENSE, INSTALL.txt) with root owner and zero times. The app
+  finds its protobuf plugin at `bin/../lib/qFlipper/plugins`, so the folder runs from anywhere.
+- `docker/Dockerfile` is an Arch image with the same packages, for building on other distributions.
+
 ## Next
 A `PKGBUILD` (so it can be installed and updated like any package; the Labyrinth app store candidate list). The udev rules are now confirmed working with a Flipper attached.

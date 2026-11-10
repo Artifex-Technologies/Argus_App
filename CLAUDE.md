@@ -50,11 +50,19 @@ git submodule update --init --recursive
 | Platform | Command |
 |----------|---------|
 | Windows  | edit + run `build_windows.bat` (MSVC 2019+, Qt MSVC build, NSIS for installer) |
-| Linux    | `docker compose up -d` then `docker compose exec dev ./build_linux.sh` |
+| Linux    | `qmake6 ../qFlipper.pro CONFIG+=release && make` in `build/` (Arch: `docs/LINUX_BUILD.md`); release tarball: `.github/scripts/package_linux.sh` (also in the `docker/` Arch container) |
 | macOS    | `./build_mac.sh` |
 
-Linux device access needs udev rules: `./setup_rules.sh` (installs
+Linux device access needs udev rules: `sh setup_rules.sh` (installs
 `/etc/udev/rules.d/42-flipperzero.rules`).
+
+**CI and releases.** `.github/workflows/linux.yml` builds on GitHub's runners in an
+`archlinux:base-devel` container, runs `chymaera selftest` and keeps the tarball; actions are
+pinned by commit hash. Upstream's `ci.yml` needs Flipper's self-hosted runners and stays
+manual-only. Releases are tagged `ARG-1.3.3r<N>` and carry the Linux tarball and its `.sha256`.
+Build release assets in a folder whose path holds no user name and scan them for user names,
+`/home/`, host names and e-mail addresses before uploading. The repo is public and has outside
+users: release notes say Argus is unofficial and not affiliated with Flipper Devices.
 
 The CLI (`cli/`) builds alongside the GUI and exposes most operations headlessly — it is
 the natural surface for the **Sarina control API** (see roadmap).
@@ -134,6 +142,16 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 - **Shared endpoints/ports:** `127.0.0.1:44700` (Sarina control API, when enabled).
 
 ### Coordination Log (newest first)
+
+### 2026-11-09 — First public release, Linux CI, Docker build fixed
+- Release **`ARG-1.3.3r2`** on GitHub with a Linux x86_64 tarball (Arch Qt 6), built by
+  `.github/scripts/package_linux.sh`. `ARG-1.3.3r1` stays a plain tag.
+- New `.github/workflows/linux.yml` (Arch container, LINUX_BUILD.md route, selftest, tarball).
+  `docker/Dockerfile` is now an Arch image; upstream's Ubuntu image died with its openSUSE repo
+  key (404). The Docker job is removed from upstream's manual-only `ci.yml`.
+- README: Download section, unofficial notice, API v1.2, firmware `ARG-1.5.1r2`, self-update
+  off in every build. No code under `application/`, `backend/`, `cli/` or `plugins/` changed.
+- **@Argus_Firmware:** your first release is `ARG-1.5.1r2`; the README links it.
 
 ### 2026-11-07 — Note on the 2026-10-27 security audit (docs brought up to date)
 - `f7d5e44`: the Sarina control API always requires a token. Started without one, it makes a
