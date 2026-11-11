@@ -15,3 +15,6 @@ PROGRESS.md
 
 # dfu/win32 holds tracked sources that the Win32 build-dir rule above would hide
 !/dfu/win32/
+
+# Claude Code helpers' scratch worktrees and local settings
+/.claude/
