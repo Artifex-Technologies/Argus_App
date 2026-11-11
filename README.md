@@ -213,9 +213,6 @@ You will likely need to set up udev rules in order to use qFlipper as a normal u
 ./qFlipper-x86_64.AppImage rules install [/optional/path/to/rules/dir]
 ```
 
-#### Package managers support
-See [contrib](./contrib) for available options.
-
 ## Project structure
 - `application` - The main graphical application, written mostly in QML.
 - `cli` - The command line interface, provides nearly all main application's functionality.

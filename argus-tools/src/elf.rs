@@ -9,7 +9,6 @@ const MAX_SYMBOLS: usize = 100_000;
 const MAX_NAME: usize = 256;
 
 pub const SHT_SYMTAB: u32 = 2;
-pub const SHT_STRTAB: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct Section {

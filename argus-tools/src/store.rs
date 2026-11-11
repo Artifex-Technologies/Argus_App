@@ -2,7 +2,7 @@
 //! Layout: `<root>/objects/<first 2 hex>/<remaining 62 hex>`. Folders are 0700 and files 0600:
 //! an SD card holds secrets (U2F keys, saved Wi-Fi), so its snapshots must not be world-readable.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -35,17 +35,6 @@ pub fn mkdir_private(p: &Path) -> Result<()> {
         fs::set_permissions(p, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
-}
-
-pub fn create_private(p: &Path) -> io::Result<File> {
-    let mut o = OpenOptions::new();
-    o.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o600);
-    }
-    o.open(p)
 }
 
 /// Write `data` to `path` through a temporary file and a rename, so readers never see half a file.

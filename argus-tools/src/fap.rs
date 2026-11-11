@@ -26,8 +26,6 @@ pub const MANIFEST_MAGIC: u32 = 0x5247_4448;
 pub const MANIFEST_VERSION: u32 = 1;
 pub const MANIFEST_V1_SIZE: usize = 85;
 pub const SECTION: &str = ".fapmeta";
-/// EM_ARM
-pub const MACHINE_ARM: u16 = 40;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Manifest {
