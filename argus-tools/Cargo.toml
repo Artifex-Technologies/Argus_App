@@ -6,6 +6,9 @@ license = "GPL-3.0-only"
 description = "Non-UI logic for Argus_App: firmware package app extraction, FAP manifests and API compatibility, SD card snapshots, capture library, Limbo rebuilds"
 publish = false
 
+[workspace]
+members = [".", "crates/flipper-rpc", "crates/flipper-fake", "crates/argus-cli"]
+
 [lib]
 name = "argus_tools"
 path = "src/lib.rs"

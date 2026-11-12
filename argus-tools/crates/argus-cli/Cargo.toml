@@ -1,0 +1,18 @@
+[package]
+name = "argus-cli"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "The Rust port of qFlipper-cli for Argus: talks to a Flipper Zero over its RPC protocol, one JSON object per command"
+publish = false
+
+[[bin]]
+name = "argus-cli"
+path = "src/main.rs"
+
+[dependencies]
+flipper-rpc = { path = "../flipper-rpc" }
+serde_json = "1"
+
+[dev-dependencies]
+flipper-fake = { path = "../flipper-fake" }

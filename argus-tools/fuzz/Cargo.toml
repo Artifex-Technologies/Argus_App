@@ -15,6 +15,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 tempfile = "3"
 argus-tools = { path = ".." }
+flipper-rpc = { path = "../crates/flipper-rpc" }
 
 [workspace]
 members = ["."]
@@ -40,5 +41,11 @@ doc = false
 [[bin]]
 name = "capture_file"
 path = "fuzz_targets/capture_file.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rpc_frames"
+path = "fuzz_targets/rpc_frames.rs"
 test = false
 doc = false

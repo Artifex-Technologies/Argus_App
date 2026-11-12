@@ -1,0 +1,15 @@
+[package]
+name = "flipper-fake"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "A scripted fake Flipper Zero speaking the serial CLI handshake and protobuf RPC, for testing Argus without a device"
+publish = false
+
+[dependencies]
+flipper-rpc = { path = "../flipper-rpc" }
+prost = "0.14"
+
+[[bin]]
+name = "flipper-fake"
+path = "src/main.rs"

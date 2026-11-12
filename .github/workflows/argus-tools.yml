@@ -1,15 +1,22 @@
 name: 'argus-tools'
 
-# argus-tools (the Rust non-UI logic): formatting (its rustfmt.toml), lints and tests on every change to it, so formatting
-# and lint debt cannot come back. The Qt app is built by linux.yml.
+# argus-tools (the Rust workspace: argus-tools itself and the Rust port in argus-tools/crates): formatting (its
+# rustfmt.toml), lints and tests on every change to it, so formatting and lint debt cannot come back. The port's protocol
+# tests read the C++ app's generated nanopb code, so changes there run this too. The Qt app is built by linux.yml.
 on:
   push:
     paths:
       - 'argus-tools/**'
+      - 'plugins/flipperproto0/messages/**'
+      - '3rdparty/nanopb'
+      - 'VERSION'
       - '.github/workflows/argus-tools.yml'
   pull_request:
     paths:
       - 'argus-tools/**'
+      - 'plugins/flipperproto0/messages/**'
+      - '3rdparty/nanopb'
+      - 'VERSION'
       - '.github/workflows/argus-tools.yml'
   workflow_dispatch:
 
@@ -27,7 +34,7 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Tools
-        run: pacman -Syu --noconfirm --needed git rust base-devel
+        run: pacman -Syu --noconfirm --needed git rust base-devel protobuf
 
       - name: Checkout code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0, pinned by commit
@@ -36,12 +43,20 @@ jobs:
 
       - name: Format
         working-directory: argus-tools
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Lint
         working-directory: argus-tools
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Test
         working-directory: argus-tools
-        run: cargo test --locked
+        run: cargo test --locked --workspace
+
+      # The protocol fixture must come from the C++ app's own nanopb encoder: rebuild it and fail if it differs.
+      - name: nanopb fixture is current
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule update --init 3rdparty/nanopb
+          sh argus-tools/crates/flipper-rpc/tests/nanopb/gen.sh
+          git diff --exit-code -- argus-tools/crates/flipper-rpc/tests/fixtures/nanopb_frames.txt
