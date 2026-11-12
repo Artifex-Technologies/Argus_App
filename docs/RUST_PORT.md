@@ -61,7 +61,7 @@ Protocol and device logic first, with the CLI as the proof surface; the UI last.
 2. **The rest of the reads.** Stat, storage info, MD5, file read and directory download (with the C++ path checks:
    no `.`/`..`, backslash or NUL in device names), file tree, date/time read. CLI: `stat`, `df`, `md5`, `date`,
    `pull`, and upstream's `backup` (reads `/int` into a tar.gz). A real serial port only when named.
-   *Done 2026-11-12, except screen frames (with the screen streamer, phase 3).*
+   *Done 2026-11-12; screen frames too (`argus-cli screen`).*
 3. **Our subsystems.** Capture pull and pull-all with the allowlist (secrets are never read), the SQLite datastore,
    pcap export, the `.nfc`/`.sub` parsers (argus-tools has them), the Sarina control API server (loopback, token
    always required, same wire format, `docs/SARINA_API.md` stays the contract), the event log. CLI parity with
@@ -180,6 +180,13 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   starts with a BOM is recognised (it was skipped), every `\r` is dropped (a lone one mid-line used to show as a
   space), invalid UTF-8 becomes one U+FFFD per byte, and an indented `#` line is a comment. The Qt oracle still
   agrees on every generated file.
+- The screen (2026-11-12): `flipper_rpc::screen` starts the stream, collects frames (broadcasts, command id 0),
+  drops any frame that is not 1024 bytes, as the C++ streamer now does, and stops the stream again;
+  `argus-cli screen DIR [--frames N]` writes them as PBM images (lit pixels black, the frame's own layout; the
+  orientation is in the JSON). The fake sends `--screen-frames N` patterned frames and, with `short-frame` or
+  `long-frame`, a frame of the wrong length first; tests check both are dropped and that the stream is stopped.
+  Watching the screen changes nothing on the device. Not compared with the C++ app, which has no CLI command
+  for it; the drop rule is the one both now share.
 - Tests: 77 in the new crates (frames, paths, schema, nanopb fixtures, session and reads against the fake with
   every fault, hostile names, the CLI binary over a socket and a pseudo-terminal), all green; argus-tools' own
   tests unchanged; `qFlipper-cli chymaera selftest` 11/11 with the hook built in.
@@ -275,6 +282,6 @@ failed, and does not read `devinfo` or start the screen.
 
 1. The rest of phase 3: `chymaera watch` and a device in the Rust `serve` (`argus-cli --port DEV chymaera serve`:
    `device.status` and asynchronous `capture.pull`/`pullAll` as the GUI's server has them; the fake can stand in
-   for the device, and `compare-api.sh` can then run both against it), and the screen streamer (drop frames that
-   are not 1024 bytes, as the C++ now does).
+   for the device, and `compare-api.sh` can then run both against it). The screen stream is there
+   (`flipper_rpc::screen`) for the UI phase: buttons (`GuiSendInputRequest`) and the virtual display come with it.
 2. `restore` needs writes (phase 4); then the fake can check each app's restore of the other's backup.

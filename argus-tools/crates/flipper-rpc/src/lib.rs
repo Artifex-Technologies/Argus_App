@@ -8,11 +8,13 @@
 //!   MD5, file read, date/time).
 //! - [`transfer`]: file trees, pulling files and folders, and the `/int` backup, with every
 //!   device-supplied name checked before it touches the local disk.
+//! - [`screen`]: the device's screen as a stream of frames (frames of the wrong length dropped).
 //! - [`transport`]: serial port or Unix socket. Nothing here searches for or opens a device on
 //!   its own; callers name the port.
 
 pub mod frame;
 pub mod ops;
+pub mod screen;
 pub mod session;
 pub mod transfer;
 pub mod transport;

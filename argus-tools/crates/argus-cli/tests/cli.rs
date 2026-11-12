@@ -303,3 +303,22 @@ fn capture_pull_into_a_datastore() {
     assert_eq!(r.status, 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn screen_writes_pbm_frames_into_a_new_folder() {
+    let dir = tempdir();
+    let out = dir.join("shots");
+    let fake = FakeFlipper { screen_frames: 2, fault: flipper_fake::Fault::ShortFrame, ..FakeFlipper::standard() };
+    let r = run_with(fake, &["--frames", "2", "screen", out.to_str().unwrap()]);
+    assert_eq!(r.status, 0, "{}", r.json);
+    assert_eq!((r.json["frames"].as_u64(), r.json["dropped"].as_u64()), (Some(2), Some(1)));
+    let pbm = std::fs::read(out.join("frame-0002.pbm")).unwrap();
+    let frame = flipper_rpc::screen::Frame { data: flipper_fake::screen_frame(1), orientation: 0 };
+    assert_eq!(pbm, frame.to_pbm());
+    // the folder exists now: refused before the device is opened
+    let r = usage(&["--socket", "/nonexistent.sock", "screen", out.to_str().unwrap()]);
+    assert_eq!((r.status, &r.json["error"]["code"]), (1, &Value::from("exists")));
+    let r = usage(&["--socket", "/nonexistent.sock", "--frames", "0", "screen", "x"]);
+    assert_eq!(r.status, 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

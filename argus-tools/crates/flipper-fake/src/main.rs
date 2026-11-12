@@ -12,9 +12,10 @@
 //!   pseudo-terminal has no DTR line, so neither client raises it there.
 //!
 //! Faults: none, no-prompt, silent, garbage, oversize, busy, flood, wrong-type,
-//! close-mid-frame, short-read, long-read, omit-empty-data, frame-without-data. `--hostile` adds
+//! close-mid-frame, short-read, long-read, omit-empty-data, frame-without-data, short-frame, long-frame. `--hostile` adds
 //! names to `/int` that would lead outside a local folder (both apps must refuse them);
 //! `--captures` adds capture files to the capture folders (and a secret outside them).
+//! `--screen-frames N` sets how many screen frames follow a stream start (default 1).
 
 use std::io::{self, Write};
 use std::os::unix::net::UnixListener;
@@ -38,13 +39,15 @@ fn parse_fault(name: &str) -> Option<Fault> {
         "long-read" => Fault::LongRead,
         "omit-empty-data" => Fault::OmitEmptyData,
         "frame-without-data" => Fault::FrameWithoutData,
+        "short-frame" => Fault::ShortFrame,
+        "long-frame" => Fault::LongFrame,
         _ => return None,
     })
 }
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: flipper-fake (--socket PATH | --pty) [--sessions N] [--record FILE] [--requests FILE] [--fault NAME] [--legacy] [--no-sd] [--hostile] [--captures]"
+        "usage: flipper-fake (--socket PATH | --pty) [--sessions N] [--record FILE] [--requests FILE] [--fault NAME] [--legacy] [--no-sd] [--hostile] [--captures] [--screen-frames N]"
     );
     ExitCode::from(2)
 }
@@ -75,6 +78,10 @@ fn main() -> ExitCode {
             "--no-sd" => fake.sd_card = false,
             "--hostile" => fake = fake.with_hostile_names(),
             "--captures" => fake = fake.with_captures(),
+            "--screen-frames" => match args.next().and_then(|n| n.parse().ok()).filter(|n| (0..=1000).contains(n)) {
+                Some(n) => fake.screen_frames = n,
+                None => return usage(),
+            },
             _ => return usage(),
         }
     }

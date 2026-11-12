@@ -34,6 +34,7 @@ const HELP: &str = "argus-cli — talk to a Flipper Zero over RPC (JSON on stdou
   date               the device clock
   pull PATH DEST     copy a file or directory off the device to DEST (must not exist)
   backup FILE        /int as a .tar.gz the C++ app's restore reads (FILE must not exist)
+  screen DIR         the screen as PBM images (DIR must not exist); --frames N, default 1
   capture pull PATH  pull a capture folder (or a path inside one) into the datastore
   capture pull-all   pull every capture folder into the datastore
   chymaera ...       serve | parse FILE | import FILE | selftest, as qFlipper-cli chymaera
@@ -60,11 +61,12 @@ struct Cmd {
     target: Option<Target>,
     datastore: Option<PathBuf>,
     timeout: Duration,
+    frames: usize,
     words: Vec<String>,
 }
 
 fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
-    let mut cmd = Cmd { target: None, datastore: None, timeout: Duration::from_millis(5000), words: Vec::new() };
+    let mut cmd = Cmd { target: None, datastore: None, timeout: Duration::from_millis(5000), frames: 1, words: Vec::new() };
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| Usage(format!("{name} needs a value")));
@@ -77,6 +79,13 @@ fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
                 cmd.target = Some(if a == "--port" { Target::Port(p) } else { Target::Socket(p) });
             }
             "--datastore" => cmd.datastore = Some(PathBuf::from(value("--datastore")?)),
+            "--frames" => {
+                let n: usize = value("--frames")?.parse().map_err(|_| Usage("--frames takes a number".into()))?;
+                if !(1..=flipper_rpc::screen::MAX_FRAMES).contains(&n) {
+                    return Err(Usage(format!("--frames must be between 1 and {}", flipper_rpc::screen::MAX_FRAMES)));
+                }
+                cmd.frames = n;
+            }
             "--timeout" => {
                 let ms: u64 = value("--timeout")?.parse().map_err(|_| Usage("--timeout takes milliseconds".into()))?;
                 if !(10..=600_000).contains(&ms) {
@@ -225,6 +234,28 @@ fn run(cmd: &Cmd) -> Result<Value, RpcError> {
             }
             Ok(out)
         }
+        "screen" => {
+            use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+            let dir = PathBuf::from(&cmd.words[1]);
+            let r = s.screen_frames(cmd.frames)?;
+            std::fs::DirBuilder::new().mode(0o700).create(&dir).map_err(|e| RpcError::Local(format!("{}: {e}", dir.display())))?;
+            let mut files = Vec::new();
+            for (i, f) in r.frames.iter().enumerate() {
+                let path = dir.join(format!("frame-{:04}.pbm", i + 1));
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)
+                    .and_then(|mut file| std::io::Write::write_all(&mut file, &f.to_pbm()))
+                    .map_err(|e| RpcError::Local(format!("{}: {e}", path.display())))?;
+                files.push(path.display().to_string());
+            }
+            let orientation: Vec<i32> = r.frames.iter().map(|f| f.orientation).collect();
+            Ok(
+                json!({"ok": true, "command": "screen", "dir": dir.display().to_string(), "frames": r.frames.len(), "dropped": r.dropped, "orientation": orientation, "files": files}),
+            )
+        }
         "backup" => {
             let out = PathBuf::from(&cmd.words[1]);
             let mtime = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -260,6 +291,9 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         ["info"] | ["date"] | ["ls" | "stat" | "df" | "md5", _] | ["pull", _, _] | ["backup", _] => {}
+        ["screen", dir] if Path::new(dir).exists() => return fail("exists", format!("{dir} exists"), 1),
+        ["screen", _] => {}
+        ["screen"] => return fail("usage", "screen needs a new local folder".into(), 2),
         ["ls" | "stat" | "df" | "md5"] => return fail("usage", format!("{} needs a device path", words[0]), 2),
         ["pull", ..] => return fail("usage", "pull needs a device path and a new local path".into(), 2),
         ["capture", "pull", path] if !argus_capture::sync::is_capture_root(path) => {

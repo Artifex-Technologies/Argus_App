@@ -48,6 +48,15 @@ pub enum Fault {
     OmitEmptyData,
     /// The broadcast screen frame after a stream start has no `data` field.
     FrameWithoutData,
+    /// A stream start first sends a frame one byte short (then the usual frames).
+    ShortFrame,
+    /// A stream start first sends a frame one byte too long (then the usual frames).
+    LongFrame,
+}
+
+/// Screen frame `i` of the fake: a pattern that differs from frame to frame.
+pub fn screen_frame(i: usize) -> Vec<u8> {
+    (0..1024).map(|j| ((i + 1) * 37 + j * 11) as u8).collect()
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +92,8 @@ pub struct FakeFlipper {
     pub hostile: Vec<(String, String, bool)>,
     /// Files whose bytes are given instead of [`Node::content`]'s pattern: (path, bytes).
     pub contents: Vec<(String, Vec<u8>)>,
+    /// Frames sent after a screen stream starts ([`screen_frame`] 0, 1, ...).
+    pub screen_frames: usize,
 }
 
 /// What passed over the connection.
@@ -219,6 +230,7 @@ impl FakeFlipper {
             fault: Fault::None,
             hostile: Vec::new(),
             contents: Vec::new(),
+            screen_frames: 1,
         }
     }
 
@@ -282,7 +294,14 @@ impl FakeFlipper {
     fn answer(&self, io: &mut impl Write, req: &Main, fault: &Fault) -> io::Result<bool> {
         let id = req.command_id;
         match fault {
-            Fault::None | Fault::NoPrompt | Fault::ShortRead | Fault::LongRead | Fault::OmitEmptyData | Fault::FrameWithoutData => {}
+            Fault::None
+            | Fault::NoPrompt
+            | Fault::ShortRead
+            | Fault::LongRead
+            | Fault::OmitEmptyData
+            | Fault::FrameWithoutData
+            | Fault::ShortFrame
+            | Fault::LongFrame => {}
             Fault::Silent => return Ok(true),
             Fault::GarbageFrame => {
                 io.write_all(&[0x02, 0x0f, 0x00])?;
@@ -418,12 +437,21 @@ impl FakeFlipper {
             // transcript records it) but its clock does not change.
             Some(Content::SystemSetDatetimeRequest(_)) => send(io, ok(Content::Empty(Empty {}), false))?,
             // The C++ app starts the screen stream on every connection. The firmware answers OK
-            // and then sends frames as broadcasts (command id 0); the fake sends one blank frame.
+            // and then sends frames as broadcasts (command id 0); the fake sends `screen_frames`.
             Some(Content::GuiStartScreenStreamRequest(_)) => {
                 send(io, ok(Content::Empty(Empty {}), false))?;
-                let data = if self.fault == Fault::FrameWithoutData { Vec::new() } else { vec![0; 1024] };
-                let frame = pb_gui::ScreenFrame { data, ..Default::default() };
-                send(io, Main { command_id: 0, content: Some(Content::GuiScreenFrame(frame)), ..Default::default() })?;
+                let broadcast = |io: &mut _, data: Vec<u8>| {
+                    let frame = pb_gui::ScreenFrame { data, ..Default::default() };
+                    send(io, Main { command_id: 0, content: Some(Content::GuiScreenFrame(frame)), ..Default::default() })
+                };
+                match self.fault {
+                    Fault::ShortFrame => broadcast(io, vec![0xff; 1023])?,
+                    Fault::LongFrame => broadcast(io, vec![0xff; 1025])?,
+                    _ => {}
+                }
+                for i in 0..self.screen_frames {
+                    broadcast(io, if self.fault == Fault::FrameWithoutData { Vec::new() } else { screen_frame(i) })?;
+                }
             }
             Some(Content::GuiStopScreenStreamRequest(_)) => send(io, ok(Content::Empty(Empty {}), false))?,
             // The C++ app shows a status screen on the Flipper during backups and updates.

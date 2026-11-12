@@ -357,3 +357,30 @@ fn the_hostile_preset_is_refused_by_pull() {
         .all(|m| !matches!(&m.content, Some(Content::StorageReadRequest(r)) if !r.path.starts_with("/int/") || r.path.contains(".."))));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn screen_frames_arrive_whole_and_the_stream_is_stopped() {
+    let fake = FakeFlipper { screen_frames: 3, ..FakeFlipper::standard() };
+    let (r, t) = run(fake, |mut s| s.screen_frames(3).unwrap());
+    assert_eq!(r.dropped, 0);
+    assert_eq!(r.frames.iter().map(|f| f.data.clone()).collect::<Vec<_>>(), (0..3).map(flipper_fake::screen_frame).collect::<Vec<_>>());
+    let kinds: Vec<_> = t.requests.iter().map(flipper_fake::describe).collect();
+    assert!(kinds[0].contains("GuiStartScreenStreamRequest") && kinds[1].contains("GuiStopScreenStreamRequest"), "{kinds:?}");
+    assert_eq!(kinds.len(), 2);
+}
+
+#[test]
+fn screen_frames_of_the_wrong_length_are_dropped() {
+    for fault in [Fault::ShortFrame, Fault::LongFrame] {
+        let fake = FakeFlipper { screen_frames: 2, fault: fault.clone(), ..FakeFlipper::standard() };
+        let (r, _) = run(fake, |mut s| s.screen_frames(2).unwrap());
+        assert_eq!((r.frames.len(), r.dropped), (2, 1), "{fault:?}");
+        assert_eq!(r.frames[0].data, flipper_fake::screen_frame(0));
+    }
+    // only frames without data: nothing usable arrives, the wait ends at the timeout
+    let fake = FakeFlipper { fault: Fault::FrameWithoutData, ..FakeFlipper::standard() };
+    let (r, _) = run(fake, |mut s| s.screen_frames(1));
+    assert!(matches!(r, Err(RpcError::Timeout(_))), "{r:?}");
+    let (r, _) = run(FakeFlipper::standard(), |mut s| s.screen_frames(0));
+    assert!(matches!(r, Err(RpcError::Invalid(_))));
+}

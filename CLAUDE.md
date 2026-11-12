@@ -152,6 +152,10 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — Screen frames in the Rust port (`argus-cli screen DIR [--frames N]`)
+- `flipper_rpc::screen`: start the stream, collect frames, drop any not 1024 bytes (the rule the C++ streamer has
+  since today), stop the stream. `argus-cli screen` writes PBM images. Read-only; tested against the fake only.
+
 ### 2026-11-12 — One Flipper-format reader in argus-tools; a line limit in both apps
 - argus-tools' `flipperfile` now holds the Qt-faithful reader (from `argus-capture::meta`) and builds the capture
   library's bounded view from it; `argus-capture` uses it through the argus-tools library. The library now
