@@ -116,6 +116,7 @@ SOURCES += \
     versioninfo.cpp
 
 HEADERS += \
+    testhooks.h \
     abstractoperation.h \
     abstractoperationhelper.h \
     abstractoperationrunner.h \

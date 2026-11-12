@@ -149,6 +149,19 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — Rust port phase 2 + a test-only hook in the C++ backend
+- `argus-cli` reads: `stat`, `df`, `md5`, `date`, `pull`, `backup` (`/int` as a .tar.gz the C++ restore reads). Device
+  names are checked before local use; nothing local is overwritten. Plan and status: `docs/RUST_PORT.md`.
+- **C++ change (test-only):** `backend/testhooks.h` + five guarded spots (`deviceregistry.cpp`, `deviceinfohelper.cpp`,
+  `serialinithelper.cpp`, `skipmotdoperation.cpp`, `applicationbackend.cpp`). Only when `ARGUS_TEST_SERIAL_PORT` is set:
+  no USB watching (a real Flipper is never seen), that port is the device, no DTR, no update-directory fetch. Unset,
+  nothing changes. Built here, `chymaera selftest` 11/11.
+- `linux.yml` now runs `argus-tools/crates/flipper-fake/compare-cli.sh` after the Qt build: `qFlipper-cli backup` and
+  `argus-cli backup` against the same fake Flipper on a pseudo-terminal. Same files, bytes and storage requests.
+- Found in the C++ app (not fixed; listed in `docs/RUST_PORT.md` section 5): a read response without `data` crashes it
+  (NULL dereference in `storageresponse.cpp`/`guiresponse.cpp`), a short read is archived silently, its tar has a stray
+  zero block after 512-aligned files (GNU tar stops there), and backup/directory download have no name checks.
+
 ### 2026-11-12 — Rust port of the desktop side started (protocol layer + `argus-cli`)
 - Plan and inventory: **[docs/RUST_PORT.md](docs/RUST_PORT.md)** (port order: protocol and reads, our subsystems, writes behind a
   confirmation, updater, DFU, network, UI in egui/eframe last). The firmware and anything the Flipper runs stay C.

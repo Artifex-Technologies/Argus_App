@@ -2,6 +2,7 @@
 
 #include <QDebug>
 #include <QMetaObject>
+#include <QTimer>
 #include <QLoggingCategory>
 
 #include "flipperzero/helper/deviceinfohelper.h"
@@ -9,6 +10,7 @@
 #include "flipperzero/devicestate.h"
 
 #include "usbdevice.h"
+#include "testhooks.h"
 
 #define FLIPPER_ZERO_VID 0x0483
 #define FLIPPER_ZERO_PID_VCP 0x5740
@@ -24,6 +26,18 @@ DeviceRegistry::DeviceRegistry(QObject *parent):
     m_error(BackendError::UnknownError),
     m_isQueryInProgress(false)
 {
+    if(Argus::isTestSerialPort()) {
+        // Test hook (testhooks.h): no USB watching at all; one device on the given port.
+        qCDebug(LOG_DEVREG).noquote() << "Test serial port:" << Argus::testSerialPort();
+        const auto testDevice = USBDeviceInfo(FLIPPER_ZERO_VID, FLIPPER_ZERO_PID_VCP)
+            .withManufacturer(QStringLiteral("Flipper Devices Inc."))
+            .withProductDescription(QStringLiteral("Flipper Control Virtual ComPort"))
+            .withSerialNumber(QStringLiteral("argus-test"))
+            .withBackendData(QStringLiteral("argus-test"));
+        QTimer::singleShot(0, this, [=]() { insertDevice(testDevice); });
+        return;
+    }
+
     connect(m_detector, &USBDeviceDetector::devicePluggedIn, this, &DeviceRegistry::insertDevice);
     connect(m_detector, &USBDeviceDetector::deviceUnplugged, this, &DeviceRegistry::removeDevice);
 

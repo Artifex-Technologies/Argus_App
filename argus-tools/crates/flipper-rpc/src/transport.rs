@@ -34,15 +34,32 @@ pub struct SerialTransport {
 impl SerialTransport {
     /// Opens `path` (exclusively, as `serialport` does on Unix) and pulses DTR the way the C++
     /// app does before reading the CLI banner: low, 50 ms, high. The Flipper prints its banner
-    /// when DTR goes high. The baud rate is irrelevant for USB CDC; 230400 is qFlipper's.
+    /// when DTR goes high. A pseudo-terminal (the fake Flipper's `--pty` mode) has no modem
+    /// lines, so DTR is left alone there. The baud rate is irrelevant for USB CDC; 230400 is
+    /// qFlipper's.
     pub fn open(path: &Path, timeout: Duration) -> io::Result<SerialTransport> {
         let name = path.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "serial port path is not UTF-8"))?;
+        let pty = is_pseudo_terminal(path)?;
         let mut port = serialport::new(name, 230_400).timeout(timeout).open().map_err(io::Error::from)?;
-        port.write_data_terminal_ready(false).map_err(io::Error::from)?;
-        std::thread::sleep(Duration::from_millis(50));
-        port.write_data_terminal_ready(true).map_err(io::Error::from)?;
+        if !pty {
+            port.write_data_terminal_ready(false).map_err(io::Error::from)?;
+            std::thread::sleep(Duration::from_millis(50));
+            port.write_data_terminal_ready(true).map_err(io::Error::from)?;
+        }
         Ok(SerialTransport { port })
     }
+}
+
+/// True for a Unix98 pseudo-terminal slave (`/dev/pts/N`, character device majors 136-143).
+pub fn is_pseudo_terminal(path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let meta = std::fs::metadata(path)?;
+    if !meta.file_type().is_char_device() {
+        return Ok(false);
+    }
+    let dev = meta.rdev();
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
+    Ok((136..=143).contains(&major))
 }
 
 impl Read for SerialTransport {

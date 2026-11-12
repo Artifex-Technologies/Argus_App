@@ -1,5 +1,7 @@
 ﻿#include "applicationbackend.h"
 
+#include "testhooks.h"
+
 #include <QDebug>
 #include <QLoggingCategory>
 #include <QCoreApplication>
@@ -34,7 +36,8 @@ using namespace Zero;
 ApplicationBackend::ApplicationBackend(QObject *parent):
     QObject(parent),
     m_deviceRegistry(new DeviceRegistry(this)),
-    m_firmwareUpdateRegistry(new FirmwareUpdateRegistry("https://update.flipperzero.one/firmware/directory.json", this)),
+    // Test hook (testhooks.h): no update directory, so no network
+    m_firmwareUpdateRegistry(new FirmwareUpdateRegistry(Argus::isTestSerialPort() ? QString() : QStringLiteral("https://update.flipperzero.one/firmware/directory.json"), this)),
     m_screenStreamer(new ScreenStreamer(this)),
     m_virtualDisplay(new VirtualDisplay(this)),
     m_fileManager(new FileManager(this)),

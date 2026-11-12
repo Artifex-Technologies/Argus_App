@@ -1,5 +1,7 @@
 #include "deviceinfohelper.h"
 
+#include "testhooks.h"
+
 #include <cmath>
 
 #include <QDebug>
@@ -103,6 +105,13 @@ void VCPDeviceInfoHelper::nextStateLogic()
 
 void VCPDeviceInfoHelper::findSerialPort()
 {
+    if(Argus::isTestSerialPort()) {
+        // Test hook (testhooks.h): the port is given; SerialInitHelper opens it by name.
+        m_deviceInfo.systemLocation = Argus::testSerialPort();
+        advanceState();
+        return;
+    }
+
     auto *finder = new SerialFinder(m_deviceInfo.usbInfo.serialNumber(), this);
 
     connect(finder, &SerialFinder::finished, this, [=](const QSerialPortInfo &portInfo) {

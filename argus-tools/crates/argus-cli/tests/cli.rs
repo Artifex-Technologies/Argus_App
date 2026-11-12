@@ -248,3 +248,36 @@ fn new_commands_check_their_arguments() {
         assert_eq!(r.status, 2, "{args:?}");
     }
 }
+
+/// argus-cli against the fake over a real pseudo-terminal, as a serial port (`--port`).
+fn run_pty(args: &[&str]) -> (Run, Vec<String>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let fake = FakeFlipper::standard();
+        let (ts, r) = flipper_fake::pty::serve_pty(&fake, 1, |name| tx.send(name.to_string()).unwrap());
+        r.unwrap();
+        ts.iter().flat_map(|t| t.requests.iter().map(flipper_fake::describe)).collect::<Vec<_>>()
+    });
+    let port = rx.recv().unwrap();
+    assert!(port.starts_with("/dev/pts/"), "only our own pseudo-terminal is opened: {port}");
+    let mut full = vec!["--port", port.as_str(), "--timeout", "3000"];
+    full.extend_from_slice(args);
+    let out = Command::new(BIN).args(&full).output().unwrap();
+    let requests = server.join().unwrap();
+    (parse(out, Vec::new()), requests)
+}
+
+#[test]
+fn over_a_pseudo_terminal() {
+    let (r, requests) = run_pty(&["md5", "/int/favorites.txt"]);
+    assert_eq!(r.status, 0, "{} {}", r.json, r.stderr);
+    assert_eq!(requests, ["1 StorageMd5sumRequest /int/favorites.txt"]);
+
+    let dir = tempdir();
+    let out = dir.join("b.tgz");
+    let (r, requests) = run_pty(&["backup", out.to_str().unwrap()]);
+    assert_eq!(r.status, 0, "{}", r.json);
+    assert_eq!(requests.first().map(String::as_str), Some("1 StorageListRequest /int"));
+    assert!(out.is_file());
+    let _ = std::fs::remove_dir_all(&dir);
+}

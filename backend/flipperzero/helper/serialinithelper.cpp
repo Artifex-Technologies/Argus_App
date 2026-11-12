@@ -5,6 +5,7 @@
 
 #include "flipperzero/rpc/skipmotdoperation.h"
 #include "flipperzero/rpc/startrpcoperation.h"
+#include "testhooks.h"
 
 using namespace Flipper;
 using namespace Zero;
@@ -15,6 +16,11 @@ SerialInitHelper::SerialInitHelper(const QSerialPortInfo &portInfo, QObject *par
     m_retryTimer(new QTimer(this)),
     m_retryCount(20)
 {
+    if(Argus::isTestSerialPort()) {
+        // Test hook (testhooks.h)
+        m_serialPort->setPortName(Argus::testSerialPort());
+    }
+
     m_retryTimer->setSingleShot(true);
     connect(m_retryTimer, &QTimer::timeout, this, &SerialInitHelper::openPort);
 }

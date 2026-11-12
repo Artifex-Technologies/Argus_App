@@ -1,14 +1,25 @@
-//! `flipper-fake --socket PATH [--record FILE] [--fault NAME] [--legacy] [--no-sd]`
+//! `flipper-fake (--socket PATH | --pty) [--sessions N] [--record FILE] [--requests FILE]
+//!               [--fault NAME] [--legacy] [--no-sd]`
 //!
-//! Listens on a Unix socket, serves one client as a fake Flipper, writes every byte the client
-//! sent to FILE (if given) and exits. Prints `listening PATH` on stdout once ready.
-//! Faults: none, no-prompt, silent, garbage, oversize, busy, flood, wrong-type, close-mid-frame.
+//! Serves N connections (default 1) as a fake Flipper, one after the other, then writes every
+//! byte the clients sent to `--record` and one line per RPC request (`session id Type arg`) to
+//! `--requests`, and exits.
+//!
+//! - `--socket PATH`: listens on a Unix socket. Prints `listening PATH` once ready.
+//! - `--pty`: makes a pseudo-terminal and prints `pty /dev/pts/N`; clients open that path as a
+//!   serial port (the C++ app through its test hook `ARGUS_TEST_SERIAL_PORT`, argus-cli with
+//!   `--port`). Like a real Flipper, the banner is printed when a client opens the port. A
+//!   pseudo-terminal has no DTR line, so neither client raises it there.
+//!
+//! Faults: none, no-prompt, silent, garbage, oversize, busy, flood, wrong-type,
+//! close-mid-frame, short-read, long-read.
 
+use std::io::{self, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use flipper_fake::{FakeFlipper, Fault};
+use flipper_fake::{describe, pty, FakeFlipper, Fault, Transcript};
 
 fn parse_fault(name: &str) -> Option<Fault> {
     Some(match name {
@@ -21,58 +32,99 @@ fn parse_fault(name: &str) -> Option<Fault> {
         "flood" => Fault::FloodOtherIds(2000),
         "wrong-type" => Fault::WrongType,
         "close-mid-frame" => Fault::CloseMidFrame,
+        "short-read" => Fault::ShortRead,
+        "long-read" => Fault::LongRead,
         _ => return None,
     })
 }
 
+fn usage() -> ExitCode {
+    eprintln!(
+        "usage: flipper-fake (--socket PATH | --pty) [--sessions N] [--record FILE] [--requests FILE] [--fault NAME] [--legacy] [--no-sd]"
+    );
+    ExitCode::from(2)
+}
+
 fn main() -> ExitCode {
     let mut socket: Option<PathBuf> = None;
+    let mut pty = false;
+    let mut sessions = 1usize;
     let mut record: Option<PathBuf> = None;
+    let mut requests: Option<PathBuf> = None;
     let mut fake = FakeFlipper::standard();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--socket" => socket = args.next().map(PathBuf::from),
+            "--pty" => pty = true,
+            "--sessions" => match args.next().and_then(|n| n.parse().ok()).filter(|n| (1..=16).contains(n)) {
+                Some(n) => sessions = n,
+                None => return usage(),
+            },
             "--record" => record = args.next().map(PathBuf::from),
+            "--requests" => requests = args.next().map(PathBuf::from),
             "--fault" => match args.next().as_deref().and_then(parse_fault) {
                 Some(f) => fake.fault = f,
-                None => {
-                    eprintln!("flipper-fake: unknown fault");
-                    return ExitCode::from(2);
-                }
+                None => return usage(),
             },
             "--legacy" => fake.protobuf_version = (0, 13),
             "--no-sd" => fake.sd_card = false,
-            _ => {
-                eprintln!("usage: flipper-fake --socket PATH [--record FILE] [--fault NAME] [--legacy] [--no-sd]");
-                return ExitCode::from(2);
-            }
+            _ => return usage(),
         }
     }
-    let Some(socket) = socket else {
-        eprintln!("flipper-fake: --socket PATH is required");
-        return ExitCode::from(2);
+    if pty == socket.is_some() {
+        return usage();
+    }
+
+    let mut all: Vec<Transcript> = Vec::new();
+    let result: io::Result<()> = if pty {
+        let (transcripts, r) = pty::serve_pty(&fake, sessions, |name| {
+            println!("pty {name}");
+            let _ = io::stdout().flush();
+        });
+        all = transcripts;
+        r
+    } else {
+        let socket = socket.expect("checked");
+        match UnixListener::bind(&socket) {
+            Err(e) => Err(e),
+            Ok(listener) => {
+                println!("listening {}", socket.display());
+                let _ = io::stdout().flush();
+                let r = (|| {
+                    for _ in 0..sessions {
+                        let (mut stream, _) = listener.accept()?;
+                        all.push(fake.serve(&mut stream)?);
+                    }
+                    Ok(())
+                })();
+                let _ = std::fs::remove_file(&socket);
+                r
+            }
+        }
     };
-    let listener = match UnixListener::bind(&socket) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("flipper-fake: cannot listen on {}: {e}", socket.display());
+
+    if let Some(path) = record {
+        let bytes: Vec<u8> = all.iter().flat_map(|t| t.received.iter().copied()).collect();
+        if let Err(e) = std::fs::write(&path, bytes) {
+            eprintln!("flipper-fake: cannot write {}: {e}", path.display());
             return ExitCode::from(1);
         }
-    };
-    println!("listening {}", socket.display());
-    let result = listener.accept().and_then(|(mut stream, _)| fake.serve(&mut stream));
-    let _ = std::fs::remove_file(&socket);
-    match result {
-        Ok(t) => {
-            if let Some(path) = record {
-                if let Err(e) = std::fs::write(&path, &t.received) {
-                    eprintln!("flipper-fake: cannot write {}: {e}", path.display());
-                    return ExitCode::from(1);
-                }
+    }
+    if let Some(path) = requests {
+        let mut text = String::new();
+        for (i, t) in all.iter().enumerate() {
+            for m in &t.requests {
+                text.push_str(&format!("{} {}\n", i + 1, describe(m)));
             }
-            ExitCode::SUCCESS
         }
+        if let Err(e) = std::fs::write(&path, text) {
+            eprintln!("flipper-fake: cannot write {}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+    }
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("flipper-fake: {e}");
             ExitCode::from(1)

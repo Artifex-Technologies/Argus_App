@@ -324,3 +324,11 @@ fn listing_kinds_are_kept() {
     let (tree, _) = run(FakeFlipper::standard(), |mut s| s.walk("/int", &Limits::default()).unwrap());
     assert_eq!(tree.entries.iter().filter(|e| e.kind == FileKind::Dir).count(), 2);
 }
+
+#[test]
+fn the_empty_file_answer_is_the_firmwares_bytes() {
+    let text = include_str!("../../flipper-rpc/tests/fixtures/nanopb_frames.txt");
+    let hex = text.lines().find_map(|l| l.strip_prefix("resp_read_empty_file ")).unwrap();
+    let want: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+    assert_eq!(flipper_fake::empty_file_read_response(9), want);
+}

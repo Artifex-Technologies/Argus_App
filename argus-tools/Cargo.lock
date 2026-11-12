@@ -316,7 +316,9 @@ dependencies = [
  "flate2",
  "flipper-rpc",
  "md-5",
+ "nix",
  "prost",
+ "serialport",
  "tar",
 ]
 

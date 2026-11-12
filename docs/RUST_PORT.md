@@ -58,8 +58,9 @@ Protocol and device logic first, with the CLI as the proof surface; the UI last.
 1. **Protocol and read-only CLI.** Messages, framing, the serial handshake, request matching, read-only
    operations; `argus-cli info` and `ls`. *Done 2026-11-12 (section 5).*
 2. **The rest of the reads.** Stat, storage info, MD5, file read and directory download (with the C++ path checks:
-   no `.`/`..`, backslash or NUL in device names), file tree, date/time read, screen frames. CLI: `stat`, `df`,
-   `md5`, `pull`, and upstream's `backup` (reads `/int` into a tar.gz). A real serial port only when named.
+   no `.`/`..`, backslash or NUL in device names), file tree, date/time read. CLI: `stat`, `df`, `md5`, `date`,
+   `pull`, and upstream's `backup` (reads `/int` into a tar.gz). A real serial port only when named.
+   *Done 2026-11-12, except screen frames (with the screen streamer, phase 3).*
 3. **Our subsystems.** Capture pull and pull-all with the allowlist (secrets are never read), the SQLite datastore,
    pcap export, the `.nfc`/`.sub` parsers (argus-tools has them), the Sarina control API server (loopback, token
    always required, same wire format, `docs/SARINA_API.md` stays the contract), the event log. CLI parity with
@@ -97,11 +98,17 @@ No test opens `/dev/ttyACM*` or any real device, and nothing flashes. The proof 
    same: file listings and reads (phase 2), update manifests and `directory.json` (phase 7), DfuSe files (phase 6),
    tar backups (phase 2).
 
-**Running the C++ CLI against the same fake** is the next step. The C++ app finds a Flipper by USB VID/PID, so it
-cannot see a socket. One small test-only hook would do it: an environment variable naming a serial port path that
-`DeviceRegistry` uses instead of USB enumeration, and a pseudo-terminal mode in the fake (`serialport`'s
-`TTYPort::pair`). Then both CLIs run the same scripts against the same fake and their transcripts are compared.
-Until then, layer 2 gives the byte-level comparison with the C++ code.
+**The C++ CLI against the same fake.** The C++ app finds a Flipper by USB VID/PID. A test-only hook
+(`backend/testhooks.h`) changes that only when `ARGUS_TEST_SERIAL_PORT` names a port: the registry then does not
+watch USB at all (a real Flipper plugged in is never seen), uses that port as the one device, does not raise DTR
+(a pseudo-terminal has no modem lines) and does not fetch the firmware directory (no network). Unset, nothing
+changes. The fake serves a pseudo-terminal (`flipper-fake --pty`), session after session as the C++ app reopens
+the port. `argus-tools/crates/flipper-fake/compare-cli.sh` runs `qFlipper-cli backup` and `argus-cli backup`
+against it and compares exit codes, the archives' files and bytes, and the requests each sent (decoded by the
+fake, ids aside); it refuses a `qFlipper-cli` built without the hook. The Linux build workflow runs it after the
+Qt build. Result on 2026-11-12: same files, same bytes, same storage requests in the same order. The C++ app
+also probes the device first (protobuf version, `devinfo`, storage info, `/ext/Manifest`, reads and **sets the
+clock**) and starts the screen stream and a status screen; the Rust CLI does none of that.
 
 ## 5. Status (2026-11-12)
 
@@ -114,8 +121,12 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
 - `crates/flipper-fake`: the fake Flipper (library and `flipper-fake --socket PATH` binary).
 - `crates/argus-cli`: `argus-cli (--port DEV | --socket PATH) info | ls PATH | version`. JSON on stdout like
   argus-tools; exit 1 for device or protocol errors, 2 for usage. It never searches for a device.
-- Tests: 39 in the new crates (frames, paths, schema, fixtures, session against the fake with every fault, the CLI
-  binary), all green; argus-tools' own tests unchanged.
+- Phase 2 (2026-11-12): MD5, file read (stat and read under one id, as the C++ app), date/time, file tree, pull,
+  backup; `argus-cli stat|df|md5|date|pull|backup`; the fake's pseudo-terminal mode; the C++ test hook and
+  `compare-cli.sh`.
+- Tests: 62 in the new crates (frames, paths, schema, nanopb fixtures, session and reads against the fake with
+  every fault, hostile names, the CLI binary over a socket and a pseudo-terminal), all green; argus-tools' own
+  tests unchanged; `qFlipper-cli chymaera selftest` 11/11 with the hook built in.
 
 Differences from the C++ app found so far, all on purpose or harmless:
 
@@ -133,10 +144,28 @@ Differences from the C++ app found so far, all on purpose or harmless:
 - **Control characters** (including DEL and the C1 range) in anything printed are escaped, so a file name on the
   device cannot drive the terminal.
 
+Found in the C++ app by running it against the fake (phase 2). Not fixed there: the C++ goes when the port is
+complete, and each needs my decision before then.
+
+- **A missing `data` field crashes it.** `plugins/flipperproto0/storageresponse.cpp:63` and `guiresponse.cpp:10`
+  dereference nanopb's `data` pointer without checking it. The firmware always sends an empty `data` for an empty
+  file, but any device or encoder that leaves the empty field out (valid proto3) makes the app segfault. The Rust
+  side treats both the same.
+- **A short read goes unnoticed.** When a file arrives with fewer bytes than its stat said, the C++ backup still
+  exits 0 and archives the truncated file. The Rust read fails and writes no archive.
+- **Its backups confuse standard tar.** The C++ writer adds a zero block after any file whose size is a multiple of
+  512 (`.bt.settings` is often 1024 bytes); GNU tar takes it as the end and silently lists only the entries before
+  it. The C++ restore reads past it. The Rust writer pads correctly and ends with two zero blocks.
+- **No name checks in backup and directory download.** `UserBackupOperation` and `DirectoryDownloadOperation` join
+  device names onto local paths unchecked (only capture pull got `stagedPath` on 2026-10-27), and the directory
+  download deletes an existing local folder of the same name. The Rust pull and backup refuse bad names, never
+  overwrite, and create files 0600 and folders 0700; the backup holds the device's keys.
+
 ## Resume here
 
-1. Phase 2 reads in `flipper-rpc::ops`: `storage_md5`, `storage_read` (streaming to a writer, size-capped),
-   directory download with the C++ path checks, date/time get; matching fake support and `argus-cli stat|df|md5|pull`.
-2. The pseudo-terminal mode in `flipper-fake` and the test-only serial-path hook in the C++ `DeviceRegistry`, then a
-   script that runs `qFlipper-cli` and `argus-cli` against the same fake and diffs the transcripts.
-3. Port `backup` (upstream's `qFlipper-cli backup`) on top of those reads.
+1. Phase 3, starting with capture pull and pull-all on top of `transfer::pull` (the `CaptureSync` allowlist:
+   capture folders only, secrets never read, `assets`/`.cache` skipped), then the SQLite datastore and
+   `argus-cli` parity with `qFlipper-cli chymaera pull|pull-all`; `compare-cli.sh` gets a pull scenario.
+2. `restore` needs writes (phase 4); until then the fake answers write requests "not implemented". The fake can
+   then check the C++ restore of a Rust backup and the other way round.
+3. Decide whether to fix the four C++ findings above in the C++ now or leave them until it goes.

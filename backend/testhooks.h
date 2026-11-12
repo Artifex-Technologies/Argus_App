@@ -1,0 +1,24 @@
+#pragma once
+
+#include <QString>
+#include <QtGlobal>
+
+// Test-only hook for running qFlipper-cli against the fake Flipper of the Rust port
+// (argus-tools/crates/flipper-fake, docs/RUST_PORT.md). When ARGUS_TEST_SERIAL_PORT names a
+// serial port (a pseudo-terminal), the app:
+//   - does not watch USB at all (so a real Flipper plugged in is never seen or opened),
+//   - treats that port as the one connected Flipper,
+//   - does not raise DTR on it (a pseudo-terminal has no modem lines),
+//   - does not fetch the firmware update directory (no network).
+// Unset (always, outside tests), nothing changes.
+namespace Argus {
+inline QString testSerialPort()
+{
+    return qEnvironmentVariable("ARGUS_TEST_SERIAL_PORT");
+}
+
+inline bool isTestSerialPort()
+{
+    return !testSerialPort().isEmpty();
+}
+}

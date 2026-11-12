@@ -15,7 +15,7 @@ use std::io::{self, Read, Write};
 use flipper_rpc::frame::{encode_frame, FrameDecoder};
 use flipper_rpc::proto::pb::main::Content;
 use flipper_rpc::proto::pb::{CommandStatus, Empty, Main};
-use flipper_rpc::proto::{pb_property, pb_storage, pb_system};
+use flipper_rpc::proto::{pb_gui, pb_property, pb_storage, pb_system};
 
 /// Received bytes kept for the transcript.
 const MAX_RECORD: usize = 1 << 20;
@@ -333,7 +333,7 @@ impl FakeFlipper {
                         ok(Content::StorageReadResponse(pb_storage::ReadResponse { file: Some(file) }), has_next)
                     };
                     if data.is_empty() {
-                        send(io, read(&[], false))?;
+                        send_raw(io, &empty_file_read_response(id))?;
                     }
                     let mut chunks = data.chunks(512).peekable();
                     while let Some(c) = chunks.next() {
@@ -357,6 +357,20 @@ impl FakeFlipper {
             // The C++ app sets the clock on every connection; the fake accepts it (and the
             // transcript records it) but its clock does not change.
             Some(Content::SystemSetDatetimeRequest(_)) => send(io, ok(Content::Empty(Empty {}), false))?,
+            // The C++ app starts the screen stream on every connection. The firmware answers OK
+            // and then sends frames as broadcasts (command id 0); the fake sends one blank frame.
+            Some(Content::GuiStartScreenStreamRequest(_)) => {
+                send(io, ok(Content::Empty(Empty {}), false))?;
+                let frame = pb_gui::ScreenFrame { data: vec![0; 1024], ..Default::default() };
+                send(io, Main { command_id: 0, content: Some(Content::GuiScreenFrame(frame)), ..Default::default() })?;
+            }
+            Some(Content::GuiStopScreenStreamRequest(_)) => send(io, ok(Content::Empty(Empty {}), false))?,
+            // The C++ app shows a status screen on the Flipper during backups and updates.
+            Some(Content::GuiStartVirtualDisplayRequest(_)) | Some(Content::GuiStopVirtualDisplayRequest(_)) => {
+                send(io, ok(Content::Empty(Empty {}), false))?
+            }
+            // Frames the host draws on the virtual display get no answer from the firmware.
+            Some(Content::GuiScreenFrame(_)) => {}
             _ => send(io, error(CommandStatus::ErrorNotImplemented))?,
         }
         Ok(true)
@@ -404,13 +418,150 @@ impl FakeFlipper {
     }
 }
 
+/// One line per request for transcripts: the command id, the request type and its path or key
+/// (`7 StorageListRequest /ext`). Lets two clients' request sequences be compared.
+pub fn describe(m: &Main) -> String {
+    let arg = match &m.content {
+        Some(Content::StorageListRequest(r)) => r.path.clone(),
+        Some(Content::StorageStatRequest(r)) => r.path.clone(),
+        Some(Content::StorageReadRequest(r)) => r.path.clone(),
+        Some(Content::StorageInfoRequest(r)) => r.path.clone(),
+        Some(Content::StorageMd5sumRequest(r)) => r.path.clone(),
+        Some(Content::PropertyGetRequest(r)) => r.key.clone(),
+        _ => String::new(),
+    };
+    let name = match &m.content {
+        None => "None".to_string(),
+        Some(c) => format!("{c:?}").split('(').next().unwrap_or("?").to_string(),
+    };
+    format!("{} {name} {}", m.command_id, arg.escape_debug()).trim_end().to_string()
+}
+
 fn record(t: &mut Transcript, data: &[u8]) {
     let room = MAX_RECORD.saturating_sub(t.received.len());
     t.received.extend_from_slice(&data[..data.len().min(room)]);
+}
+
+/// The firmware's answer for an empty file, byte for byte: a `file` whose `data` is present
+/// with length 0 (nanopb sends the set pointer). prost would leave the empty field out, and
+/// the C++ app dereferences a missing `data` (plugins/flipperproto0/storageresponse.cpp), so the
+/// fake must send what the firmware sends. Same bytes as `resp_read_empty_file` in
+/// flipper-rpc's nanopb fixture.
+pub fn empty_file_read_response(id: u32) -> Vec<u8> {
+    let varint = |mut v: u64, out: &mut Vec<u8>| loop {
+        let b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(b);
+            break;
+        }
+        out.push(b | 0x80);
+    };
+    let mut main = vec![0x08];
+    varint(u64::from(id), &mut main);
+    // storage_read_response (10) { file (1) { data (4): "" } }
+    main.extend([0x52, 0x04, 0x0a, 0x02, 0x22, 0x00]);
+    let mut frame = Vec::new();
+    varint(main.len() as u64, &mut frame);
+    frame.extend(main);
+    frame
+}
+
+fn send_raw(io: &mut impl Write, frame: &[u8]) -> io::Result<()> {
+    io.write_all(frame)?;
+    io.flush()
 }
 
 fn send(io: &mut impl Write, msg: Main) -> io::Result<()> {
     let f = encode_frame(&msg).map_err(|e| io::Error::other(e.to_string()))?;
     io.write_all(&f)?;
     io.flush()
+}
+
+/// Serving over a pseudo-terminal, the way a client meets a real Flipper's serial port.
+pub mod pty {
+    use std::io::{self, Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
+
+    use serialport::SerialPort;
+
+    use super::{FakeFlipper, Transcript};
+
+    /// How long the fake waits for a client to open the port, and for a quiet client to speak.
+    pub const WAIT: Duration = Duration::from_secs(60);
+
+    /// The master side of the pseudo-terminal as a byte stream for `FakeFlipper::serve`: read
+    /// timeouts are waited through (up to [`WAIT`] of silence), and a hang-up, which the master reports
+    /// once the client has closed the port (EIO or BrokenPipe), is the end of the stream.
+    pub struct PtyMaster<'a> {
+        pub port: &'a mut serialport::TTYPort,
+    }
+
+    impl Read for PtyMaster<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let start = Instant::now();
+            loop {
+                match self.port.read(buf) {
+                    Ok(n) => return Ok(n),
+                    Err(e) if matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {
+                        if start.elapsed() > WAIT {
+                            return Ok(0);
+                        }
+                    }
+                    // The client closed the port: the master reports EIO, or serialport reports the
+                    // hang-up its poll saw as BrokenPipe.
+                    Err(e) if e.raw_os_error() == Some(5) || e.kind() == io::ErrorKind::BrokenPipe => return Ok(0),
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+
+    impl Write for PtyMaster<'_> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.port.write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.port.flush()
+        }
+    }
+
+    /// Waits until a client has the slave side open (the master stops reporting a hang-up).
+    pub fn wait_for_client(port: &serialport::TTYPort) -> bool {
+        use nix::poll::{poll, PollFd, PollFlags};
+        let start = Instant::now();
+        while start.elapsed() < WAIT {
+            let mut fds = [PollFd::new(port.as_raw_fd(), PollFlags::POLLIN)];
+            match poll(&mut fds, 50) {
+                Ok(_) if fds[0].revents().is_some_and(|r| r.contains(PollFlags::POLLHUP)) => std::thread::sleep(Duration::from_millis(20)),
+                Ok(_) => return true,
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
+    /// Makes a pseudo-terminal, calls `ready` with its path, then serves `sessions` clients one
+    /// after the other (the C++ app opens the port twice: device information, then the work).
+    /// Like a real Flipper, the banner goes out when a client opens the port.
+    pub fn serve_pty(fake: &FakeFlipper, sessions: usize, ready: impl FnOnce(&str)) -> (Vec<Transcript>, io::Result<()>) {
+        let mut all = Vec::new();
+        let r = (|| {
+            let (mut master, slave) = serialport::TTYPort::pair().map_err(io::Error::from)?;
+            let name = slave.name().unwrap_or_default();
+            drop(slave);
+            ready(&name);
+            for _ in 0..sessions {
+                if !wait_for_client(&master) {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "no client opened the port"));
+                }
+                // Let the client finish setting up the port before the banner.
+                std::thread::sleep(Duration::from_millis(200));
+                all.push(fake.serve(&mut PtyMaster { port: &mut master })?);
+            }
+            Ok(())
+        })();
+        (all, r)
+    }
 }

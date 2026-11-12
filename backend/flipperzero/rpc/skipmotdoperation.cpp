@@ -2,6 +2,8 @@
 
 #include <QSerialPort>
 
+#include "testhooks.h"
+
 using namespace Flipper;
 using namespace Zero;
 
@@ -21,5 +23,10 @@ QByteArray SkipMOTDOperation::endOfMessageToken() const
 
 uint32_t SkipMOTDOperation::flags() const
 {
+    // Test hook (testhooks.h): a pseudo-terminal has no DTR line.
+    if(Argus::isTestSerialPort()) {
+        return 0;
+    }
+
     return DTR;
 }
