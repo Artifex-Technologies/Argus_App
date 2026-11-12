@@ -135,6 +135,8 @@ pub struct Session<T: Transport> {
     decoder: FrameDecoder,
     counter: u32,
     broken: bool,
+    /// The read timeout every request waits with (set by [`Session::start`]).
+    timeout: Duration,
 }
 
 impl<T: Transport> Session<T> {
@@ -149,7 +151,7 @@ impl<T: Transport> Session<T> {
         let after_echo = read_until(&mut io, &mut rest, START_RPC_ECHO, MAX_BANNER, "the start_rpc_session echo")?;
         let mut decoder = FrameDecoder::new();
         decoder.push(&rest[after_echo..])?;
-        Ok(Session { io, decoder, counter: 0, broken: false })
+        Ok(Session { io, decoder, counter: 0, broken: false, timeout })
     }
 
     /// The next command id. 0 is reserved for broadcasts, as in the C++ app.
@@ -266,6 +268,42 @@ impl<T: Transport> Session<T> {
             }
             if on_response(resp)? {
                 return Ok(());
+            }
+        }
+    }
+
+    /// The next message of any id, waiting at most `wait`; `None` when nothing complete arrived
+    /// in that time. A quiet device is not an error here (the session stays usable): the live
+    /// screen polls for broadcasts between requests this way. Anything else that goes wrong
+    /// breaks the session, as in [`Session::receive`].
+    pub fn poll_message(&mut self, wait: Duration) -> Result<Option<Main>, RpcError> {
+        if self.broken {
+            return Err(RpcError::Broken);
+        }
+        let r = self.poll_inner(wait);
+        let restored = self.io.set_read_timeout(self.timeout).map_err(RpcError::Io);
+        let r = r.and_then(|m| restored.map(|_| m));
+        self.check(r)
+    }
+
+    fn poll_inner(&mut self, wait: Duration) -> Result<Option<Main>, RpcError> {
+        let deadline = std::time::Instant::now() + wait;
+        let mut chunk = [0u8; 4096];
+        loop {
+            if let Some(m) = self.decoder.next_frame()? {
+                return Ok(Some(m));
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            self.io.set_read_timeout(left.max(Duration::from_millis(1))).map_err(RpcError::Io)?;
+            match self.io.read(&mut chunk) {
+                Ok(0) => return Err(RpcError::Closed("a broadcast")),
+                Ok(n) => self.decoder.push(&chunk[..n])?,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if is_timeout(&e) => return Ok(None),
+                Err(e) => return Err(RpcError::Io(e)),
             }
         }
     }

@@ -5,9 +5,16 @@
 //! A frame is the 128x64 monochrome screen, 1024 bytes: byte `y / 8 * 128 + x`, bit `y % 8` is the
 //! pixel at (x, y), as the app's canvas reads it. A frame of any other length is dropped, as the
 //! C++ streamer drops it since 2026-11-12 (its canvas read past the end of a short one).
+//!
+//! The app keeps the stream open ([`Session::screen_start`], then [`Session::next_screen_frame`]
+//! between its other requests, [`Session::screen_stop`]) and sends the keypad's input events
+//! ([`Session::gui_input`]) as the C++ `ScreenStreamer::sendInputEvent` does. An input event is
+//! the one request here that changes what the device does: it is a button press.
+
+use std::time::{Duration, Instant};
 
 use crate::proto::pb::main::Content;
-use crate::proto::pb_gui;
+use crate::proto::pb_gui::{self, InputKey, InputType};
 use crate::session::{RpcError, Session};
 use crate::transport::Transport;
 
@@ -90,6 +97,50 @@ impl<T: Transport> Session<T> {
         collected?;
         stopped?;
         Ok(out)
+    }
+}
+
+impl<T: Transport> Session<T> {
+    /// `GuiStartScreenStreamRequest`: frames follow as broadcasts until [`Session::screen_stop`].
+    pub fn screen_start(&mut self) -> Result<(), RpcError> {
+        self.request(Content::GuiStartScreenStreamRequest(pb_gui::StartScreenStreamRequest {}), |_| Ok(()))
+    }
+
+    /// `GuiStopScreenStreamRequest`. Frames already on their way are skipped by the requests
+    /// that follow, as any broadcast is.
+    pub fn screen_stop(&mut self) -> Result<(), RpcError> {
+        self.request(Content::GuiStopScreenStreamRequest(pb_gui::StopScreenStreamRequest {}), |_| Ok(()))
+    }
+
+    /// The next screen frame of an open stream, waiting at most `wait`; `None` when none came.
+    /// Frames of the wrong length and other broadcasts are skipped (at most [`MAX_OTHER`] per
+    /// call); a quiet device leaves the session usable.
+    pub fn next_screen_frame(&mut self, wait: Duration) -> Result<Option<Frame>, RpcError> {
+        let deadline = Instant::now() + wait;
+        let mut other = 0usize;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let Some(m) = self.poll_message(left)? else { return Ok(None) };
+            match m.content {
+                Some(Content::GuiScreenFrame(f)) if m.command_id == 0 && f.data.len() == FRAME_LEN => {
+                    return Ok(Some(Frame { data: f.data, orientation: f.orientation }));
+                }
+                _ => other += 1,
+            }
+            if other > MAX_OTHER {
+                return Err(RpcError::Limit(format!("more than {MAX_OTHER} messages that were not usable frames")));
+            }
+            if left.is_zero() {
+                return Ok(None);
+            }
+        }
+    }
+
+    /// `GuiSendInputEventRequest`: one input event (a press, release, short, long or repeat of
+    /// one button), as the keypad sends them.
+    pub fn gui_input(&mut self, key: InputKey, kind: InputType) -> Result<(), RpcError> {
+        let req = pb_gui::SendInputEventRequest { key: key as i32, r#type: kind as i32 };
+        self.request(Content::GuiSendInputEventRequest(req), |_| Ok(()))
     }
 }
 

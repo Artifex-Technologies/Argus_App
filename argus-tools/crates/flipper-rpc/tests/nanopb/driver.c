@@ -179,6 +179,23 @@ int main(void)
     m.content.system_update_request.update_manifest = manifest_path;
     emit("req_update", &m);
 
+    /* the live screen: ScreenStreamer's start and stop, and an input event as the keypad sends it */
+    m = request(30, PB_Main_gui_start_screen_stream_request_tag, false);
+    emit("req_screen_start", &m);
+
+    m = request(31, PB_Main_gui_stop_screen_stream_request_tag, false);
+    emit("req_screen_stop", &m);
+
+    m = request(32, PB_Main_gui_send_input_event_request_tag, false);
+    m.content.gui_send_input_event_request.key = PB_Gui_InputKey_OK;
+    m.content.gui_send_input_event_request.type = PB_Gui_InputType_SHORT;
+    emit("req_input_ok_short", &m);
+
+    m = request(33, PB_Main_gui_send_input_event_request_tag, false);
+    m.content.gui_send_input_event_request.key = PB_Gui_InputKey_UP;
+    m.content.gui_send_input_event_request.type = PB_Gui_InputType_PRESS;
+    emit("req_input_up_press", &m);
+
     /* ---- responses, as the firmware fills them ---- */
     m = response(1, PB_Main_system_protobuf_version_response_tag, false, PB_CommandStatus_OK);
     m.content.system_protobuf_version_response.major = 0;

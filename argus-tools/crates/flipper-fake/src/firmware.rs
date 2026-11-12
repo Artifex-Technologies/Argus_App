@@ -164,13 +164,14 @@ pub fn region_bundle(country: Option<&str>) -> String {
 }
 
 /// Writes the firmware folder into `dir`, which must not exist: `directory.json` (one "release"
-/// channel, one version, its four files for target f7) and the files, `bundle` (the region bundle, country
+/// channel, one version, its five files: the full `.dfu` and the update package for target f7, and three for any) and the files, `bundle` (the region bundle, country
 /// `DE`), plus `firmware.dfu`, `radio.bin` and `ob.data` as plain files for argus-cli. `resources_mismatch`: see [`resources_archive`] (its SHA-256 in
 /// `directory.json` is right, so only the app's own check can catch it).
 pub fn write(dir: &Path, resources_mismatch: bool) -> io::Result<()> {
     std::fs::create_dir(dir)?;
-    let files: [(&str, &str, &str, Vec<u8>); 4] = [
+    let files: [(&str, &str, &str, Vec<u8>); 5] = [
         ("full_dfu", "f7", "flipper-z-f7-full-test.dfu", firmware()),
+        ("update_tgz", "f7", "flipper-z-f7-update-test.tgz", crate::archives::update_package(true)),
         ("core2_firmware_tgz", "any", "flipper-z-any-core2_firmware-test.tgz", core2_archive()),
         ("scripts_tgz", "any", "flipper-z-any-scripts-test.tgz", scripts_archive()),
         ("resources_tgz", "any", "flipper-z-any-resources-test.tgz", resources_archive(resources_mismatch)),

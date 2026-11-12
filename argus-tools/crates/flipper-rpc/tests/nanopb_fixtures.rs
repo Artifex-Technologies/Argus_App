@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use flipper_rpc::frame::{encode_frame, FrameDecoder};
 use flipper_rpc::proto::pb::main::Content;
 use flipper_rpc::proto::pb::{CommandStatus, Empty, Main};
-use flipper_rpc::proto::{pb_property, pb_storage, pb_system};
+use flipper_rpc::proto::{pb_gui, pb_property, pb_storage, pb_system};
 
 fn fixtures() -> BTreeMap<String, Vec<u8>> {
     let text = include_str!("fixtures/nanopb_frames.txt");
@@ -98,6 +98,28 @@ fn requests_are_byte_identical_to_the_cpp_app() {
             req(
                 29,
                 Content::SystemUpdateRequest(pb_system::UpdateRequest { update_manifest: path("/ext/update/f7-update-test/update.fuf") }),
+            ),
+        ),
+        ("req_screen_start", req(30, Content::GuiStartScreenStreamRequest(pb_gui::StartScreenStreamRequest {}))),
+        ("req_screen_stop", req(31, Content::GuiStopScreenStreamRequest(pb_gui::StopScreenStreamRequest {}))),
+        (
+            "req_input_ok_short",
+            req(
+                32,
+                Content::GuiSendInputEventRequest(pb_gui::SendInputEventRequest {
+                    key: pb_gui::InputKey::Ok as i32,
+                    r#type: pb_gui::InputType::Short as i32,
+                }),
+            ),
+        ),
+        (
+            "req_input_up_press",
+            req(
+                33,
+                Content::GuiSendInputEventRequest(pb_gui::SendInputEventRequest {
+                    key: pb_gui::InputKey::Up as i32,
+                    r#type: pb_gui::InputType::Press as i32,
+                }),
             ),
         ),
     ];
@@ -209,5 +231,5 @@ fn empty_file_read_differs_on_the_wire_but_not_in_meaning() {
 #[test]
 fn every_fixture_is_covered() {
     let f = fixtures();
-    assert_eq!(f.len(), 42, "a frame was added to driver.c; add it to these tests");
+    assert_eq!(f.len(), 46, "a frame was added to driver.c; add it to these tests");
 }

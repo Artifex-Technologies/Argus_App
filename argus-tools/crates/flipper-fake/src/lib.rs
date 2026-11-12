@@ -10,7 +10,7 @@
 //!
 //! Faults ([`Fault`]) make it misbehave on the first RPC request, for negative tests.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::{self, Read, Write};
 
 use flipper_rpc::frame::{encode_frame, FrameDecoder};
@@ -66,6 +66,20 @@ pub fn screen_frame(i: usize) -> Vec<u8> {
     (0..1024).map(|j| ((i + 1) * 37 + j * 11) as u8).collect()
 }
 
+/// The screen the fake shows after its `n`th input event: a box whose width grows with `n`, so a
+/// test can tell the screens apart.
+pub fn input_frame(n: usize) -> Vec<u8> {
+    let mut data = vec![0u8; 1024];
+    let w = (8 + n * 6).min(120);
+    for x in 4..4 + w {
+        // rows 16 to 47: bytes 2..6 of each column
+        for page in 2..6 {
+            data[page * 128 + x] = 0xff;
+        }
+    }
+    data
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     pub path: String,
@@ -106,6 +120,10 @@ pub struct FakeFlipper {
     pub live: RefCell<Option<storage::Storage>>,
     /// The storage refuses every change ("access denied").
     pub read_only: bool,
+    /// The screen stream is running (between a start and a stop in this session).
+    pub streaming: Cell<bool>,
+    /// Input events received so far: (key, type), in order, across sessions.
+    pub inputs: RefCell<Vec<(i32, i32)>>,
 }
 
 /// What passed over the connection.
@@ -293,6 +311,8 @@ impl FakeFlipper {
             screen_frames: 1,
             live: RefCell::new(None),
             read_only: false,
+            streaming: Cell::new(false),
+            inputs: RefCell::new(Vec::new()),
         }
     }
 
@@ -332,6 +352,7 @@ impl FakeFlipper {
         io.flush()?;
 
         self.with_storage(|s| s.end_session());
+        self.streaming.set(false);
         let mut decoder = FrameDecoder::new();
         let mut chunk = [0u8; 4096];
         let mut first = true;
@@ -523,8 +544,27 @@ impl FakeFlipper {
                 for i in 0..self.screen_frames {
                     broadcast(io, if self.fault == Fault::FrameWithoutData { Vec::new() } else { screen_frame(i) })?;
                 }
+                self.streaming.set(true);
             }
-            Some(Content::GuiStopScreenStreamRequest(_)) => send(io, ok(Content::Empty(Empty {}), false))?,
+            Some(Content::GuiStopScreenStreamRequest(_)) => {
+                self.streaming.set(false);
+                send(io, ok(Content::Empty(Empty {}), false))?
+            }
+            // As the firmware's rpc_gui: a key or type outside the enums is refused, anything else
+            // goes to the input service. The fake records it and, while the stream runs, sends the
+            // screen the press leads to: [`input_frame`] of the inputs so far.
+            Some(Content::GuiSendInputEventRequest(r)) => {
+                if pb_gui::InputKey::try_from(r.key).is_err() || pb_gui::InputType::try_from(r.r#type).is_err() {
+                    send(io, error(CommandStatus::ErrorInvalidParameters))?;
+                } else {
+                    self.inputs.borrow_mut().push((r.key, r.r#type));
+                    send(io, ok(Content::Empty(Empty {}), false))?;
+                    if self.streaming.get() {
+                        let frame = pb_gui::ScreenFrame { data: input_frame(self.inputs.borrow().len()), ..Default::default() };
+                        send(io, Main { command_id: 0, content: Some(Content::GuiScreenFrame(frame)), ..Default::default() })?;
+                    }
+                }
+            }
             // The C++ app shows a status screen on the Flipper during backups and updates.
             Some(Content::GuiStartVirtualDisplayRequest(_)) | Some(Content::GuiStopVirtualDisplayRequest(_)) => {
                 send(io, ok(Content::Empty(Empty {}), false))?
