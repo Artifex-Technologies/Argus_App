@@ -257,6 +257,9 @@ void FlipperZero::registerOperation(AbstractOperation *operation)
             qCCritical(CAT_DEVICE).noquote() << operation->description() << "ERROR:" << operation->errorString();
             m_state->setError(operation->error(), operation->errorString());
 
+        } else if(!m_state->warningString().isEmpty()) {
+            qCWarning(CAT_DEVICE).noquote() << operation->description() << "PARTIAL SUCCESS:" << m_state->warningString();
+
         } else {
             qCInfo(CAT_DEVICE).noquote() << operation->description() << "SUCCESS";
         }
@@ -265,6 +268,7 @@ void FlipperZero::registerOperation(AbstractOperation *operation)
         emit operationFinished();
     });
 
+    m_state->clearWarning();
     qCInfo(CAT_DEVICE).noquote() << operation->description() << "START";
     operation->start();
 }

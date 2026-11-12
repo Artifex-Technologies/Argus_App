@@ -62,6 +62,7 @@ private:
     FirmwareHelper *m_helper;
 
     Updates::VersionInfo m_versionInfo;
+    QString m_radioError;
     bool m_skipBackup;
     QUrl m_backupUrl;
 };

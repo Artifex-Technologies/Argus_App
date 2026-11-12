@@ -79,10 +79,11 @@ jobs:
           sh argus-tools/crates/flipper-dfu/tests/qt-oracle/build.sh "$RUNNER_TEMP/dfu-oracle"
           (cd argus-tools && ARGUS_DFU_ORACLE="$RUNNER_TEMP/dfu-oracle" cargo test --locked -j4 -p flipper-dfu --test qt_oracle --test qt_device --test qt_wb55)
 
-      # The full repair: qFlipper-cli (FullRepairOperation, through its test hooks: the bootloader over a socket, the
-      # devices from a state file, the update files from a made-up local folder) and argus-cli recovery repair on the
-      # same fake Flipper across its resets; requests, flash, option bytes and exit codes compared. No USB, no network.
-      - name: Compare the full repair (C++ and Rust)
+      # The full repair and the legacy update: qFlipper-cli (FullRepairOperation, LegacyUpdateOperation, through its
+      # test hooks: the bootloader over a socket, the devices from a state file, the update files from a made-up local
+      # folder) and argus-cli recovery repair|legacy-update on the same fake Flipper across its resets; requests,
+      # flash, option bytes, the card and exit codes compared. No USB, no network.
+      - name: Compare the full repair and the legacy update (C++ and Rust)
         run: |
           (cd argus-tools && cargo build --locked -j4 -p argus-cli -p flipper-fake)
           sh argus-tools/crates/flipper-fake/compare-repair.sh build-release/qFlipper-cli argus-tools/target/debug/argus-cli \

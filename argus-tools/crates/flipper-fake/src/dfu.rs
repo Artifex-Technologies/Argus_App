@@ -644,12 +644,15 @@ pub enum Life {
 /// Serves the fake on a socket at `path` across resets, as a chip that leaves USB and comes back:
 /// every connection is one session; after a reset the socket goes away (before the answer that saw the
 /// reset) for `gap` and comes back if the chip is in its bootloader again, and stays away once it has
-/// booted its firmware. `life` hears each change. Runs until `stop` is set; returns the fake.
+/// booted its firmware. The bootloader appears whenever `enter` is set (set it before the call to start in
+/// the bootloader; set it later for a firmware that reboots into it). `life` hears each change. Runs until
+/// `stop` is set; returns the fake.
 pub fn serve_lives(
     mut f: FakeDfu,
     path: &std::path::Path,
     gap: std::time::Duration,
     stop: &std::sync::atomic::AtomicBool,
+    enter: &std::sync::atomic::AtomicBool,
     life: &mut dyn FnMut(Life),
 ) -> FakeDfu {
     use std::os::unix::net::UnixListener;
@@ -660,15 +663,22 @@ pub fn serve_lives(
         l.set_nonblocking(true).expect("non-blocking listener");
         l
     };
-    let mut listener = Some(bind());
-    life(Life::Bootloader);
+    let mut listener: Option<UnixListener> = None;
     while !stop.load(Ordering::SeqCst) {
-        let accepted = match &listener {
-            Some(l) => l.accept(),
-            None => {
+        if listener.is_none() {
+            if enter.swap(false, Ordering::SeqCst) {
+                f.left = false;
+                f.booted_firmware = false;
+                listener = Some(bind());
+                life(Life::Bootloader);
+            } else {
                 std::thread::sleep(std::time::Duration::from_millis(5));
                 continue;
             }
+        }
+        let accepted = match &listener {
+            Some(l) => l.accept(),
+            None => continue,
         };
         match accepted {
             Ok((s, _)) => {
@@ -684,9 +694,7 @@ pub fn serve_lives(
                         life(Life::Firmware);
                     } else {
                         std::thread::sleep(gap);
-                        f.left = false;
-                        listener = Some(bind());
-                        life(Life::Bootloader);
+                        enter.store(true, Ordering::SeqCst);
                     }
                 }
             }
@@ -700,7 +708,7 @@ pub fn serve_lives(
 
 /// [`serve_lives`] without listening to the changes.
 pub fn serve_with_resets(f: FakeDfu, path: &std::path::Path, gap: std::time::Duration, stop: &std::sync::atomic::AtomicBool) -> FakeDfu {
-    serve_lives(f, path, gap, stop, &mut |_| {})
+    serve_lives(f, path, gap, stop, &std::sync::atomic::AtomicBool::new(true), &mut |_| {})
 }
 
 /// The log with a `SESSION n` line where each connection started.

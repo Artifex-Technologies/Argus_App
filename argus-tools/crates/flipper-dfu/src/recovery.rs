@@ -326,3 +326,12 @@ pub fn full_repair<B: Bootloader>(
     let option_bytes = step(b, "correct the option bytes", |d| download_option_bytes(d, option_bytes))?;
     Ok(RepairReport { radio_error, option_bytes })
 }
+
+/// The bootloader part of the C++ `LegacyUpdateOperation` when the wireless stack is current: the firmware,
+/// then the chip leaves the bootloader and boots it (the option bytes are not touched). With a wireless stack
+/// update it is [`full_repair`]'s order instead (boot mode, stack, firmware, option bytes).
+pub fn firmware_and_leave<B: Bootloader>(b: &mut B, firmware: &[u8]) -> Result<(), FlowError> {
+    let fw = dfuse::parse(firmware).map_err(|e| FlowError::Step { step: "read the firmware", error: Error::File(e) })?;
+    step(b, "write the firmware", |d| Ok(d.download_file(&fw)?))?;
+    step(b, "leave the bootloader", exit_recovery)
+}

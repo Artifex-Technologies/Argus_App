@@ -191,7 +191,16 @@ for it (the second state read while the wireless stack runs, the end of an upgra
 the full repair) and `argus-cli recovery repair --resources ... --port PTY` with the same files in eight scenarios (the
 wireless stack running, an older install of the resources on the card with a valid `/ext/Manifest`, no SD card, the FUS
 already running, a FUS stuck in an unknown state, a FUS that never finishes deleting the stack, a flash block of the
-wireless stack refused, a flash block of the firmware refused) and compares the exit status, every bootloader request in order, the whole 1 MiB flash, the
+wireless stack refused, a flash block of the firmware refused). The three where the wireless stack is not installed
+must end in partial success in both (exit 3 and "repaired, but the radio stack was not installed: ..."). Then the
+**legacy update** (`LegacyUpdateOperation`, what the C++ app runs for a Flipper without SD card) against `argus-cli
+recovery legacy-update` in three: `flipper-fake --recovery DIR --start-firmware` starts as the firmware and turns into
+the bootloader when asked to reboot into DFU; `/int` is backed up, the firmware written and the chip let go (or, with
+`--old-radio`, the repair's steps), then `/int` restored and a restart; also with the stack refused (exit 3,
+"updated, but ..."). With the test hook, a serial device that leaves also ends the C++ session (a vanished USB port
+does that; a pseudo-terminal does not vanish). Last, a resources bundle with a file that is not what its manifest says:
+argus-cli refuses it before it opens anything, the C++ app repairs the chip and then refuses the bundle without
+changing the card. and compares the exit status, every bootloader request in order, the whole 1 MiB flash, the
 option bytes (RDP 0xAA, untouched), OTP, FUS state and commands, the wireless stack version, the pages erased, the
 resets and whether the chip booted its firmware. The C++ app's own identification of the device (an OTP read each
 time it appears, which leaves the chip in dfuUPLOAD-IDLE, so its next connection starts with an abort) is left out of
@@ -202,7 +211,7 @@ everything written; otherwise only what went away or changed is removed and what
 manifest last), no region data (the development region needs none) and a restart; the script compares those
 requests in order and the files on the card afterwards (sizes and MD5). The C++ app also probes the device first (and
 **sets its clock**) and starts its screen; argus-cli reads `devinfo` for the region. Result on 2026-11-12: all checks
-pass (131); the bootloader requests are the same in the same order (450 in the main scenario, 1824 when the FUS never
+pass (184 with the legacy update and the cases below); the bootloader requests are the same in the same order (450 in the main scenario, 1824 when the FUS never
 settles: 120 state reads each), so are the requests on the firmware, and both leave the same bytes on the chip and the
 card. No difference turned up in the bootloader part; the resources install had two bugs, fixed in both (section 5).
 
@@ -558,9 +567,17 @@ Found while porting the full repair, and **fixed in both versions** on 2026-11-1
   never started. Both now give up after 120 polls. (Rust: `tests/recovery.rs`; both: the `never-settles` scenario of
   `compare-repair.sh`, the same 120 state reads.)
 
+**Changed in both versions** on 2026-11-12, at my request: a repair or legacy update whose wireless stack step failed
+went on (by design: the chip still gets a working firmware) and then reported plain success, "SUCCESS" and exit 0, the
+failure only in the log, although the chip runs without its wireless stack. Now both report a partial success:
+`qFlipper-cli` logs `... PARTIAL SUCCESS: repaired, but the radio stack was not installed: <why>` (or "updated") and
+exits 3 (`DeviceState::warningString`, cleared when the next operation starts; the GUI does not show it yet);
+`argus-cli recovery repair|legacy-update` prints `"ok": false, "partial": true` with that message under `error` and
+exits 3. Both CLIs' help lists the exit codes.
+
 Found while porting the steps after a repair (the resources install), and **fixed in both versions** on 2026-11-12.
-`flipper-rpc/tests/assets.rs` has cases for both, `chymaera selftest` for the first (it fails without the C++ fix);
-the second C++ change is not covered by a test yet:
+`flipper-rpc/tests/assets.rs` has cases for both, `chymaera selftest` for the first (it fails without the C++ fix),
+and `compare-repair.sh`'s `mismatch` scenario for the second:
 
 - **A resources manifest could name paths outside `/ext`.** `AssetManifest` took any name: `D:..`, then `D:../int`,
   then `F:...:../int/.bt.keys` made a valid manifest, and so did names with a backslash or a control character, and
@@ -577,14 +594,15 @@ the C++ capture pull stopped counting them as failed (as `stagedPath` used to). 
 refused name as failed again, and the Rust pull does the same.
 
 For the full repair: the C++ app names the device in its bootloader from the OTP each time it appears and
-argus-cli does not (it has one device, the one on `--dfu-socket`); a wireless stack step that fails ends the C++
-repair with "SUCCESS", exit 0 and the failure only in its log (the chip then runs its firmware without a wireless
-stack), while argus-cli also exits 0 but reports `"radio": {"installed": false, "error": ...}`; the C++ app waits for
+argus-cli does not (it has one device, the one on `--dfu-socket`); the C++ app waits for
 re-enumeration through hot-plug and argus-cli by trying the socket again (at most 30 s, as the C++ timeout); and
 for the steps on the firmware, argus-cli checks the whole resources bundle before it opens anything (the C++ app asks
 the device for its card first), reads the region from `devinfo` (the C++ app has it from its probe), and refuses a
 device of any region but the development one before sending anything, because that region's data comes from
-Flipper's server (the C++ app installs the resources first, then fetches it).
+Flipper's server (the C++ app installs the resources first, then fetches it). For the legacy update: argus-cli keeps
+the backup of `/int` in the file `--backup` names (it must not exist, and it stays; the C++ app uses a temporary file),
+checks the region before the backup, and installs the wireless stack when it is given `RADIO.bin` (the C++ app
+compares the device's version with the update's; argus-cli has only the image).
 
 What still differs, on purpose: the C++ app probes the device before a backup (and **sets its clock**) and starts the
 screen stream and a status screen; the Rust CLI only reads what the command needs. For writes: the Rust CLI asks for
@@ -613,16 +631,13 @@ failed, and does not read `devinfo` or start the screen.
    ones (`crates/flipper-dfu`; the nusb transport behind the `usb` feature, unused by tests and by any command).
    The STM32WB55 layer, `recovery.cpp`'s flows and `argus-cli recovery` (behind `--yes`, `--dfu-socket` only) are done
    too, and the full repair (`argus-cli recovery repair`, fake only). Left for phase 6:
-   - The repair is compared with the C++ `FullRepairOperation` on the fakes (`compare-repair.sh`, section 4; in
-     `linux.yml`): same bootloader requests, flash and option bytes in six scenarios. Still to compare: the legacy
-     update (`LegacyUpdateOperation`: backup of `/int` over RPC, reboot into DFU, firmware, leave, restore). The hooks
-     cover it; the fake needs to start as the firmware on its pseudo-terminal and turn into the bootloader when it
-     gets a reboot into DFU (`--no-sd` then selects the legacy path in the C++ app).
-   - The steps on the firmware after a repair are in Rust and compared too (`flipper_rpc::assets`, `argus-cli recovery
-     repair --resources R.tgz --port DEV` and `recovery finish R.tgz`): resources, restart. Region data is only right
-     for the development region; any other region is refused until phase 7 brings Flipper's region bundle (it could
-     also be read from a local file: `regionprovisioningoperation.cpp` and the plugin's `regionBands` are the
-     reference).
+   - The repair and the legacy update are compared with the C++ `FullRepairOperation` and `LegacyUpdateOperation` on
+     the fakes (`compare-repair.sh`, section 4; in `linux.yml`), including the steps on the firmware (resources,
+     `/int` backup and restore, restart). A missing wireless stack is a partial success (exit 3) in both.
+   - The GUI does not show that partial success yet (`DeviceState::warningString`): it should, in the finish screen.
+   - Region data is only right for the development region; any other region is refused until phase 7 brings Flipper's
+     region bundle (it could also be read from a local file: `regionprovisioningoperation.cpp` and the plugin's
+     `regionBands` are the reference).
    - Wiring `flipper_dfu::usb` into argus-cli opens a real USB device: only when I say so, with me watching, and
      never from a test.
    No flashing in tests, and none on my device until I say so.

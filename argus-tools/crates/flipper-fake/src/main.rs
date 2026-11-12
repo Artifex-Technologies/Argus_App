@@ -23,7 +23,7 @@
 //! `--read-only` refuses every change with "access denied" (a write-protected or failing card).
 //! A reboot or factory reset request ends the session, as the device leaves USB.
 //!
-//! `flipper-fake --recovery DIR [--fus running|idle|stuck|never-settles] [--no-sd] [--old-resources] [--fail-write-at HEX]` is one Flipper across
+//! `flipper-fake --recovery DIR [--fus running|idle|stuck|never-settles] [--no-sd] [--old-resources] [--old-radio] [--start-firmware] [--fail-write-at HEX]` is one Flipper across
 //! its lives, for comparing the full repair (`compare-repair.sh`): the fake bootloader (with factory
 //! information in its OTP) on the Unix socket `DIR/dfu.sock`, gone after every reset and back while the
 //! chip boots into it; once the chip boots its firmware, the fake Flipper on a pseudo-terminal (printed as
@@ -34,8 +34,10 @@
 //! `DIR/dump.txt` (the storage). `--fus`: the wireless stack running (default), the FUS running, or a FUS
 //! stuck in a state the repair does not know, or one that never finishes deleting the wireless stack; `--fail-write-at HEX`: the data block written over that
 //! address fails (errPROG); `--old-resources`: the card holds an older install of the resources with a valid
-//! `/ext/Manifest` (src/firmware.rs).
-//! `flipper-fake --write-firmware DIR` writes a made-up update folder (`directory.json` and its files) for
+//! `/ext/Manifest` (src/firmware.rs); `--start-firmware`: the chip starts as the firmware on the
+//! pseudo-terminal and turns into its bootloader when asked to reboot into DFU (the legacy update);
+//! `--old-radio`: devinfo reports wireless stack 1.16.3, older than the update's 1.17.3.
+//! `flipper-fake --write-firmware DIR [--resources-mismatch]` writes a made-up update folder (`directory.json` and its files) for
 //! the C++ app's test hook `ARGUS_TEST_FIRMWARE_DIR` (src/firmware.rs) and exits.
 //!
 //! `flipper-fake --write-archives DIR` writes the restore test archives (`good-*.tgz` that
@@ -92,6 +94,7 @@ fn main() -> ExitCode {
     let mut fus = [0xFF, 0xFE];
     let mut fail_write_at: Option<u32> = None;
     let mut fus_never_settles = false;
+    let mut start_firmware = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -109,8 +112,14 @@ fn main() -> ExitCode {
             "--int-conflict" => fake = fake.with_int_conflict(),
             "--read-only" => fake.read_only = true,
             "--write-firmware" => {
-                return match args.next() {
-                    Some(dir) => match flipper_fake::firmware::write(&PathBuf::from(&dir)) {
+                let dir = args.next();
+                let mismatch = match args.next().as_deref() {
+                    None => false,
+                    Some("--resources-mismatch") => true,
+                    Some(_) => return usage(),
+                };
+                return match dir {
+                    Some(dir) => match flipper_fake::firmware::write(&PathBuf::from(&dir), mismatch) {
                         Ok(()) => ExitCode::SUCCESS,
                         Err(e) => {
                             eprintln!("flipper-fake: {dir}: {e}");
@@ -118,7 +127,7 @@ fn main() -> ExitCode {
                         }
                     },
                     None => usage(),
-                }
+                };
             }
             "--recovery" => recovery = args.next().map(PathBuf::from),
             "--fus" => match args.next().as_deref() {
@@ -148,6 +157,14 @@ fn main() -> ExitCode {
             "--legacy" => fake.protobuf_version = (0, 13),
             "--no-sd" => fake.sd_card = false,
             "--old-resources" => fake = flipper_fake::firmware::with_old_resources(fake),
+            "--start-firmware" => start_firmware = true,
+            "--old-radio" => {
+                for (k, v) in fake.devinfo.iter_mut() {
+                    if k == "radio.stack.minor" {
+                        *v = "16".into();
+                    }
+                }
+            }
             "--hostile" => fake = fake.with_hostile_names(),
             "--captures" => fake = fake.with_captures(),
             "--screen-frames" => match args.next().and_then(|n| n.parse().ok()).filter(|n| (0..=1000).contains(n)) {
@@ -173,7 +190,7 @@ fn main() -> ExitCode {
             fus_never_settles,
             ..dfu::Faults::default()
         };
-        return match serve_recovery(&dir, faults, fake) {
+        return match serve_recovery(&dir, faults, fake, start_firmware) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("flipper-fake: {}: {e}", dir.display());
@@ -292,38 +309,48 @@ fn wait_for_client_or(port: &serialport::TTYPort, stop: &std::sync::atomic::Atom
 }
 
 /// `--recovery DIR` (see the top of this file).
-fn serve_recovery(dir: &std::path::Path, faults: dfu::Faults, fake: FakeFlipper) -> io::Result<()> {
+fn serve_recovery(dir: &std::path::Path, faults: dfu::Faults, fake: FakeFlipper, start_firmware: bool) -> io::Result<()> {
     use serialport::SerialPort;
     use std::io::Read;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
+
     let state = dir.join("state");
+    // the chip's lives are counted, so a reader that misses a short absence still sees a new device
+    let lives = Arc::new(AtomicUsize::new(0));
+    let state_lock = Arc::new(Mutex::new(()));
     let write_state = {
-        let (dir, state) = (dir.to_path_buf(), state.clone());
-        move |s: &str| {
+        let (dir, state, lives, lock) = (dir.to_path_buf(), state.clone(), lives.clone(), state_lock.clone());
+        move |kind: &str| {
+            let _guard = lock.lock();
+            let text = if kind == "none" { "none".to_string() } else { format!("{kind} {}", lives.fetch_add(1, Ordering::SeqCst) + 1) };
             let tmp = dir.join("state.tmp");
-            let _ = std::fs::write(&tmp, s).and_then(|()| std::fs::rename(&tmp, &state));
+            let _ = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &state));
         }
     };
-    write_state("none");
+    write_state(if start_firmware { "serial" } else { "none" });
 
     let (mut master, slave) = serialport::TTYPort::pair().map_err(io::Error::from)?;
     let name = slave.name().unwrap_or_default();
     drop(slave);
 
     let stop = Arc::new(AtomicBool::new(false));
-    let booted = Arc::new(AtomicBool::new(false));
+    let booted = Arc::new(AtomicBool::new(start_firmware));
+    // the bootloader appears: at the start, or when the firmware reboots into it
+    let enter = Arc::new(AtomicBool::new(!start_firmware));
 
     // the firmware side: sessions on the pseudo-terminal once the chip has booted its firmware
-    let (stop2, booted2) = (stop.clone(), booted.clone());
+    let (stop2, booted2, enter2, write_state2) = (stop.clone(), booted.clone(), enter.clone(), write_state.clone());
     let rpc = std::thread::spawn(move || {
         let mut all: Vec<Transcript> = Vec::new();
-        while !booted2.load(Ordering::SeqCst) && !stop2.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
         for _ in 0..16 {
+            while !booted2.load(Ordering::SeqCst) && !stop2.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
             if !wait_for_client_or(&master, &stop2) {
                 break;
             }
@@ -331,7 +358,16 @@ fn serve_recovery(dir: &std::path::Path, faults: dfu::Faults, fake: FakeFlipper)
             match fake.serve(&mut pty::PtyMaster { port: &mut master }) {
                 Ok(t) => {
                     let left = t.left;
+                    // a reboot into DFU: the firmware leaves and the chip comes back as its bootloader
+                    let to_dfu = left
+                        && matches!(t.requests.last().and_then(|m| m.content.as_ref()),
+                            Some(flipper_rpc::proto::pb::main::Content::SystemRebootRequest(r)) if r.mode == 1);
                     all.push(t);
+                    if to_dfu {
+                        booted2.store(false, Ordering::SeqCst);
+                        write_state2("none");
+                        enter2.store(true, Ordering::SeqCst);
+                    }
                     if left {
                         pty::wait_for_close(&master);
                     }
@@ -343,20 +379,14 @@ fn serve_recovery(dir: &std::path::Path, faults: dfu::Faults, fake: FakeFlipper)
     });
 
     let sock = dir.join("dfu.sock");
-    let (stop3, booted3, sock2) = (stop.clone(), booted.clone(), sock.clone());
+    let (stop3, booted3, sock2, enter3) = (stop.clone(), booted.clone(), sock.clone(), enter.clone());
     let chip = std::thread::spawn(move || {
-        // the chip's lives are counted, so a reader that misses a short absence still sees a new device
-        let mut lives = 0;
-        dfu::serve_lives(dfu::FakeDfu::new(faults), &sock2, Duration::from_millis(100), &stop3, &mut |life| match life {
-            dfu::Life::Bootloader => {
-                lives += 1;
-                write_state(&format!("dfu {lives}"));
-            }
+        dfu::serve_lives(dfu::FakeDfu::new(faults), &sock2, Duration::from_millis(100), &stop3, &enter3, &mut |life| match life {
+            dfu::Life::Bootloader => write_state("dfu"),
             dfu::Life::Gone => write_state("none"),
             dfu::Life::Firmware => {
-                lives += 1;
                 booted3.store(true, Ordering::SeqCst);
-                write_state(&format!("serial {lives}"));
+                write_state("serial");
             }
         })
     });

@@ -19,7 +19,8 @@
 // it reads that file every 50 ms instead: "dfu N" is the bootloader on ARGUS_TEST_DFU_SOCKET,
 // "serial N" the Flipper on ARGUS_TEST_SERIAL_PORT, anything else (or no file) no device; N counts
 // the chip's lives. A change is a device leaving and another arriving, as USB hot-plug reports a
-// reset (a new N with the same kind too: a reset can come and go between two reads).
+// reset (a new N with the same kind too: a reset can come and go between two reads). A serial device that
+// leaves also ends its RPC session, as a vanished USB port does (a pseudo-terminal does not vanish).
 //
 // ARGUS_TEST_DFU_SOCKET names a Unix socket: dfu/libusb/usbdevice.cpp sends every USB request
 // there as one line (the line protocol of flipper_dfu::line) and never calls libusb for a device.

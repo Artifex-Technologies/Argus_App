@@ -164,6 +164,27 @@ void DeviceState::clearError()
     emit isErrorChanged();
 }
 
+const QString &DeviceState::warningString() const
+{
+    return m_warningString;
+}
+
+void DeviceState::setWarning(const QString &warningString)
+{
+    m_warningString = warningString;
+    emit warningStringChanged();
+}
+
+void DeviceState::clearWarning()
+{
+    if(m_warningString.isEmpty()) {
+        return;
+    }
+
+    m_warningString.clear();
+    emit warningStringChanged();
+}
+
 const QString &DeviceState::name() const
 {
     return m_deviceInfo.name;

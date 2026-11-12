@@ -234,8 +234,12 @@ fn full_repair_across_resets() {
     assert_eq!((ob.value("nBOOT0").unwrap(), ob.value("nSWBOOT0").unwrap(), ob.value("RDP").unwrap()), (1, 1, 0xAA));
 
     // a FUS stuck in a state the flow does not know: the wireless stack step fails, the repair goes on
+    // and the result is a partial success, never plain success (exit 3)
     let r = repair(Faults { fus_model: true, fus: Some([0x30, 0x02]), ..Faults::default() }, &args, &files);
-    assert_eq!(r.status, 0, "{}", r.json);
+    assert_eq!(r.status, 3, "{}", r.json);
+    assert_eq!((r.json["ok"].as_bool(), r.json["partial"].as_bool()), (Some(false), Some(true)), "{}", r.json);
+    assert_eq!(r.json["error"]["code"], "radio_not_installed");
+    assert!(r.json["error"]["message"].as_str().unwrap().starts_with("repaired, but the radio stack was not installed: "), "{}", r.json);
     assert_eq!(r.json["radio"]["installed"], false);
     assert!(r.json["radio"]["error"].as_str().unwrap().contains("FUS"), "{}", r.json);
     assert_eq!(&r.fake.flash[..fw.len()], &fw[..]);

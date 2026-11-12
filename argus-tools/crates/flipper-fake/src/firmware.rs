@@ -132,11 +132,17 @@ pub fn resources() -> Vec<(&'static str, Vec<u8>)> {
 }
 
 /// `resources.tgz`: `resources/Manifest` (the asset manifest the app compares with the device's) and the files.
-pub fn resources_archive() -> Vec<u8> {
-    let files = resources();
+/// `mismatch`: `Readme.txt` holds other bytes than the manifest's MD5 says (same size); both apps must refuse it.
+pub fn resources_archive(mismatch: bool) -> Vec<u8> {
+    let mut files = resources();
     let mut manifest = String::from("V:0\nT:1700000000\nD:dolphin\nD:nfc\nD:nfc/assets\n");
     for (path, data) in &files {
         manifest.push_str(&format!("F:{}:{}:{path}\n", hex(&Md5::digest(data)), data.len()));
+    }
+    if mismatch {
+        if let Some((_, data)) = files.iter_mut().find(|(p, _)| *p == "Readme.txt") {
+            data[0] ^= 0x20;
+        }
     }
     let mut entries = vec![Raw::dir("resources/"), Raw::file("resources/Manifest", manifest.as_bytes())];
     for d in ["dolphin", "nfc", "nfc/assets"] {
@@ -150,14 +156,15 @@ pub fn resources_archive() -> Vec<u8> {
 
 /// Writes the firmware folder into `dir`, which must not exist: `directory.json` (one "release"
 /// channel, one version, its four files for target f7) and the files, plus `firmware.dfu`, `radio.bin`
-/// and `ob.data` as plain files for argus-cli.
-pub fn write(dir: &Path) -> io::Result<()> {
+/// and `ob.data` as plain files for argus-cli. `resources_mismatch`: see [`resources_archive`] (its SHA-256 in
+/// `directory.json` is right, so only the app's own check can catch it).
+pub fn write(dir: &Path, resources_mismatch: bool) -> io::Result<()> {
     std::fs::create_dir(dir)?;
     let files: [(&str, &str, &str, Vec<u8>); 4] = [
         ("full_dfu", "f7", "flipper-z-f7-full-test.dfu", firmware()),
         ("core2_firmware_tgz", "any", "flipper-z-any-core2_firmware-test.tgz", core2_archive()),
         ("scripts_tgz", "any", "flipper-z-any-scripts-test.tgz", scripts_archive()),
-        ("resources_tgz", "any", "flipper-z-any-resources-test.tgz", resources_archive()),
+        ("resources_tgz", "any", "flipper-z-any-resources-test.tgz", resources_archive(resources_mismatch)),
     ];
     let mut list = Vec::new();
     for (kind, target, name, data) in &files {

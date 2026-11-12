@@ -110,6 +110,11 @@ void LegacyUpdateOperation::nextStateLogic()
         restartDevice();
 
     } else if(operationState() == RestartingDevice) {
+        // the wireless stack step failed and the rest went on: say so, it is not plain success
+        if(!m_radioError.isEmpty()) {
+            deviceState()->setWarning(QStringLiteral("%1, but the radio stack was not installed: %2").arg(QStringLiteral("updated"), m_radioError));
+        }
+
         finish();
     }
 }
@@ -202,6 +207,7 @@ void LegacyUpdateOperation::onSubOperationError(AbstractOperation *operation)
 {
     if(operationState() == DownloadingRadioFirmware) {
         qCInfo(CATEGORY_DEFAULT) << operation->description() << "failed with reason:" << operation->errorString() << "Attempting to install the firmware anyway...";
+        m_radioError = operation->errorString();
         advanceOperationState();
 
     } else {

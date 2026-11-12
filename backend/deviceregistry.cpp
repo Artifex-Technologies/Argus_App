@@ -9,6 +9,7 @@
 #include "flipperzero/helper/deviceinfohelper.h"
 #include "flipperzero/flipperzero.h"
 #include "flipperzero/devicestate.h"
+#include "flipperzero/protobufsession.h"
 
 #include "usbdevice.h"
 #include "testhooks.h"
@@ -110,6 +111,16 @@ void DeviceRegistry::pollTestDeviceState()
     qCDebug(LOG_DEVREG).noquote() << "Test device state:" << m_testDeviceState << "->" << line;
 
     const auto oldKind = m_testDeviceState.section(' ', 0, 0);
+    if(oldKind == QStringLiteral("serial")) {
+        // A Flipper that leaves USB takes its serial port with it, and the session sees the connection lost and
+        // closes the port; a pseudo-terminal stays, so the session is told here (else the port stays locked).
+        const auto info = testDeviceInfo(oldKind);
+        for(auto *device : qAsConst(m_devices)) {
+            if(device->deviceState()->deviceInfo().usbInfo.backendData() == info.backendData()) {
+                device->rpc()->stopSession();
+            }
+        }
+    }
     if(oldKind == QStringLiteral("dfu") || oldKind == QStringLiteral("serial")) {
         removeDevice(testDeviceInfo(oldKind));
     }

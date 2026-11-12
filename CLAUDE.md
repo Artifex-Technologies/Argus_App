@@ -152,6 +152,17 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — A missing radio stack is a partial success (both CLIs exit 3); the legacy update compared
+- **Behaviour change in both:** a repair or legacy update whose wireless stack step failed used to end in "SUCCESS" and
+  exit 0. Now `qFlipper-cli` logs `PARTIAL SUCCESS: repaired, but the radio stack was not installed: <why>` and exits 3;
+  `argus-cli recovery repair|legacy-update` prints `"ok": false, "partial": true` with that message and exits 3. The
+  GUI does not show it yet (`DeviceState::warningString`). Scripts that run `qFlipper-cli` should treat 3 as "done, but".
+- New `argus-cli recovery legacy-update FW.dfu OB.data [RADIO.bin] --resources R.tgz --backup FILE --port DEV
+  --dfu-socket S --yes` (the C++ `LegacyUpdateOperation`: `/int` backup, reboot into DFU, firmware, restore, restart).
+  `compare-repair.sh` compares it with the C++ one in three scenarios, plus a bundle whose file does not match its
+  manifest (the C++ check from the previous entry, now tested): 13 scenarios in all.
+- Test hook only: a serial test device that leaves (state file) also ends its RPC session, as a vanished USB port does.
+
 ### 2026-11-12 — The steps after a repair in Rust (resources, restart), and two fixes in both
 - `flipper_rpc::assets` and `argus-cli recovery repair ... --resources R.tgz --port DEV` / `recovery finish R.tgz`
   (`--yes`): the resources bundle onto `/ext` as the C++ `AssetsDownloadOperation` does it, then a restart. Development

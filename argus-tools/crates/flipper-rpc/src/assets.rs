@@ -19,7 +19,7 @@ use std::io::Read;
 use md5::{Digest, Md5};
 
 use crate::proto::pb::CommandStatus;
-use crate::restore::{gunzip, read_tar, ArchiveError};
+use crate::restore::{gunzip, read_tar, ArchiveError, BackupArchive, RestoreReport};
 use crate::session::{RpcError, Session};
 use crate::transport::Transport;
 use crate::write::RebootMode;
@@ -375,16 +375,34 @@ impl<T: Transport> Session<T> {
     /// data, a restart. Region data is only skipped here (development region, as the C++ app skips it);
     /// for any other region it needs Flipper's region bundle, which is not ported (phase 7), and this
     /// refuses before anything is sent. Returns the assets report; the device then restarts.
-    pub fn finish_install(&mut self, bundle: &Bundle, region: u32) -> Result<AssetsReport, RpcError> {
-        if region != 0 {
-            return Err(RpcError::Invalid(format!(
-                "the device's region ({region}) needs region data from Flipper's region bundle, which argus-cli does not provide yet"
-            )));
-        }
+    ///
+    /// `restore`: the legacy update's backup of `/int`, written back after the region step (as the C++
+    /// `LegacyUpdateOperation` does).
+    pub fn finish_install(
+        &mut self,
+        bundle: &Bundle,
+        region: u32,
+        restore: Option<&BackupArchive>,
+    ) -> Result<(AssetsReport, Option<RestoreReport>), RpcError> {
+        check_region(region)?;
         let r = self.install_assets(bundle)?;
+        let restored = match restore {
+            Some(archive) => Some(self.restore(archive)?),
+            None => None,
+        };
         self.system_reboot(RebootMode::Os)?;
-        Ok(r)
+        Ok((r, restored))
     }
+}
+
+/// Region data is only right for the development region (0) yet: any other needs Flipper's region bundle.
+pub fn check_region(region: u32) -> Result<(), RpcError> {
+    if region != 0 {
+        return Err(RpcError::Invalid(format!(
+            "the device's region ({region}) needs region data from Flipper's region bundle, which argus-cli does not provide yet"
+        )));
+    }
+    Ok(())
 }
 
 /// The device's built-in region from its `devinfo` (`hardware.region.builtin`; 0 is the development region).

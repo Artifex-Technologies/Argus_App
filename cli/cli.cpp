@@ -38,7 +38,7 @@ void Cli::onBackendStateChanged()
 
     } else if(state == ApplicationBackend::BackendState::WaitingForDevices) {
         qCCritical(LOG_CLI) << "All devices disconnected. Exiting.";
-        return exit(0);
+        return exit(m_isPartial ? PartialSuccessExitCode : 0);
 
     } else if(state == ApplicationBackend::BackendState::Ready) {
         // Start the pending operation as soon as the device is ready...
@@ -61,6 +61,11 @@ void Cli::onBackendStateChanged()
         }
 
     } else if(state == ApplicationBackend::BackendState::Finished) {
+        if(m_backend.deviceState() && !m_backend.deviceState()->warningString().isEmpty()) {
+            qCWarning(LOG_CLI).noquote() << "Partial success:" << m_backend.deviceState()->warningString();
+            m_isPartial = true;
+        }
+
         m_backend.finalizeOperation();
     }
 }
@@ -105,7 +110,8 @@ void Cli::initParser()
     m_options.append(QCommandLineOption({QStringLiteral("n"), QStringLiteral("repeat-number")}, QStringLiteral("Number of times to repeat the operation, 0 - indefinitely"), QStringLiteral("1")));
     m_options.append(QCommandLineOption({QStringLiteral("c"), QStringLiteral("update-channel")}, QStringLiteral("Update channel for Firmware Update/Repair"), globalPrefs->firmwareUpdateChannel()));
 
-    m_parser.setApplicationDescription(QStringLiteral("A text mode non-interactive qFlipper counterpart. Run without arguments to quickly perform Firmware Update/Repair."));
+    m_parser.setApplicationDescription(QStringLiteral("A text mode non-interactive qFlipper counterpart. Run without arguments to quickly perform Firmware Update/Repair.\n"
+                                                      "Exit codes: 0 done, 3 done but the radio (wireless) stack was not installed, 255 failed."));
 
     m_parser.addOptions(m_options);
     m_parser.addVersionOption();
@@ -310,6 +316,11 @@ void Cli::beginCore2FUS()
 void Cli::startPendingOperation()
 {
     if(m_repeatCount == 0) {
+        if(m_isPartial) {
+            qCWarning(LOG_CLI) << "Done, but not everything was installed (see above). Exiting with code 3.";
+            return exit(PartialSuccessExitCode);
+        }
+
         qCInfo(LOG_CLI) << "All done! Thank you.";
         return exit(0);
 

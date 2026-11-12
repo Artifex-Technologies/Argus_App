@@ -46,6 +46,15 @@ const USAGE: &str = "argus-cli --dfu-socket PATH recovery COMMAND (the DFU bootl
                            the chip then boots its firmware. Waits for the chip after each
                            reset (at most 30 s), polls the FUS every --poll-ms (1000).
                            With --resources: then, on the firmware at --port, what finish does
+  legacy-update FIRMWARE.dfu OB.data [RADIO.bin] --resources R.tgz --backup FILE
+                           the C++ app's legacy update (a device without SD card or with old
+                           firmware), with --port and --dfu-socket: /int backed up to FILE
+                           (which must not exist; it stays), a reboot into the bootloader;
+                           with RADIO.bin the repair's steps, else the firmware and a restart
+                           into it; then on the firmware what finish does, with /int restored
+                           from FILE before the restart. Give RADIO.bin only when the device's
+                           wireless stack is older than the image (the C++ app reads both
+                           versions; argus-cli has only the image)
   finish RESOURCES.tgz     on the firmware at --port (no --dfu-socket): the C++ app's steps
                            after a repair or update: the resources onto /ext (compared with
                            /ext/Manifest; only what changed is removed and written), region
@@ -54,7 +63,13 @@ const USAGE: &str = "argus-cli --dfu-socket PATH recovery COMMAND (the DFU bootl
 
   --dfu-socket PATH        a Unix socket to a DFU bootloader (tests use the fake); USB
                            recovery is not built into argus-cli
-  --port DEVICE            the Flipper's serial port once its firmware runs (never guessed)";
+  --port DEVICE            the Flipper's serial port once its firmware runs (never guessed)
+
+  Exit status: 0 done; 1 failed; 2 usage, or not confirmed with --yes; 3 repaired, but the radio
+  (wireless) stack was not installed (\"ok\": false, \"partial\": true, the reason in \"error\")";
+
+/// The exit status of a repair that did everything but install the wireless stack (the C++ CLI's too).
+const PARTIAL: u8 = 3;
 
 /// The largest wireless stack image: the whole flash.
 const MAX_RADIO: u64 = 1 << 20;
@@ -84,6 +99,7 @@ enum Plan {
     Fus(&'static str),
     OptionBytes(Vec<u8>),
     Repair { firmware: Vec<u8>, option_bytes: Vec<u8>, radio: Option<Vec<u8>> },
+    Legacy { firmware: Vec<u8>, option_bytes: Vec<u8>, radio: Option<Vec<u8>> },
     Finish,
 }
 
@@ -117,7 +133,7 @@ fn plan(words: &[&str]) -> Result<Plan, (String, String, u8)> {
             OptionBytesFile::parse(&data).map_err(|e| ("file".to_string(), format!("{f}: {e}"), 1))?;
             Plan::OptionBytes(data)
         }
-        ["repair", fw, ob, rest @ ..] if rest.len() <= 1 => {
+        ["repair" | "legacy-update", fw, ob, rest @ ..] if rest.len() <= 1 => {
             let firmware = checked(read_limited(fw, dfuse::MAX_FILE as u64))?;
             dfuse::parse(&firmware).map_err(|e| ("file".to_string(), format!("{fw}: {e}"), 1))?;
             let option_bytes = checked(read_limited(ob, wb55::MAX_FILE as u64))?;
@@ -132,7 +148,11 @@ fn plan(words: &[&str]) -> Result<Plan, (String, String, u8)> {
                 }
                 None => None,
             };
-            Plan::Repair { firmware, option_bytes, radio }
+            if words[0] == "legacy-update" {
+                Plan::Legacy { firmware, option_bytes, radio }
+            } else {
+                Plan::Repair { firmware, option_bytes, radio }
+            }
         }
         ["finish", _] => Plan::Finish,
         [] | ["help"] => return Err(usage("recovery needs a command")),
@@ -236,7 +256,7 @@ fn execute(d: &mut Device, plan: Plan) -> Result<Value, String> {
             .map_err(|x| e(&x))?;
             json!({"ok": true, "command": "recovery fus", "step": step})
         }
-        Plan::Repair { .. } | Plan::Finish => unreachable!("run by run()"),
+        Plan::Repair { .. } | Plan::Legacy { .. } | Plan::Finish => unreachable!("run by run()"),
         Plan::OptionBytes(data) => match recovery::download_option_bytes(d, &data).map_err(|x| e(&x))? {
             OptionBytesOutcome::Left { differ } => {
                 json!({"ok": true, "command": "recovery option-bytes", "written": false, "read_only_differ": fields(&differ)})
@@ -259,7 +279,8 @@ pub fn run(cmd: &Cmd) -> ExitCode {
     let bundle = match (&plan, &cmd.resources) {
         (Plan::Finish, Some(_)) => return fail("usage", "finish takes RESOURCES.tgz as its argument, not --resources".into(), 2),
         (Plan::Finish, None) => Some(read_bundle(Path::new(&words[1]))),
-        (Plan::Repair { .. }, Some(r)) => Some(read_bundle(r)),
+        (Plan::Repair { .. } | Plan::Legacy { .. }, Some(r)) => Some(read_bundle(r)),
+        (Plan::Legacy { .. }, None) => return fail("usage", "legacy-update needs --resources RESOURCES.tgz".into(), 2),
         (_, Some(_)) => return fail("usage", "--resources goes with recovery repair".into(), 2),
         (_, None) => None,
     };
@@ -276,11 +297,20 @@ pub fn run(cmd: &Cmd) -> ExitCode {
         }));
         return ExitCode::from(2);
     }
+    if let Plan::Legacy { .. } = &plan {
+        match &cmd.backup {
+            None => return fail("usage", "legacy-update needs --backup FILE (where /int is kept)".into(), 2),
+            Some(f) if f.exists() => return fail("file", format!("{} exists; the backup never replaces a file", f.display()), 1),
+            Some(_) => {}
+        }
+    } else if cmd.backup.is_some() {
+        return fail("usage", "--backup goes with recovery legacy-update".into(), 2);
+    }
     if bundle.is_some() && cmd.target.is_none() {
         return fail("usage", "the steps on the firmware need --port DEVICE (the Flipper once its firmware runs)".into(), 2);
     }
     if let (Plan::Finish, Some(b)) = (&plan, &bundle) {
-        return match finish(cmd, b) {
+        return match finish(cmd, b, None) {
             Ok(v) => {
                 print(json!({"ok": true, "command": "recovery finish", "firmware": v}));
                 ExitCode::SUCCESS
@@ -291,6 +321,12 @@ pub fn run(cmd: &Cmd) -> ExitCode {
     let Some(path) = &cmd.dfu_socket else {
         return fail("usage", "recovery needs --dfu-socket PATH; USB recovery is not built into argus-cli".into(), 2);
     };
+    if let (Plan::Legacy { firmware, option_bytes, radio }, Some(bundle)) = (&plan, &bundle) {
+        let mut b = SocketBootloader { path, poll: cmd.poll };
+        let (code, out) = legacy_update(cmd, &mut b, firmware, option_bytes, radio.as_deref(), bundle);
+        print(out);
+        return ExitCode::from(code);
+    }
     if let Plan::Repair { firmware, option_bytes, radio } = &plan {
         let mut b = SocketBootloader { path, poll: cmd.poll };
         return match recovery::full_repair(&mut b, firmware, radio.as_deref(), option_bytes) {
@@ -305,7 +341,7 @@ pub fn run(cmd: &Cmd) -> ExitCode {
                     "option_bytes_written": written, "fixed": fields(&fixed), "read_only_differ": fields(&differ),
                 });
                 if let Some(b) = &bundle {
-                    match finish(cmd, b) {
+                    match finish(cmd, b, None) {
                         Ok(v) => out["firmware"] = v,
                         Err(e) => {
                             // the bootloader part is done; say so with the failure
@@ -315,6 +351,14 @@ pub fn run(cmd: &Cmd) -> ExitCode {
                             return ExitCode::from(1);
                         }
                     }
+                }
+                // the wireless stack step failed and the rest went on: not plain success (exit 3)
+                if let Some(why) = &r.radio_error {
+                    out["ok"] = json!(false);
+                    out["partial"] = json!(true);
+                    out["error"] = json!({"code": "radio_not_installed", "message": format!("repaired, but the radio stack was not installed: {why}")});
+                    print(out);
+                    return ExitCode::from(PARTIAL);
                 }
                 print(out);
                 ExitCode::SUCCESS
@@ -345,24 +389,107 @@ fn read_bundle(path: &Path) -> Result<Bundle, String> {
 
 /// The steps on the firmware: waits (at most 30 s, as for the bootloader) until the Flipper answers on
 /// `--port`, reads its region, installs the resources, and restarts it.
-fn finish(cmd: &Cmd, bundle: &Bundle) -> Result<Value, RpcError> {
-    let target = cmd.target.as_ref().expect("checked by run()");
-    let deadline = Instant::now() + REENUMERATION;
-    let mut s = loop {
-        match open(target, cmd.timeout).and_then(|io| Session::start(io, cmd.timeout)) {
-            Ok(s) => break s,
-            Err(e) if Instant::now() >= deadline => return Err(e),
-            Err(_) => std::thread::sleep(Duration::from_millis(100)),
-        }
-    };
-    let devinfo = s.property_get("devinfo")?;
-    let region = assets::builtin_region(&devinfo).ok_or_else(|| RpcError::Unexpected("devinfo has no hardware.region.builtin".into()))?;
-    let r = s.finish_install(bundle, region)?;
+fn finish(cmd: &Cmd, bundle: &Bundle, restore: Option<&flipper_rpc::restore::BackupArchive>) -> Result<Value, RpcError> {
+    let mut s = firmware_session(cmd)?;
+    let region = read_region(&mut s)?;
+    let (r, restored) = s.finish_install(bundle, region, restore)?;
     let gone = s.wait_until_gone(GONE_WAIT);
     Ok(json!({
         "region": region, "region_data": "not needed (development region)",
         "assets": {"card": r.card, "device_manifest": r.device_manifest, "removed": r.removed, "dirs_made": r.dirs_made,
                    "files_written": r.files_written, "bytes": r.bytes},
+        "restored": restored.map(|x| json!({"files": x.files, "bytes": x.bytes, "dirs_made": x.dirs_made, "dirs_kept": x.dirs_kept})),
         "restarted": true, "gone": gone,
     }))
+}
+
+type Firmware = Session<Box<dyn flipper_rpc::transport::Transport>>;
+
+/// The Flipper on `--port`, once it answers (at most 30 s, as for the bootloader).
+fn firmware_session(cmd: &Cmd) -> Result<Firmware, RpcError> {
+    let target = cmd.target.as_ref().expect("checked by run()");
+    let deadline = Instant::now() + REENUMERATION;
+    loop {
+        match open(target, cmd.timeout).and_then(|io| Session::start(io, cmd.timeout)) {
+            Ok(s) => return Ok(s),
+            Err(e) if Instant::now() >= deadline => return Err(e),
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+fn read_region(s: &mut Firmware) -> Result<u32, RpcError> {
+    let devinfo = s.property_get("devinfo")?;
+    assets::builtin_region(&devinfo).ok_or_else(|| RpcError::Unexpected("devinfo has no hardware.region.builtin".into()))
+}
+
+/// `LegacyUpdateOperation` with local files: (exit status, JSON).
+fn legacy_update(
+    cmd: &Cmd,
+    b: &mut SocketBootloader,
+    firmware: &[u8],
+    option_bytes: &[u8],
+    radio: Option<&[u8]>,
+    bundle: &Bundle,
+) -> (u8, Value) {
+    let backup = cmd.backup.as_ref().expect("checked by run()");
+    let failed = |stage: &str, code: &str, m: String| {
+        (1, json!({"ok": false, "command": "recovery legacy-update", "error": {"code": code, "message": format!("{stage}: {m}")}}))
+    };
+    // on the firmware: the region first (nothing changes for a region argus-cli cannot provision), the backup,
+    // and the reboot into the bootloader
+    let step1 = (|| -> Result<Value, RpcError> {
+        let mut s = firmware_session(cmd)?;
+        assets::check_region(read_region(&mut s)?)?;
+        let mtime = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let r = s.backup(backup, &flipper_rpc::transfer::Limits::backup(), mtime)?;
+        s.system_reboot(flipper_rpc::write::RebootMode::Dfu)?;
+        let gone = s.wait_until_gone(GONE_WAIT);
+        Ok(
+            json!({"file": backup.display().to_string(), "files": r.files, "dirs": r.dirs, "bytes": r.bytes, "refused": r.refused, "gone": gone}),
+        )
+    })();
+    let backed_up = match step1 {
+        Ok(v) => v,
+        Err(e) => return failed("before the update, on the firmware", e.code(), e.to_string()),
+    };
+    let archive = match std::fs::File::open(backup)
+        .map_err(|e| e.to_string())
+        .and_then(|f| flipper_rpc::restore::read_backup(f, &flipper_rpc::restore::ArchiveLimits::default()).map_err(|e| e.0))
+    {
+        Ok(a) => a,
+        Err(m) => return failed("reading the backup back", "file", m),
+    };
+    // in the bootloader
+    let (radio_error, written) = match radio {
+        Some(image) => match recovery::full_repair(b, firmware, Some(image), option_bytes) {
+            Ok(r) => (r.radio_error, matches!(r.option_bytes, OptionBytesOutcome::Written { .. })),
+            Err(e) => return failed("in the bootloader", "device", e.to_string()),
+        },
+        None => match recovery::firmware_and_leave(b, firmware) {
+            Ok(()) => (None, false),
+            Err(e) => return failed("in the bootloader", "device", e.to_string()),
+        },
+    };
+    let mut out = json!({
+        "ok": true, "command": "recovery legacy-update", "backup": backed_up, "firmware_bytes": firmware.len(),
+        "radio": radio.map(|image| json!({"bytes": image.len(), "installed": radio_error.is_none(), "error": radio_error})),
+        "option_bytes_written": written,
+    });
+    // on the firmware again
+    match finish(cmd, bundle, Some(&archive)) {
+        Ok(v) => out["firmware"] = v,
+        Err(e) => {
+            out["ok"] = json!(false);
+            out["error"] = json!({"code": e.code(), "message": format!("after the update, on the firmware: {e}; /int is backed up in {}", backup.display())});
+            return (1, out);
+        }
+    }
+    if let Some(why) = &radio_error {
+        out["ok"] = json!(false);
+        out["partial"] = json!(true);
+        out["error"] = json!({"code": "radio_not_installed", "message": format!("updated, but the radio stack was not installed: {why}")});
+        return (PARTIAL, out);
+    }
+    (0, out)
 }

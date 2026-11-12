@@ -67,5 +67,8 @@ private:
     QUrl m_fileParameter;
     uint32_t m_core2Address;
     int m_repeatCount;
+    // an operation finished with a warning (partial success): exit code 3
+    static constexpr int PartialSuccessExitCode = 3;
+    bool m_isPartial = false;
 };
 

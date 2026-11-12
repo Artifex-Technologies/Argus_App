@@ -21,6 +21,7 @@ class DeviceState : public QObject
     Q_PROPERTY(bool isRecoveryMode READ isRecoveryMode NOTIFY deviceInfoChanged)
     Q_PROPERTY(QString statusString READ statusString NOTIFY statusStringChanged)
     Q_PROPERTY(QString errorString READ errorString NOTIFY isErrorChanged)
+    Q_PROPERTY(QString warningString READ warningString NOTIFY warningStringChanged)
     Q_PROPERTY(double progress READ progress NOTIFY progressChanged)
 
 public:
@@ -56,6 +57,12 @@ public:
     void setError(BackendError::ErrorType error, const QString &errorString);
     void clearError();
 
+    // A finished operation that did not do all it should have (a repair or update whose wireless stack step
+    // failed): it is not an error, but not plain success either. Cleared when the next operation starts.
+    const QString &warningString() const;
+    void setWarning(const QString &warningString);
+    void clearWarning();
+
     //TODO: Replace with deviceInfo().name
     const QString &name() const;
 
@@ -65,6 +72,7 @@ signals:
     void isOnlineChanged();
     void statusStringChanged();
     void isErrorChanged();
+    void warningStringChanged();
     void progressChanged();
 
 private slots:
@@ -84,6 +92,7 @@ private:
     BackendError::ErrorType m_error;
     QString m_statusString;
     QString m_errorString;
+    QString m_warningString;
 
     double m_progress;
 };

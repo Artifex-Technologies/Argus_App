@@ -26,6 +26,7 @@ mkdir -p "$out" && chmod 700 "$out"
 out=$(cd "$out" && pwd)
 fw=$out/firmware
 "$fake" --write-firmware "$fw" || { echo "could not write the firmware folder" >&2; exit 1; }
+"$fake" --write-firmware "$out/firmware-mismatch" --resources-mismatch || { echo "could not write the firmware folder" >&2; exit 1; }
 
 failures=0
 check() { # check NAME RESULT (0 = ok)
@@ -33,6 +34,7 @@ check() { # check NAME RESULT (0 = ok)
 }
 
 # run SCENARIO SIDE [fake args...]: one repair by one side on a fresh fake; leaves $out/SCENARIO-SIDE/
+# ($fw names the update folder both use)
 run() {
     name=$1 side=$2; shift 2
     dir=$out/$name-$side
@@ -55,6 +57,12 @@ run() {
             ARGUS_TEST_DEVICE_STATE="$dir/state" ARGUS_TEST_DFU_SOCKET=dfu.sock ARGUS_TEST_SERIAL_PORT="$port" \
             ARGUS_TEST_FIRMWARE_DIR="$fw" \
             timeout 300 "$cpp" -d 2 > stdout.txt 2> stderr.txt)
+    elif [ "${legacy:-}" = radio ] || [ "${legacy:-}" = plain ]; then
+        radio_arg=
+        [ "$legacy" = radio ] && radio_arg=$fw/radio.bin
+        (cd "$dir" && exec timeout 300 "$rs" --dfu-socket dfu.sock --port "$port" --poll-ms 200 recovery legacy-update \
+            "$fw/firmware.dfu" "$fw/ob.data" $radio_arg --resources "$fw/flipper-z-any-resources-test.tgz" \
+            --backup "$dir/backup.tgz" --yes > stdout.txt 2> stderr.txt)
     else
         (cd "$dir" && exec timeout 300 "$rs" --dfu-socket dfu.sock --port "$port" --poll-ms 200 recovery repair \
             "$fw/firmware.dfu" "$fw/ob.data" "$fw/radio.bin" --resources "$fw/flipper-z-any-resources-test.tgz" --yes \
@@ -77,29 +85,36 @@ requests() {
         { lines[n++] = $0; if ($0 == "ALT 2") otp = 1; else if ($0 ~ /^ALT /) other = 1 }
         function flush(   i, skip) {
             if (otp && !other) { after_id = 1; return }
-            skip = after_id && n >= 4 && lines[1] == "IN 3 0 6" && lines[2] == "OUT 6 0 -" && lines[3] == "IN 3 0 6"
+            # the first status (after a first ALT, if any), then the abort and its status
+            first = (lines[0] ~ /^ALT /) ? 1 : 0
+            skip = after_id && n >= first + 3 && lines[first] == "IN 3 0 6" && lines[first + 1] == "OUT 6 0 -" && lines[first + 2] == "IN 3 0 6"
             after_id = 0
-            for (i = 0; i < n; i++) if (!skip || (i != 2 && i != 3)) print lines[i]
+            for (i = 0; i < n; i++) if (!skip || (i != first + 1 && i != first + 2)) print lines[i]
         }
         END { if (n) flush() }
     ' "$1/dfu.log"
 }
-# The RPC requests once the firmware runs, without session and command ids: the C++ app's without its device
-# probe (its first session: versions, devinfo, card, manifest, and it sets the clock) and its screen (Gui*), and
-# without the devinfo read argus-cli makes for the region.
+# The RPC requests on the firmware, without session and command ids: without the C++ app's device probes (a
+# session that starts with the protobuf version: versions, devinfo, card, manifest, and it sets the clock) and its
+# screen (Gui*), and without the devinfo reads argus-cli makes for the region.
 rpc_requests() {
-    if [ "$2" = cpp ]; then grep -v '^1 ' "$1/requests.txt"; else cat "$1/requests.txt"; fi \
-        | cut -d' ' -f3- | grep -v '^Gui\|^PropertyGetRequest'
+    awk '
+        $1 != s { s = $1; probe = ($3 == "SystemProtobufVersionRequest") }
+        !probe { $1 = ""; $2 = ""; sub(/^  /, ""); print }
+    ' "$1/requests.txt" | grep -v '^Gui\|^PropertyGetRequest'
 }
 field() { sed -n "s/^$2 //p" "$1/chip.txt"; }
 
-# compare SCENARIO EXPECTED_EXIT(0|fail): both sides already run
+# compare SCENARIO EXPECTED_EXIT(0|3|3u|fail): both sides already run. 3: repaired (3u: updated), but the radio
+# stack was not installed (partial success; both CLIs exit 3 and say why)
 compare() {
     name=$1 want=$2 c=$out/$1-cpp r=$out/$1-rs
     ce=$(cat "$c/exit.txt") re=$(cat "$r/exit.txt")
-    if [ "$want" = 0 ]; then
-        check "$name: C++ exit 0 ($ce)" "$(test "$ce" = 0; echo $?)"
-        check "$name: Rust exit 0 ($re)" "$(test "$re" = 0; echo $?)"
+    verb=repaired
+    [ "$want" = 3u ] && want=3 verb=updated
+    if [ "$want" = 0 ] || [ "$want" = 3 ]; then
+        check "$name: C++ exit $want ($ce)" "$(test "$ce" = "$want"; echo $?)"
+        check "$name: Rust exit $want ($re)" "$(test "$re" = "$want"; echo $?)"
     else
         check "$name: C++ fails ($ce)" "$(test "$ce" != 0 && test "$ce" != 124; echo $?)"
         check "$name: Rust fails ($re)" "$(test "$re" != 0 && test "$re" != 124; echo $?)"
@@ -121,6 +136,12 @@ compare() {
     check "$name: same files on the card afterwards" $?
     check "$name: RDP untouched (0xAA, level 0) in both" \
         "$(field "$c" option_bytes | grep -q '^aa' && field "$r" option_bytes | grep -q '^aa'; echo $?)"
+    if [ "$want" = 3 ]; then
+        check "$name: both say $verb, but the radio stack was not installed" \
+            "$(grep -q "PARTIAL SUCCESS: $verb, but the radio stack was not installed: " "$c/stderr.txt" "$c/stdout.txt" &&
+               grep -q "\"code\":\"radio_not_installed\",\"message\":\"$verb, but the radio stack was not installed: " "$r/stdout.txt" &&
+               grep -q '"partial":true' "$r/stdout.txt"; echo $?)"
+    fi
 }
 
 echo "compare-repair: $out"
@@ -157,22 +178,21 @@ compare fus-idle 0
 # A FUS stuck in a state the repair does not know: the wireless stack step fails, both go on with the firmware.
 run stuck cpp --fus stuck
 run stuck rs --fus stuck
-compare stuck 0
+compare stuck 3
 check "stuck: C++ went on without the wireless stack" "$(grep -q 'Attempting to install the firmware anyway' "$out/stuck-cpp/stderr.txt" "$out/stuck-cpp/stdout.txt"; echo $?)"
-check "stuck: Rust reports the wireless stack not installed" "$(grep -q '"installed":false' "$out/stuck-rs/stdout.txt"; echo $?)"
 
 # The FUS never finishes deleting the wireless stack: both give up after 120 status polls (they used to poll for
 # ever) and go on with the firmware.
 run never-settles cpp --fus never-settles
 run never-settles rs --fus never-settles
-compare never-settles 0
+compare never-settles 3
 check "never-settles: both gave up after 120 FUS state reads" \
     "$(test "$(grep -c '^IN 2 2 2$' "$out/never-settles-cpp/requests.dfu")" = "$(grep -c '^IN 2 2 2$' "$out/never-settles-rs/requests.dfu")" && grep -q 'did not finish in time' "$out/never-settles-cpp/stderr.txt" && grep -q 'did not finish within 120 polls' "$out/never-settles-rs/stdout.txt"; echo $?)"
 
 # The flash refuses a block of the wireless stack image: that step fails, both go on with the firmware.
 run radio-fails cpp --fus running --fail-write-at 0x080D4000
 run radio-fails rs --fus running --fail-write-at 0x080D4000
-compare radio-fails 0
+compare radio-fails 3
 check "radio-fails: Rust reports the wireless stack not installed" "$(grep -q '"installed":false' "$out/radio-fails-rs/stdout.txt"; echo $?)"
 
 # The flash refuses a block of the firmware: both stop there (the chip stays in its bootloader).
@@ -181,6 +201,44 @@ run firmware-fails rs --fus running --fail-write-at 0x08005000
 compare firmware-fails fail
 check "firmware-fails: C++ reports the failed download" "$(grep -q 'Firmware Download @Fakeflip ERROR' "$out/firmware-fails-cpp/stderr.txt" "$out/firmware-fails-cpp/stdout.txt"; echo $?)"
 check "firmware-fails: Rust reports the failed write" "$(grep -q '"ok":false' "$out/firmware-fails-rs/stdout.txt" && grep -q 'write the firmware' "$out/firmware-fails-rs/stdout.txt"; echo $?)"
+
+# The legacy update (LegacyUpdateOperation: a Flipper without SD card): the chip starts as the firmware; /int is
+# backed up, the firmware reboots into its bootloader, the firmware is written and the chip leaves the bootloader
+# (the wireless stack is current), then the resources (no card: nothing), /int restored, a restart.
+legacy=plain
+run legacy cpp --start-firmware --no-sd --fus running
+run legacy rs --start-firmware --no-sd --fus running
+compare legacy 0
+check "legacy: C++ ran the legacy update" "$(grep -q 'Legacy Update @Fakeflip SUCCESS' "$out/legacy-cpp/stderr.txt" "$out/legacy-cpp/stdout.txt"; echo $?)"
+check "legacy: both backed up /int, rebooted into DFU and restored /int" \
+    "$(ok=0; for side in cpp rs; do grep -q 'SystemRebootRequest mode 1' "$out/legacy-$side/requests.rpc" && grep -q 'StorageWriteRequest /int/' "$out/legacy-$side/requests.rpc" || ok=1; done; echo $ok)"
+
+# The same with a wireless stack older than the update's: boot mode, stack, firmware, option bytes, as the repair.
+legacy=radio
+run legacy-radio cpp --start-firmware --no-sd --old-radio --fus running
+run legacy-radio rs --start-firmware --no-sd --old-radio --fus running
+compare legacy-radio 0
+
+# ... and with the stack refused by the flash: the update goes on, and both say it is not plain success.
+run legacy-radio-fails cpp --start-firmware --no-sd --old-radio --fus running --fail-write-at 0x080D4000
+run legacy-radio-fails rs --start-firmware --no-sd --old-radio --fus running --fail-write-at 0x080D4000
+legacy=
+compare legacy-radio-fails 3u
+
+# A resources bundle with a file that is not what its manifest says (its SHA-256 in directory.json is right):
+# argus-cli refuses it before it opens anything; the C++ app repairs the chip, then refuses the bundle before it
+# removes or writes anything on the card (it used to write the file anyway).
+fw=$out/firmware-mismatch
+run mismatch cpp --fus running
+run mismatch rs --fus running
+fw=$out/firmware
+ce=$(cat "$out/mismatch-cpp/exit.txt") re=$(cat "$out/mismatch-rs/exit.txt")
+check "mismatch: C++ fails ($ce) on the bundle" \
+    "$(test "$ce" = 255 && grep -q 'Readme.txt differs from the manifest (size or MD5)' "$out/mismatch-cpp/stderr.txt" "$out/mismatch-cpp/stdout.txt"; echo $?)"
+check "mismatch: C++ changed nothing on the card" \
+    "$(! grep -q 'Storage\(Delete\|Write\|Mkdir\)Request' "$out/mismatch-cpp/requests.txt" && "$fake" --print-dump | cmp -s - "$out/mismatch-cpp/dump.txt"; echo $?)"
+check "mismatch: Rust refuses the bundle ($re) before it opens anything" \
+    "$(test "$re" = 1 && grep -q 'Readme.txt differs from the manifest' "$out/mismatch-rs/stdout.txt" && ! grep -qv '^$' "$out/mismatch-rs/dfu.log" && test ! -s "$out/mismatch-rs/requests.txt"; echo $?)"
 
 echo "compare-repair: $failures failed"
 [ "$failures" -eq 0 ]
