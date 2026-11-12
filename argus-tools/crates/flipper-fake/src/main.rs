@@ -37,6 +37,7 @@
 //! `/ext/Manifest` (src/firmware.rs); `--start-firmware`: the chip starts as the firmware on the
 //! pseudo-terminal and turns into its bootloader when asked to reboot into DFU (the legacy update);
 //! `--old-radio`: devinfo reports wireless stack 1.16.3, older than the update's 1.17.3.
+//! `--old-region-data`: `/int` holds an older `/int/.region_data`.
 //! `--region N`: the device's built-in region (devinfo and the OTP's factory information; default 0, the
 //! development region, which needs no region data).
 //! `flipper-fake --write-firmware DIR [--resources-mismatch]` writes a made-up update folder (`directory.json`, its files
@@ -144,6 +145,7 @@ fn main() -> ExitCode {
             "--print-dump" => print_dump = true,
             "--changed-int" => fake = fake.with_changed_int(),
             "--int-conflict" => fake = fake.with_int_conflict(),
+            "--old-region-data" => fake = fake.with_old_region_data(),
             "--read-only" => fake.read_only = true,
             "--write-firmware" => {
                 let dir = args.next();

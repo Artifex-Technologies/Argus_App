@@ -63,7 +63,9 @@ const HELP: &str = "argus-cli — talk to a Flipper Zero over RPC (JSON on stdou
                      the archive is checked whole first, before the port is opened: without
                      --yes only that check runs
   update FILE        upload an update package (.tgz) to /ext/update and start the device's
-                     own updater (no DFU); checked whole first, like restore
+                     own updater (no DFU); checked whole first, like restore. A device not of
+                     the development region first gets region data from --update-server
+                     (a failure there is reported and the update goes on, as in the C++ app)
   reboot             restart the device
   erase              factory reset: the device formats /int and restarts
 
@@ -283,12 +285,13 @@ fn run(cmd: &Cmd) -> Result<Value, RpcError> {
     match cmd.words[0].as_str() {
         "update" => {
             let pkg = package.expect("checked above");
+            let region_data = update_region(cmd, &mut s)?;
             let r = s.update(&pkg)?;
             let gone = s.wait_until_gone(GONE_WAIT);
             Ok(json!({
                 "ok": true, "command": "update", "file": cmd.words[1], "package": pkg.dir, "manifest": pkg.manifest(),
                 "dirs_made": r.dirs_made, "files_sent": r.files_sent, "files_kept": r.files_kept, "bytes": r.bytes,
-                "updater_started": true, "gone": gone,
+                "updater_started": true, "gone": gone, "region_data": region_data,
             }))
         }
         "mkdir" => {
@@ -440,6 +443,39 @@ fn run(cmd: &Cmd) -> Result<Value, RpcError> {
         }
         _ => unreachable!("checked by main"),
     }
+}
+
+/// The C++ `FullUpdateOperation`'s first step: region data for a device that is not of the development region,
+/// fetched from the update server and written to `/int/.region_data`. As in the C++ app a failure here is only
+/// reported (under `"region_data"`) and the update goes on; the device keeps its region data.
+fn update_region(cmd: &Cmd, s: &mut Session<Box<dyn Transport>>) -> Result<Value, RpcError> {
+    // the device information as the C++ app reads it: devinfo, or the old request on firmware before protocol 0.14
+    let info = match s.property_get("devinfo") {
+        Ok(info) => info,
+        Err(RpcError::Device(_)) => s.device_info_legacy()?,
+        Err(e) => return Err(e),
+    };
+    let region = flipper_rpc::assets::builtin_region(&info)
+        .or_else(|| info.iter().find(|(k, _)| k == "hardware_region").and_then(|(_, v)| v.parse().ok()))
+        .ok_or_else(|| RpcError::Unexpected("the device information has no region".into()))?;
+    if region == 0 {
+        return Ok(json!("not needed (development region)"));
+    }
+    let d = match updates::fetch_region_data(cmd) {
+        Ok(d) => d,
+        Err((code, m)) => return Ok(json!({"written": false, "error": {"code": code, "message": m}})),
+    };
+    let mut v = updates::region_json(&d);
+    v["path"] = json!(flipper_rpc::assets::REGION_DATA_PATH);
+    match s.storage_write(flipper_rpc::assets::REGION_DATA_PATH, &d.bytes) {
+        Ok(()) => v["written"] = json!(true),
+        Err(RpcError::Device(st)) => {
+            v["written"] = json!(false);
+            v["error"] = json!({"code": "device", "message": format!("{st:?}")});
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(v)
 }
 
 fn entry(e: &Entry) -> Value {

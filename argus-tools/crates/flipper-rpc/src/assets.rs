@@ -377,8 +377,9 @@ impl<T: Transport> Session<T> {
     /// (`flipper_updates::region`), and without them this refuses before anything is sent. Returns the assets
     /// report; the device then restarts.
     ///
-    /// `restore`: the legacy update's backup of `/int`, written back after the region step (as the C++
-    /// `LegacyUpdateOperation` does).
+    /// `restore`: the legacy update's backup of `/int`, written back before the region step, so an older
+    /// `/int/.region_data` in the backup never replaces the fresh one (both apps since 2026-11-12; the C++
+    /// `LegacyUpdateOperation` used to restore after it).
     pub fn finish_install(
         &mut self,
         bundle: &Bundle,
@@ -388,13 +389,13 @@ impl<T: Transport> Session<T> {
     ) -> Result<(AssetsReport, Option<RestoreReport>), RpcError> {
         let region_data = check_region(region, region_data)?;
         let r = self.install_assets(bundle)?;
-        if let Some(data) = region_data {
-            self.storage_write(REGION_DATA_PATH, data)?;
-        }
         let restored = match restore {
             Some(archive) => Some(self.restore(archive)?),
             None => None,
         };
+        if let Some(data) = region_data {
+            self.storage_write(REGION_DATA_PATH, data)?;
+        }
         self.system_reboot(RebootMode::Os)?;
         Ok((r, restored))
     }

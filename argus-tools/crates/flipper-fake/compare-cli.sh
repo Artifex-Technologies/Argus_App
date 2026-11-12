@@ -294,10 +294,14 @@ run_update() { # run_update NAME SIDE PACKAGE [fake args...]
     if [ "$side" = cpp ]; then
         start_fake "$d" 2 --dump "$d/dump.txt" "$@"
         mkdir -p "$d/tmp"
-        TMPDIR="$d/tmp" ARGUS_TEST_SERIAL_PORT=$port timeout 90 "$cpp" firmware "$pkg" > "$d/stdout.txt" 2> "$d/stderr.txt" < /dev/null
+        # shellcheck disable=SC2086
+        env TMPDIR="$d/tmp" ARGUS_TEST_SERIAL_PORT=$port ${cpp_fwdir:+ARGUS_TEST_FIRMWARE_DIR=$cpp_fwdir} \
+            timeout 90 "$cpp" firmware "$pkg" > "$d/stdout.txt" 2> "$d/stderr.txt" < /dev/null
     else
         start_fake "$d" 1 --dump "$d/dump.txt" "$@"
-        timeout 90 "$rs" --port "$port" update "$pkg" --yes > "$d/stdout.txt" 2> "$d/stderr.txt" < /dev/null
+        # shellcheck disable=SC2086
+        env ${rs_ca:+SSL_CERT_FILE=$rs_ca} timeout 90 "$rs" ${rs_upd:+--update-server $rs_upd} --port "$port" update "$pkg" --yes \
+            > "$d/stdout.txt" 2> "$d/stderr.txt" < /dev/null
     fi
     echo $? > "$d/exit.txt"
     wait_fake
@@ -328,7 +332,7 @@ done
 check "update again: both runs of both apps exit 0" "$(test "$(cat "$out/update-again-cpp/exits.txt" "$out/update-again-rs/exits.txt" | tr -d '\n')" = 0000; echo $?)"
 # the second run's requests: the C++ app's 4th session, the Rust CLI's 2nd
 grep '^4 ' "$out/update-again-cpp/requests.txt" | cut -d' ' -f3- | grep -v '^Gui\|^PropertyGetRequest' > "$out/update-again-cpp/second.txt"
-grep '^2 ' "$out/update-again-rs/requests.txt" | cut -d' ' -f3- > "$out/update-again-rs/second.txt"
+grep '^2 ' "$out/update-again-rs/requests.txt" | cut -d' ' -f3- | grep -v '^PropertyGetRequest' > "$out/update-again-rs/second.txt"
 diff "$out/update-again-cpp/second.txt" "$out/update-again-rs/second.txt" > "$out/update-again-requests.diff"
 check "update again: same requests, MD5s and no writes ($(grep -c Md5 "$out/update-again-rs/second.txt") MD5 requests)" \
     "$(test -s "$out/update-again-rs/second.txt" && cmp -s "$out/update-again-cpp/second.txt" "$out/update-again-rs/second.txt" && ! grep -q 'Write' "$out/update-again-rs/second.txt"; echo $?)"
@@ -357,6 +361,46 @@ for c in update-no-sd update-hostile; do
             "$(test "$(exit_of "$c-$side")" != 0 && test -z "$(changes "$c-$side")" && { test ! -f "$out/$c-$side/dump.txt" || cmp -s "$out/$c-$side/dump.txt" "$out/standard.dump"; }; echo $?)"
     done
 done
+
+echo "== update of a region-1 Flipper: region data first, as the C++ FullUpdateOperation does"
+# The C++ app reads the region bundle from a made-up folder through its test hook (ARGUS_TEST_FIRMWARE_DIR, the
+# file "bundle"); argus-cli fetches the same bundle over HTTPS from flipper-fake's stand-in on 127.0.0.1, trusting
+# the run's own test CA. A failure there is only reported, in both, and the update goes on.
+"$fake" --write-firmware "$out/fw" || { echo "could not write the firmware folder" >&2; exit 1; }
+cp -r "$out/fw" "$out/fw-badband" && sed -i 's/"max_power":14/"max_power":200/' "$out/fw-badband/bundle"
+start_server() { # start_server NAME DIR FD: sets $upd
+    mkfifo "$out/$1.stdin"
+    "$fake" --update-server "$2" --ca-out "$out/$1.pem" < "$out/$1.stdin" > "$out/$1.out" 2> "$out/$1.err" &
+    eval "exec $3> \"\$out/\$1.stdin\""
+    i=0
+    while [ $i -lt 100 ] && ! grep -q '^listening ' "$out/$1.out" 2>/dev/null; do i=$((i + 1)); timeout 0.1 tail -f /dev/null; done
+    upd=$(sed -n 's/^listening //p' "$out/$1.out")
+    case "$upd" in https://127.0.0.1:*) ;; *) echo "update server did not start: $(cat "$out/$1.err")" >&2; exit 1 ;; esac
+}
+start_server srv_main "$out/fw" 7
+upd_main=$upd
+start_server srv_badband "$out/fw-badband" 8
+upd_badband=$upd
+cpp_fwdir=$out/fw rs_upd=$upd_main rs_ca=$out/srv_main.pem
+run_update update-region cpp "$out/archives/update.tgz" --region 1
+run_update update-region rs "$out/archives/update.tgz" --region 1
+cpp_fwdir=$out/fw-badband rs_upd=$upd_badband rs_ca=$out/srv_badband.pem
+run_update update-region-bad cpp "$out/archives/update.tgz" --region 1
+run_update update-region-bad rs "$out/archives/update.tgz" --region 1
+cpp_fwdir= rs_upd= rs_ca=
+same_restore update-region
+check "update-region: both wrote /int/.region_data first, then the package" \
+    "$(ok=0; for side in cpp rs; do grep -q '^f /int/.region_data ' "$out/update-region-$side/dump.txt" && head -1 "$out/update-region-$side/storage.txt" | grep -q 'StorageWriteRequest /int/.region_data' || ok=1; done; echo $ok)"
+same_restore update-region-bad
+check "update-region-bad: neither wrote region data, both said why and went on" \
+    "$(! grep -q '/int/.region_data' "$out/update-region-bad-cpp/dump.txt" "$out/update-region-bad-rs/dump.txt" &&
+       grep -q 'failed to perform region data provisioning' "$out/update-region-bad-cpp/stderr.txt" "$out/update-region-bad-cpp/stdout.txt" &&
+       grep -q 'Band value out of range' "$out/update-region-bad-rs/stdout.txt"; echo $?)"
+exec 7>&- 8>&-
+wait
+check "the update servers saw only the two bundle requests" \
+    "$(test "$(cat "$out/srv_main.out" "$out/srv_badband.out" | grep -c '^GET /regions/api/v0/bundle$')" = 2 &&
+       test "$(cat "$out/srv_main.out" "$out/srv_badband.out" | grep -c '^GET ')" = 2; echo $?)"
 
 echo "== nothing changes the device without --yes (argus-cli)"
 for c in "restore $out/backup-cpp/backup.tgz" "update $out/archives/update.tgz" "erase" "reboot" "mkdir /int/x" "rm /int/favorites.txt" "mv /int/a /int/b" "push $out/standard.dump /int/x"; do

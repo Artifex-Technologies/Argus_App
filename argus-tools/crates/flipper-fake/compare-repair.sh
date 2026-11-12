@@ -287,12 +287,27 @@ fw=$out/firmware upd=$upd_main ca=$out/srv_main.pem cpp_locale=
 compare region-nocountry 0
 check "region-nocountry: Rust used the default bands" "$(grep -q '"country":""' "$out/region-nocountry-rs/stdout.txt"; echo $?)"
 
-# The legacy update of a region-1 Flipper: the region data is written before /int is restored, in both.
+# The legacy update of a region-1 Flipper: /int is restored, then the region data written, in both.
 legacy=plain
 run region-legacy cpp --start-firmware --no-sd --fus running --region 1
 run region-legacy rs --start-firmware --no-sd --fus running --region 1
 legacy=
 compare region-legacy 0
+
+# ... with an older /int/.region_data on the device: /int is restored first, then the fresh region data is written,
+# so the fresh data stays (it decides the legal radio bands; both apps used to restore the old file over it).
+legacy=plain
+run region-legacy-old cpp --start-firmware --no-sd --fus running --region 1 --old-region-data
+run region-legacy-old rs --start-firmware --no-sd --fus running --region 1 --old-region-data
+legacy=
+compare region-legacy-old 0
+fresh=$(grep '^f /int/.region_data ' "$out/region-cpp/dump.txt")
+check "region-legacy-old: both end with the fresh region data, not the backup's" \
+    "$(test -n "$fresh" && grep -qxF "$fresh" "$out/region-legacy-old-cpp/dump.txt" && grep -qxF "$fresh" "$out/region-legacy-old-rs/dump.txt" &&
+       ! "$fake" --old-region-data --print-dump | grep -qxF "$fresh"; echo $?)"
+check "region-legacy-old: both restored the backup's file first and then wrote the fresh one (2 writes each)" \
+    "$(test "$(grep -c 'StorageWriteRequest /int/.region_data' "$out/region-legacy-old-cpp/requests.rpc")" = 2 &&
+       test "$(grep -c 'StorageWriteRequest /int/.region_data' "$out/region-legacy-old-rs/requests.rpc")" = 2; echo $?)"
 
 # A band the firmware cannot hold (200 dBm): both refuse the bundle and write no region data. argus-cli fetches it
 # before it changes anything on the firmware side; the C++ app has already put the resources on the card then.
@@ -314,8 +329,8 @@ exec 7>&- 8>&- 9>&-
 wait "$srv_main_pid" "$srv_nocountry_pid" "$srv_badband_pid"
 check "the update servers saw only region bundle requests ($(cat "$out/srv_main.out" "$out/srv_nocountry.out" "$out/srv_badband.out" | grep -c '^GET '))" \
     "$(cat "$out/srv_main.out" "$out/srv_nocountry.out" "$out/srv_badband.out" | grep '^GET ' | grep -qv '^GET /regions/api/v0/bundle$' && echo 1 || echo 0)"
-check "region bundles fetched: 2 + 1 + 1" \
-    "$(test "$(grep -c '^GET ' "$out/srv_main.out")" = 2 && test "$(grep -c '^GET ' "$out/srv_nocountry.out")" = 1 && test "$(grep -c '^GET ' "$out/srv_badband.out")" = 1; echo $?)"
+check "region bundles fetched: 3 + 1 + 1" \
+    "$(test "$(grep -c '^GET ' "$out/srv_main.out")" = 3 && test "$(grep -c '^GET ' "$out/srv_nocountry.out")" = 1 && test "$(grep -c '^GET ' "$out/srv_badband.out")" = 1; echo $?)"
 
 echo "compare-repair: $failures failed"
 [ "$failures" -eq 0 ]

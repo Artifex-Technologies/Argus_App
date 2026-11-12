@@ -152,6 +152,15 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — Region data: the legacy update keeps the fresh one; `argus-cli update` provisions the region
+- **Changed in both (C++ and Rust):** the legacy update restored `/int` after writing fresh region data, so an older
+  `/int/.region_data` in the backup replaced it. Now `/int` is restored first and the fresh region data written last.
+  `compare-repair.sh` `region-legacy-old` checks it (255 checks pass).
+- `argus-cli update` now provisions the region first, as the C++ `FullUpdateOperation` does (a failure is reported
+  and the update goes on); `compare-cli.sh` compares it on a region-1 fake (164 checks pass).
+- The read-only check against Flipper's real server passed: the real directory and bundle parse under the stricter rules.
+- **@Argus_Firmware:** the `region.c` NULL `country_code` note is in that repo's PROGRESS.md.
+
 ### 2026-11-12 — Rust port phase 7: the update directory and region data over HTTPS (both apps fixed)
 - New crate `argus-tools/crates/flipper-updates` (directory.json, the region bundle, HTTPS with rustls and the system's
   roots, bounded and SHA-256 checked) and `crates/qjson` (Qt's JSON rules, moved out of argus-api, which re-exports

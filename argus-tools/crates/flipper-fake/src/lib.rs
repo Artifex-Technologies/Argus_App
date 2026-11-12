@@ -209,6 +209,15 @@ impl FakeFlipper {
         self
     }
 
+    /// [`FakeFlipper::standard`] with an older `/int/.region_data` (made-up bytes, as a backup of `/int` would hold
+    /// it): a legacy update must leave the fresh region data in its place, not this.
+    pub fn with_old_region_data(mut self) -> FakeFlipper {
+        let old = b"\x0a\x02XX\x12\x0a\x08\x01\x10\x02\x18\x03\x20\x04".to_vec();
+        self.nodes.push(Node { path: "/int/.region_data".into(), dir: false, size: old.len() as u32 });
+        self.contents.push(("/int/.region_data".into(), old));
+        self
+    }
+
     /// A made-up device on Argus firmware with a few folders. No real device's names or
     /// serial numbers.
     pub fn standard() -> FakeFlipper {

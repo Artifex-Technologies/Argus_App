@@ -98,14 +98,16 @@ void LegacyUpdateOperation::nextStateLogic()
         downloadAssets();
 
     } else if(operationState() == DownloadingAssets) {
-        setOperationState(ProvisioningRegion);
-        provisionRegion();
-
-    } else if(operationState() == ProvisioningRegion) {
+        // /int is restored before the region data is written: the backup may hold an older
+        // /int/.region_data, and the fresh one decides the legal radio bands (it used to be restored over it)
         setOperationState(RestoringBackup);
         restoreBackup();
 
     } else if(operationState() == RestoringBackup) {
+        setOperationState(ProvisioningRegion);
+        provisionRegion();
+
+    } else if(operationState() == ProvisioningRegion) {
         setOperationState(RestartingDevice);
         restartDevice();
 
