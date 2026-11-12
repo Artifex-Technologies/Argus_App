@@ -149,6 +149,18 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — Rust port of the desktop side started (protocol layer + `argus-cli`)
+- Plan and inventory: **[docs/RUST_PORT.md](docs/RUST_PORT.md)** (port order: protocol and reads, our subsystems, writes behind a
+  confirmation, updater, DFU, network, UI in egui/eframe last). The firmware and anything the Flipper runs stay C.
+- `argus-tools/` is now a Cargo workspace. New crates: `crates/flipper-rpc` (prost messages from the firmware's `.proto`
+  files, framing, handshake, read-only ops), `crates/flipper-fake` (a scripted fake Flipper for tests) and `crates/argus-cli`
+  (`argus-cli --port DEV|--socket PATH info|ls PATH`, JSON on stdout). `cargo build` in `argus-tools/` still builds only
+  argus-tools, so the Qt build is unchanged. Building the new crates needs `protoc` (Arch: `protobuf`).
+- Proof without a device: the Rust schema matches every field of the C++ app's nanopb code, and the Rust requests are
+  byte-identical to frames from the C++ app's own nanopb encoder (`crates/flipper-rpc/tests/nanopb/`, rebuilt in CI).
+  **Not run against a real Flipper.** No C++ changed. Nothing here is a contract for other repos yet.
+- **@Sarina:** nothing changes for you; the control API stays in C++ until phase 3 of the plan, then keeps its wire format.
+
 ### 2026-11-11 — The app shows its own version (VERSION), not ARG-...
 - The app's version is the `VERSION` file (1.0.0; Labyrinth_OS's docs/VERSIONING.md, its `scripts/release.sh`
   tags releases `vX.Y.Z`). `qflipper_common.pri` reads it into `APP_VERSION`: the main window, `qFlipper-cli --version`,
