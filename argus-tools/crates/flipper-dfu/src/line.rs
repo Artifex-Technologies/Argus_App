@@ -1,12 +1,16 @@
-//! A [`Transport`] over a text stream, one request per line: how `argus-cli --dfu-socket` reaches
-//! the fake bootloader in tests (and the line protocol the C++ oracle speaks). It opens nothing
-//! itself and never touches USB. Requests: `ALT n`, `OUT request value hex`, `IN request value
+//! A [`Transport`] over a text stream, one request per line: how `argus-cli --dfu-socket` and the
+//! app reach the fake bootloader in tests (and the line protocol the C++ oracle speaks). It never
+//! touches USB; [`SocketBootloader`] opens only the Unix socket it is given. Requests: `ALT n`, `OUT request value hex`, `IN request value
 //! length`, `DESC`, `STRING alt`, each answered by one line (`OK`, `OK n`, `DATA hex`, `ERR`; `-` is
 //! no bytes); `SLEEP ms` reports a wait and gets no answer (nothing waits: the other end is a fake).
 
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use crate::device::{Transport, TransportError};
+use crate::device::{Dfu, Transport, TransportError};
+use crate::recovery::{self, Bootloader};
 
 /// The longest answer line read (a control transfer is at most 64 KiB, as hex).
 const MAX_LINE: u64 = 256 << 10;
@@ -97,5 +101,52 @@ impl<R: BufRead, W: Write> Transport for LineTransport<R, W> {
 
     fn sleep_ms(&mut self, ms: u32) {
         let _ = self.send(&format!("SLEEP {ms}"));
+    }
+}
+
+/// A bootloader reached through a Unix socket.
+pub type SocketDevice = Dfu<LineTransport<BufReader<UnixStream>, UnixStream>>;
+
+/// How long one answer from the bootloader may take.
+pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the chip may take to come back after a reset (the C++ operations' timeout is 30 s).
+pub const REENUMERATION: Duration = Duration::from_secs(30);
+
+/// Opens the bootloader on the socket at `path` (sends nothing).
+pub fn connect(path: &std::path::Path) -> Result<SocketDevice, String> {
+    let s = UnixStream::connect(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    s.set_read_timeout(Some(ANSWER_TIMEOUT)).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(s.try_clone().map_err(|e| e.to_string())?);
+    Ok(Dfu::new(LineTransport::new(reader, s)))
+}
+
+/// The bootloader on a socket, opened again for every step: after a reset it is waited for
+/// (bounded) until its socket is back, as the C++ app waits for the device to re-enumerate. Opening
+/// sends nothing (the C++ app's `beginTransaction` sends nothing either).
+pub struct SocketBootloader {
+    pub path: PathBuf,
+    /// The wait between status polls.
+    pub poll: Duration,
+}
+
+impl Bootloader for SocketBootloader {
+    type T = LineTransport<BufReader<UnixStream>, UnixStream>;
+
+    fn open(&mut self) -> Result<SocketDevice, recovery::Error> {
+        let deadline = Instant::now() + REENUMERATION;
+        loop {
+            if let Ok(d) = connect(&self.path) {
+                return Ok(d);
+            }
+            if Instant::now() >= deadline {
+                let gone = TransportError(format!("the bootloader did not come back within {} s", REENUMERATION.as_secs()));
+                return Err(crate::device::Error::Transport { during: "waiting for the bootloader", error: gone }.into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn pause(&mut self) {
+        std::thread::sleep(self.poll);
     }
 }

@@ -83,6 +83,8 @@ pub struct Config {
     pub home: PathBuf,
     /// The control API's token; empty: a new one written to the runtime folder, as the Qt app does.
     pub api_token: String,
+    /// The wait between the FUS status polls of a repair (1 s, as the C++ app).
+    pub recovery_poll: Duration,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,12 +119,27 @@ pub enum Action {
     Erase,
     Update(PackageSource),
     InstallFile,
-    Upload { dir: String },
-    Mkdir { dir: String },
-    Rename { dir: String, old: String },
-    Delete { path: String, dir: bool },
-    Download { remote: String },
+    Upload {
+        dir: String,
+    },
+    Mkdir {
+        dir: String,
+    },
+    Rename {
+        dir: String,
+        old: String,
+    },
+    Delete {
+        path: String,
+        dir: bool,
+    },
+    Download {
+        remote: String,
+    },
     SaveScreenshot,
+    /// The repair with local files (recovery mode only).
+    Repair,
+    ExitRecovery,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,6 +249,8 @@ pub struct ArgusApp {
     directory: DirState,
     net_tx: Sender<NetEvent>,
     net_rx: Receiver<NetEvent>,
+    rec_tx: Sender<Result<device::Outcome, String>>,
+    rec_rx: Receiver<Result<device::Outcome, String>>,
     keypad: Keypad,
     console_note: String,
 }
@@ -246,6 +265,7 @@ impl ArgusApp {
         let source = cfg.theme.clone().unwrap_or_else(|| style_source(settings.style, cfg.yggdrasil_config.clone()));
         let bridge = Arc::new(Mutex::new(Bridge::new(&cfg.datastore, cfg.library_dir.clone())));
         let (net_tx, net_rx) = mpsc::channel();
+        let (rec_tx, rec_rx) = mpsc::channel();
         ArgusApp {
             settings,
             theme: Theme::new(source),
@@ -275,6 +295,8 @@ impl ArgusApp {
             directory: DirState::Unknown,
             net_tx,
             net_rx,
+            rec_tx,
+            rec_rx,
             keypad: Keypad::default(),
             console_note: String::new(),
             cfg,
@@ -388,6 +410,11 @@ impl ArgusApp {
         };
         for e in events {
             self.on_event(e);
+        }
+        let done: Vec<Result<device::Outcome, String>> = self.rec_rx.try_iter().collect();
+        for result in done {
+            let Stage::Busy(op) = self.stage else { continue };
+            self.on_event(Event::Done { op, result });
         }
         let net: Vec<NetEvent> = self.net_rx.try_iter().collect();
         for e in net {
@@ -666,6 +693,32 @@ impl ArgusApp {
                 action,
                 error: None,
             },
+            Action::Repair => Dialog {
+                title: "Repair Device?".into(),
+                message: "The firmware from these files will be installed, the option bytes corrected, and the wireless stack \
+                          installed when an image is given. Recovery may erase your progress and settings."
+                    .into(),
+                warning: None,
+                confirm: "Repair".into(),
+                danger: false,
+                fields: vec![
+                    field("Firmware (.dfu)", home.join("")),
+                    field("Option bytes (ob.data)", home.join("")),
+                    Field { label: "Wireless stack image (.bin, optional)".into(), value: String::new() },
+                ],
+                action,
+                error: None,
+            },
+            Action::ExitRecovery => Dialog {
+                title: "Leave recovery mode?".into(),
+                message: "The chip leaves its bootloader and starts its firmware".into(),
+                warning: None,
+                confirm: "Leave".into(),
+                danger: false,
+                fields: Vec::new(),
+                action,
+                error: None,
+            },
             Action::Update(_) => return self.ask_update(),
         };
         self.open_dialog(d);
@@ -745,6 +798,22 @@ impl ArgusApp {
                 let p = new_path(0)?;
                 self.busy = Some(Op::Pull);
                 self.send(Cmd::Pull { remote, local: p });
+            }
+            Action::Repair | Action::ExitRecovery => {
+                let kind = self.current.as_ref().map(|f| f.kind.clone()).ok_or("No device.")?;
+                if let Some(why) = crate::recovery::unreachable(&kind) {
+                    return Err(why);
+                }
+                let (job, op) = if action == Action::Repair {
+                    let radio = value(2);
+                    let files = crate::recovery::RepairFiles::read(&path(0)?, &path(1)?, (!radio.is_empty()).then(|| Path::new(&radio)))?;
+                    (crate::recovery::Job::Repair(files), Op::Repair)
+                } else {
+                    (crate::recovery::Job::Exit, Op::Exit)
+                };
+                let waker = self.waker.clone().ok_or("Not ready yet.")?;
+                crate::recovery::start(kind, self.cfg.recovery_poll, job, self.rec_tx.clone(), waker)?;
+                self.big(op);
             }
             Action::SaveScreenshot => {
                 let p = new_path(0)?;
@@ -1083,15 +1152,15 @@ impl ArgusApp {
         let loc = self.current.as_ref().map(Found::location).unwrap_or_default();
         label_at(ui, pos2(card.left() + CENTER_X + 6.0, top + 20.0), Align2::LEFT_TOP, &loc, FontId::proportional(12.0), pal.dim);
 
-        // the main button and its links
-        let state = self.update_state();
+        // the main button and its links; in recovery mode it repairs from local files
+        let state = if self.recovery() { UpdateState::CanRepair } else { self.update_state() };
         let fill = match state {
             UpdateState::CanUpdate => pal.green,
             UpdateState::CanRepair => pal.blue,
             _ => pal.accent,
         };
         let button = Rect::from_center_size(pos2(card.left() + CENTER_X, card.top() + 290.0), vec2(220.0, 48.0));
-        let enabled = state.enabled() && self.worker.is_some();
+        let enabled = state.enabled() && (self.worker.is_some() || self.recovery());
         let resp = ui.put(
             button,
             egui::Button::new(RichText::new(state.button().to_uppercase()).size(20.0).color(if enabled {
@@ -1106,7 +1175,9 @@ impl ArgusApp {
         if resp.clicked() && enabled {
             if let UpdateState::Error(_) = state {
                 self.check_updates();
-            } else if state != UpdateState::CanRepair {
+            } else if state == UpdateState::CanRepair {
+                self.ask(Action::Repair);
+            } else {
                 self.ask_update();
             }
         }
@@ -1186,6 +1257,22 @@ impl ArgusApp {
     }
 
     fn actions_tab(&mut self, ui: &mut egui::Ui, pal: &Palette) {
+        if self.recovery() {
+            ui.label(RichText::new("Recovery").color(pal.dim));
+            let size = vec2(150.0, 32.0);
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new("Repair…").min_size(size)).on_hover_text("Install firmware from local files.").clicked() {
+                    self.ask(Action::Repair);
+                }
+                if ui.add(egui::Button::new("Leave recovery mode").min_size(size)).clicked() {
+                    self.ask(Action::ExitRecovery);
+                }
+            });
+            if let Some(why) = self.current.as_ref().and_then(|f| crate::recovery::unreachable(&f.kind)) {
+                ui.label(RichText::new(why).color(pal.amber));
+            }
+            return;
+        }
         let connected = self.worker.is_some() && !self.recovery();
         ui.label(RichText::new("Firmware update channel").color(pal.dim));
         let names: Vec<String> = match &self.directory {

@@ -129,6 +129,8 @@ pub enum Op {
     Rename,
     Captures,
     Repair,
+    /// Leaving recovery mode.
+    Exit,
 }
 
 impl Op {
@@ -139,6 +141,7 @@ impl Op {
             Op::Erase => "Performing Factory Reset",
             Op::Update => "Updating your device",
             Op::Repair => "Repairing your device",
+            Op::Exit => "Leaving recovery mode",
             Op::Pull | Op::Push | Op::Mkdir | Op::Remove | Op::Rename => "File operation in progress",
             Op::Captures => "Pulling captures",
         }
@@ -146,7 +149,7 @@ impl Op {
 
     /// Operations that take the whole window (the Qt app's update overlay); file operations and capture pulls do not.
     pub fn is_big(self) -> bool {
-        matches!(self, Op::Backup | Op::Restore | Op::Erase | Op::Update | Op::Repair)
+        matches!(self, Op::Backup | Op::Restore | Op::Erase | Op::Update | Op::Repair | Op::Exit)
     }
 }
 

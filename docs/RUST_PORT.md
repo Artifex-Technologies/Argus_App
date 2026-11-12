@@ -769,6 +769,17 @@ one event log). In the app, the API has no device attached yet: `device.status` 
 API needs `argus-cli chymaera serve --port` for now (the device belongs to the app's worker). Settings: the style
 (follow the system, light, dark), auto-connect, the update check, hidden files, the API's port.
 
+Recovery mode: a device in its bootloader shows as "Recovery mode" (the blue light on the device, no file manager);
+the main button is Repair. The repair takes local files (firmware `.dfu`, the option bytes file, optionally the
+wireless stack image), checked whole in the dialog before anything is opened, and runs `flipper_dfu::recovery::
+full_repair` through its `Bootloader` interface on a thread; "Leave recovery mode" runs `exit_recovery`. The only
+bootloader the app can reach is one on a Unix socket (`--dfu-socket`, `flipper_dfu::line::SocketBootloader`, now
+shared with argus-cli); a device in recovery mode found on USB is listed, and asking it for anything is refused in the
+dialog before anything starts. A repair whose wireless stack was not installed ends in "Done, with a warning" and the
+warning (`repaired, but the radio stack was not installed: ...`), the partial success both CLIs report with exit 3.
+Not in the app yet: the repair from the update server's files, and the steps after it on the firmware side
+(resources, region data, a restart; `argus-cli recovery repair --resources ... --port` does them).
+
 Found while testing: a click that landed while another overlay finished fading was lost. egui derives a widget's
 automatic id from its parent's counter, and an `id_salt` on the parent does not change that, so when a fading overlay
 stopped being drawn every widget after it changed its id between the press and the release. Every overlay and area
@@ -799,6 +810,11 @@ now has an explicit id; the console tests click right after the console opens.
   folder read; nothing changed on the device; a second pull finds nothing new), notes and the log, and the API started
   from the app on a free port with the test's token (ping, a wrong token refused, `log.tail` sees the console's note),
   then stopped (the port closes). The settings window saves what changes.
+- Recovery (`tests/recovery.rs`) against the fake STM32WB55 bootloader across its resets: recovery mode shown
+  (snapshot), the repair and leaving recovery mode each cancelled (not one request reaches the bootloader, the flash
+  untouched) and confirmed (firmware written, the wireless stack deleted and installed, the chip starts its firmware;
+  the chip leaves its bootloader), a damaged `.dfu` refused in the dialog, a FUS stuck in an unknown state giving the
+  partial success (snapshot of the warning screen), and a USB device in recovery mode never reached.
 - The live screen's protocol (`flipper-fake/tests/stream.rs`): stream start, input events and stop are the C++ app's
   bytes (the nanopb fixture), a quiet device leaves the session usable, frames of the wrong length are skipped.
 
@@ -820,14 +836,21 @@ smoke test of the real binary inside that compositor (`tests/apps.rs` there show
    repair|legacy-update|finish` and in `update`, compared with the C++ app on the fakes. Checked once against Flipper's
    real server (read only, 2026-11-12): the real directory parses and the real bundle gives 3 bands (58 bytes) for US.
    The legacy update keeps the fresh region data over the backup's (both apps). The firmware's NULL `country_code`
-   read is noted for Argus_Firmware (its local PROGRESS.md). Left: look at the GUI's partial-success warning once on a
-   screen.
-5. The UI phase (section 6) has started: shell, device information, live screen and keypad, file manager, tested
-   headless with snapshots and a test per confirmation; backup, restore, erase and the update (server and file) done
-   the same way against the fake and `flipper_fake::update_server`; the console (capture pulls and list, sessions,
-   notes, the Sarina API toggle) too. Next: recovery (repair through
-   `flipper_dfu::recovery` behind an interface, only `--dfu-socket`, no USB). Not started: the developer tab, the
-   Argus tools window (apps, check-up, rebuild, snapshots, capture library search), app installs, the API's
-   `device.status` and `capture.pull` through the app's own device worker (the C++ GUI's server has the device). The
-   file manager takes paths as text (no file picker yet; Yggdrasil's portal could give one). The app has never
-   run on my desktop or against my Flipper: the first run is with me watching.
+   read is noted for Argus_Firmware (its local PROGRESS.md). The Rust app shows the partial-success warning (snapshot
+   `finished-warning.png`); the Qt GUI's is still unseen on a screen.
+5. The UI phase (section 6): `crates/argus-app`, qFlipper's layout and motion in Yggdrasil's style, tested headless
+   (accessibility-tree clicks, software pixel snapshots, a test per confirmation, never a real device or a window).
+   Done: shell, device information, live screen and keypad, file manager, backup, restore, erase, the update from the
+   server and from a file, the console (capture pulls and list, sessions, notes, the Sarina API toggle), recovery
+   (repair with local files and leaving recovery mode through `flipper_dfu::recovery`'s `Bootloader` interface, only
+   `--dfu-socket`, no USB) with the partial-success warning, settings. Next, in this order:
+   a. the API's `device.status` and `capture.pull` through the app's own device worker (the C++ GUI's server has the
+      device; the app's has none yet);
+   b. the repair from the update server's files, then the firmware-side steps after it (resources, region data,
+      restart), as `argus-cli recovery repair --resources --port` does;
+   c. the developer tab (wireless stack and FUS installs, recovery only, behind their dialogs);
+   d. the Argus tools window (apps and installs, check-up, rebuild, snapshots, the capture library search);
+   e. a file picker (the file manager and dialogs take paths as text; Yggdrasil's portal could give one);
+   f. a smoke test of the real binary in Yggdrasil's headless compositor, against the fake.
+   The app has never run on my desktop or against my Flipper. Its first run is with me watching, against the fake
+   first (`argus-app --socket PATH`, with `flipper-fake --socket PATH`), then my Flipper. The Qt app stays until then.

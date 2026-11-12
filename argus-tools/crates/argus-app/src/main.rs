@@ -1,9 +1,11 @@
 //! `argus-app`: the Argus desktop app in Rust, shipped next to the Qt app until I switch.
 //!
-//!   argus-app [--port DEVICE | --socket PATH | --no-discovery] [--update-server URL] [--config-dir DIR] [--timeout MS]
+//!   argus-app [--port DEVICE | --socket PATH | --dfu-socket PATH | --no-discovery] [--update-server URL]
+//!             [--config-dir DIR] [--timeout MS]
 //!
-//! Without `--port`/`--socket` it finds Flipper Zeros by reading sysfs (nothing is opened until it connects); with one it
-//! uses only that device. `--no-discovery` finds nothing at all.
+//! Without `--port`/`--socket`/`--dfu-socket` it finds Flipper Zeros by reading sysfs (nothing is opened until it
+//! connects); with them it uses only the devices named. `--dfu-socket` names a bootloader on a Unix socket speaking
+//! `flipper_dfu::line` (recovery mode; the app has no USB recovery transport). `--no-discovery` finds nothing at all.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,10 +16,10 @@ use argus_app::{app, net::Net, settings, theme, ArgusApp, Config};
 use eframe::egui;
 
 const USAGE: &str =
-    "usage: argus-app [--port DEVICE | --socket PATH | --no-discovery] [--update-server URL] [--config-dir DIR] [--timeout MS]";
+    "usage: argus-app [--port DEVICE | --socket PATH | --dfu-socket PATH | --no-discovery] [--update-server URL] [--config-dir DIR] [--timeout MS]";
 
 fn main() -> ExitCode {
-    let mut discovery: Option<Box<dyn Discovery>> = None;
+    let mut named: Option<Vec<Found>> = None;
     let mut server = flipper_updates::DEFAULT_SERVER.to_string();
     let mut config_dir = settings::default_dir();
     let mut timeout = Duration::from_secs(3);
@@ -26,9 +28,12 @@ fn main() -> ExitCode {
         let mut value = || args.next().ok_or_else(|| format!("{a} needs a value"));
         let r: Result<(), String> = (|| {
             match a.as_str() {
-                "--port" => discovery = Some(Box::new(Fixed(vec![Found { kind: Kind::Serial(PathBuf::from(value()?)) }]))),
-                "--socket" => discovery = Some(Box::new(Fixed(vec![Found { kind: Kind::Socket(PathBuf::from(value()?)) }]))),
-                "--no-discovery" => discovery = Some(Box::new(Fixed(Vec::new()))),
+                "--port" => named.get_or_insert_with(Vec::new).push(Found { kind: Kind::Serial(PathBuf::from(value()?)) }),
+                "--socket" => named.get_or_insert_with(Vec::new).push(Found { kind: Kind::Socket(PathBuf::from(value()?)) }),
+                "--dfu-socket" => named.get_or_insert_with(Vec::new).push(Found { kind: Kind::RecoverySocket(PathBuf::from(value()?)) }),
+                "--no-discovery" => {
+                    named.get_or_insert_with(Vec::new);
+                }
                 "--update-server" => {
                     server = value()?;
                     if !server.starts_with("https://") {
@@ -60,7 +65,10 @@ fn main() -> ExitCode {
     };
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     let cfg = Config {
-        discovery: discovery.unwrap_or_else(|| Box::new(Sysfs { sys: "/sys".into(), dev: "/dev".into() })),
+        discovery: match named {
+            Some(list) => Box::new(Fixed(list)) as Box<dyn Discovery>,
+            None => Box::new(Sysfs { sys: "/sys".into(), dev: "/dev".into() }),
+        },
         config_dir,
         datastore: data.join("Argus/chymaera/chymaera.db"),
         library_dir: data.join("argus/captures"),
@@ -70,6 +78,7 @@ fn main() -> ExitCode {
         timeout,
         home,
         api_token: String::new(),
+        recovery_poll: Duration::from_secs(1),
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

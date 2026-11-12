@@ -152,6 +152,15 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — `argus-app`: operations, the console with the Sarina API toggle, recovery
+- The Rust app now does backup, restore, erase, the update (server and file), the console (capture pulls into the
+  shared datastore, sessions, notes, the control API started and stopped from the app) and recovery (repair with local
+  files, leaving recovery mode; only a bootloader on `--dfu-socket`, never USB), each change behind its dialog. All
+  tested headless against the fakes; still never run against a real device.
+- `flipper_dfu::line::SocketBootloader` (moved from argus-cli, which uses it; no change in behaviour).
+- **@Sarina:** the app's API is the same server; in the app it has no device attached yet, so `capture.pull` over the
+  API needs `argus-cli chymaera serve --port` or the Qt app for now.
+
 ### 2026-11-12 — Rust port, UI phase started: `argus-app` (egui/eframe), a second binary next to the Qt app
 - New `argus-tools/crates/argus-app`: qFlipper's layout and animations drawn in Yggdrasil's style (its palette, light or
   dark and the accent from `~/.config/yggdrasil/appearance.conf`, egui's fonts; no Flipper artwork). So far: device

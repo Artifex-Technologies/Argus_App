@@ -15,6 +15,8 @@ path = "src/main.rs"
 eframe = "0.36.2"
 flipper-rpc = { path = "../flipper-rpc" }
 flipper-updates = { path = "../flipper-updates" }
+# recovery through flipper_dfu::recovery's Bootloader interface; without its usb feature (nothing can open USB)
+flipper-dfu = { path = "../flipper-dfu" }
 argus-api = { path = "../argus-api" }
 argus-capture = { path = "../argus-capture" }
 png = "0.18"

@@ -205,6 +205,7 @@ impl Harness {
             timeout: Duration::from_secs(2),
             home,
             api_token: "test-token".into(),
+            recovery_poll: Duration::from_millis(5),
         };
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
@@ -413,10 +414,17 @@ impl Harness {
         self.step();
     }
 
-    /// Replaces the text of the dialog's text field number `n` (in drawing order).
+    /// The text fields, top to bottom (the accessibility tree's order is not the drawing order).
+    fn fields(&self) -> Vec<Widget> {
+        let mut fields: Vec<Widget> = self.widgets().into_iter().filter(|w| w.role == accesskit::Role::TextInput).collect();
+        fields.sort_by(|a, b| a.rect.min.y.total_cmp(&b.rect.min.y));
+        fields
+    }
+
+    /// Replaces the text of text field number `n`, counted from the top.
     pub fn set_field(&mut self, n: usize, text: &str) {
         self.layout();
-        let fields: Vec<Widget> = self.widgets().into_iter().filter(|w| w.role == accesskit::Role::TextInput).collect();
+        let fields = self.fields();
         let f = fields.get(n).unwrap_or_else(|| panic!("no text field {n} (there are {})", fields.len())).clone();
         self.click_at(f.rect.center());
         self.events.push(Event::Key { key: Key::A, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND });
@@ -426,7 +434,7 @@ impl Harness {
     }
 
     pub fn field_value(&self, n: usize) -> String {
-        self.widgets().into_iter().filter(|w| w.role == accesskit::Role::TextInput).nth(n).map(|w| w.value).unwrap_or_default()
+        self.fields().into_iter().nth(n).map(|w| w.value).unwrap_or_default()
     }
 
     /// The window as the GPU would draw it.

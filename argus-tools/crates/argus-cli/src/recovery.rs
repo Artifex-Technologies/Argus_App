@@ -6,17 +6,15 @@
 //! Every command but `info` changes the device and does nothing without `--yes`; files are read and
 //! checked first, before anything is opened.
 
-use std::io::{BufReader, Read};
-use std::os::unix::net::UnixStream;
+use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
-use flipper_dfu::device::Dfu;
-use flipper_dfu::line::LineTransport;
-use flipper_dfu::recovery::{self, Bootloader, OptionBytesOutcome, WirelessStatus};
+use flipper_dfu::line::{connect, SocketBootloader, REENUMERATION};
+use flipper_dfu::recovery::{self, OptionBytesOutcome, WirelessStatus};
 use flipper_dfu::wb55::{OptionBytesFile, Wb55};
 use flipper_dfu::{dfuse, wb55};
 
@@ -100,7 +98,7 @@ const PARTIAL: u8 = 3;
 /// The largest wireless stack image: the whole flash.
 const MAX_RADIO: u64 = 1 << 20;
 
-type Device = Dfu<LineTransport<BufReader<UnixStream>, UnixStream>>;
+type Device = flipper_dfu::line::SocketDevice;
 
 fn read_limited(path: &str, max: u64) -> Result<Vec<u8>, String> {
     let f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
@@ -184,49 +182,6 @@ fn plan(words: &[&str]) -> Result<Plan, (String, String, u8)> {
         [] | ["help"] => return Err(usage("recovery needs a command")),
         _ => return Err(usage(&format!("unknown recovery command: {}", words.join(" ")))),
     })
-}
-
-/// How long one answer from the bootloader may take.
-const ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long the chip may take to come back after a reset (the C++ operations' timeout is 30 s).
-const REENUMERATION: Duration = Duration::from_secs(30);
-
-fn connect(path: &Path) -> Result<Device, String> {
-    let s = UnixStream::connect(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    s.set_read_timeout(Some(ANSWER_TIMEOUT)).map_err(|e| e.to_string())?;
-    let reader = BufReader::new(s.try_clone().map_err(|e| e.to_string())?);
-    Ok(Dfu::new(LineTransport::new(reader, s)))
-}
-
-/// The bootloader on `--dfu-socket`, opened again for every step: after a reset it is waited for
-/// (bounded) until its socket is back, as the C++ app waits for the device to re-enumerate. Opening
-/// sends nothing (the C++ app's `beginTransaction` sends nothing either).
-struct SocketBootloader<'a> {
-    path: &'a Path,
-    poll: Duration,
-}
-
-impl Bootloader for SocketBootloader<'_> {
-    type T = LineTransport<BufReader<UnixStream>, UnixStream>;
-
-    fn open(&mut self) -> Result<Device, recovery::Error> {
-        let deadline = Instant::now() + REENUMERATION;
-        loop {
-            if let Ok(d) = connect(self.path) {
-                return Ok(d);
-            }
-            if Instant::now() >= deadline {
-                let gone =
-                    flipper_dfu::device::TransportError(format!("the bootloader did not come back within {} s", REENUMERATION.as_secs()));
-                return Err(flipper_dfu::device::Error::Transport { during: "waiting for the bootloader", error: gone }.into());
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    fn pause(&mut self) {
-        std::thread::sleep(self.poll);
-    }
 }
 
 fn status_name(s: WirelessStatus) -> &'static str {
@@ -348,13 +303,13 @@ pub fn run(cmd: &Cmd) -> ExitCode {
         return fail("usage", "recovery needs --dfu-socket PATH; USB recovery is not built into argus-cli".into(), 2);
     };
     if let (Plan::Legacy { firmware, option_bytes, radio }, Some(bundle)) = (&plan, &bundle) {
-        let mut b = SocketBootloader { path, poll: cmd.poll };
+        let mut b = SocketBootloader { path: path.to_path_buf(), poll: cmd.poll };
         let (code, out) = legacy_update(cmd, &mut b, firmware, option_bytes, radio.as_deref(), bundle);
         print(out);
         return ExitCode::from(code);
     }
     if let Plan::Repair { firmware, option_bytes, radio } = &plan {
-        let mut b = SocketBootloader { path, poll: cmd.poll };
+        let mut b = SocketBootloader { path: path.to_path_buf(), poll: cmd.poll };
         return match recovery::full_repair(&mut b, firmware, radio.as_deref(), option_bytes) {
             Ok(r) => {
                 let (written, fixed, differ) = match r.option_bytes {

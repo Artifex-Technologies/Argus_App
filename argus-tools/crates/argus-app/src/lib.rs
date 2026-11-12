@@ -8,6 +8,7 @@ pub mod device;
 pub mod discovery;
 pub mod firmware;
 pub mod net;
+pub mod recovery;
 pub mod settings;
 pub mod theme;
 
