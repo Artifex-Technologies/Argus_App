@@ -206,6 +206,7 @@ impl Server {
     pub fn run(&self, bridge: &mut Bridge, stop: &AtomicBool) {
         let mut clients: Vec<Client> = Vec::new();
         while !stop.load(Ordering::Relaxed) {
+            bridge.poll_device();
             let mut fds = vec![libc::pollfd { fd: self.listener.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
             for c in &clients {
                 let mut events = libc::POLLIN;

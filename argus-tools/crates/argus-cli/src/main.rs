@@ -37,8 +37,9 @@ const HELP: &str = "argus-cli — talk to a Flipper Zero over RPC (JSON on stdou
   screen DIR         the screen as PBM images (DIR must not exist); --frames N, default 1
   capture pull PATH  pull a capture folder (or a path inside one) into the datastore
   capture pull-all   pull every capture folder into the datastore
-  chymaera ...       serve | parse FILE | import FILE | selftest, as qFlipper-cli chymaera
-                     (plain text like it, no device: see argus-cli chymaera)
+  chymaera ...       serve | watch | parse FILE | import FILE | selftest, as qFlipper-cli
+                     chymaera (plain text like it; serve and watch use the device named
+                     with --port/--socket, if any: see argus-cli chymaera)
   version | help
 
   All commands only read from the device. Names the device lists that could lead outside
@@ -279,7 +280,7 @@ fn main() -> ExitCode {
     };
     let words: Vec<&str> = cmd.words.iter().map(String::as_str).collect();
     if words.first() == Some(&"chymaera") {
-        return chymaera::run(&cmd.words[1..]);
+        return chymaera::run(&cmd);
     }
     match words.as_slice() {
         ["help"] | [] => {

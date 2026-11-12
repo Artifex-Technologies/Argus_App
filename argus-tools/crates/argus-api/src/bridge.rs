@@ -9,6 +9,7 @@ use argus_capture::meta;
 use argus_capture::store::{Capture, CaptureRow, Store};
 use argus_capture::sync::{is_capture_root, CAPTURE_ROOTS};
 
+use crate::device::{Device, Note};
 use crate::eventlog::{now_ms, severity_from_name, Entry, EventLog, Severity, Source};
 use crate::qjson::{self, qs, Object, QString, Value};
 
@@ -51,6 +52,8 @@ pub struct Bridge {
     library_dir: PathBuf,
     /// Called for each new entry (the CLI mirrors them to stdout).
     on_entry: Option<EntryHook>,
+    /// The Flipper this server reads from, when one was named.
+    device: Option<Device>,
 }
 
 /// `$XDG_DATA_HOME`, or `~/.local/share` (Qt's GenericDataLocation).
@@ -181,7 +184,16 @@ impl Bridge {
     pub fn new(datastore: &Path, library_dir: PathBuf) -> Bridge {
         let store = Store::open(datastore).ok();
         let store_path = if store.is_some() { datastore.display().to_string() } else { String::new() };
-        let mut b = Bridge { store, store_path, log: EventLog::default(), session: None, server_port: 0, library_dir, on_entry: None };
+        let mut b = Bridge {
+            store,
+            store_path,
+            log: EventLog::default(),
+            session: None,
+            server_port: 0,
+            library_dir,
+            on_entry: None,
+            device: None,
+        };
         let detail = if b.store.is_some() { format!("datastore: {}", b.store_path) } else { "datastore unavailable".into() };
         b.append(Severity::Info, Source::System, &format!("Chymaera subsystem {VERSION} ready"), &detail);
         b
@@ -341,8 +353,51 @@ impl Bridge {
     }
 
     /// `startPull` with no device attached (`serve` has none): logged and refused.
-    fn pull_without_device(&mut self, label: &str) {
-        self.append(Severity::Warning, Source::Device, &format!("Cannot pull {label}: no device attached"), "");
+    /// `startPull`: refused (and logged) without a device or while a pull runs; otherwise the
+    /// pull starts on the device's worker and this returns at once, as in the C++ app.
+    fn start_pull(&mut self, roots: Vec<String>, label: &str) -> bool {
+        let session = self.session.as_ref().map(|s| s.0);
+        let why = match &mut self.device {
+            None => "no device attached",
+            Some(d) if d.is_pulling() => "a pull is already running",
+            Some(d) => {
+                if d.start_pull(roots, label.to_string(), session) {
+                    self.append(Severity::Notice, Source::Device, &format!("Pulling {label} from device…"), "");
+                    return true;
+                }
+                "the device is gone"
+            }
+        };
+        self.append(Severity::Warning, Source::Device, &format!("Cannot pull {label}: {why}"), "");
+        false
+    }
+
+    /// `attachDevice`.
+    pub fn attach_device(&mut self, device: Device) {
+        let name = device.name().to_string();
+        self.device = Some(device);
+        self.append(Severity::Notice, Source::Device, &format!("Device attached: {name}"), "");
+    }
+
+    pub fn has_device(&self) -> bool {
+        self.device.is_some()
+    }
+
+    /// Takes in what the device's worker reported: pull steps, the end of a pull, a lost device.
+    pub fn poll_device(&mut self) {
+        let Some(d) = &mut self.device else { return };
+        let notes = d.notes();
+        for n in notes {
+            match n {
+                Note::Event(sev, src, msg, detail) => self.append(sev, src, &msg, &detail),
+                Note::PullDone(_) => {}
+                Note::Gone(why) => {
+                    self.device = None;
+                    self.append(Severity::Notice, Source::Device, "Device offline", &why);
+                    self.append(Severity::Notice, Source::Device, "Device detached", "");
+                }
+            }
+        }
     }
 
     /// `Bridge::handleApiRequest`.
@@ -412,7 +467,10 @@ impl Bridge {
                 }
                 return ok().with("summary", Value::from(summary));
             }
-            "device.status" => return ok().with("connected", Value::Bool(false)).with("name", Value::from("")),
+            "device.status" => {
+                let name = self.device.as_ref().map(|d| d.name().to_string()).unwrap_or_default();
+                return ok().with("connected", Value::Bool(self.device.is_some())).with("name", Value::from(name));
+            }
             "capture.pull" => {
                 let path = field("path").to_text();
                 if path.is_empty() {
@@ -421,12 +479,19 @@ impl Bridge {
                 if !is_capture_root(&path) {
                     return fail(format!("only the capture folders may be pulled: {}", CAPTURE_ROOTS.join(", ")));
                 }
-                self.pull_without_device(&path);
-                return fail("no device attached or staging failed");
+                if !self.start_pull(vec![path.clone()], &path) {
+                    return fail("no device attached or staging failed");
+                }
+                // Asynchronous: log.tail shows the progress and the end.
+                return ok().with("started", Value::Bool(true)).with("path", Value::from(path));
             }
             "capture.pullAll" => {
-                self.pull_without_device("all capture folders");
-                return fail("no device attached, a pull is already running, or staging failed");
+                let roots: Vec<String> = CAPTURE_ROOTS.iter().map(|r| r.to_string()).collect();
+                if !self.start_pull(roots, "all capture folders") {
+                    return fail("no device attached, a pull is already running, or staging failed");
+                }
+                let paths = CAPTURE_ROOTS.iter().map(|r| Value::from(*r)).collect();
+                return ok().with("started", Value::Bool(true)).with("paths", Value::Array(paths));
             }
             "capture.library" => {
                 let query = as_argument(&field("query").to_qstring());

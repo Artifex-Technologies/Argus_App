@@ -180,6 +180,14 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   starts with a BOM is recognised (it was skipped), every `\r` is dropped (a lone one mid-line used to show as a
   space), invalid UTF-8 becomes one U+FFFD per byte, and an indented `#` line is a comment. The Qt oracle still
   agrees on every generated file.
+- A device in the Rust server and `chymaera watch` (2026-11-12): `argus-api::device` opens only the Flipper named
+  with `--port`/`--socket`, reads its name (`hardware.name`, as the C++ app), and leaves the RPC session to a worker
+  thread. `argus-cli --port DEV chymaera serve` then answers `device.status` and starts `capture.pull`/`pullAll` in
+  the background, as the GUI's server does: the pull's steps reach `log.tail`, a second pull is refused while one
+  runs, and a device that stops answering is logged offline and detached. `argus-cli --port DEV chymaera watch
+  [seconds]` prints the device's events. `sync::pull_logged` hands a pull's steps to a callback (the server's log)
+  instead of only the datastore. While idle the worker asks the protobuf version once a second to notice an unplug
+  (the C++ app learns it from USB); nothing it sends changes the device.
 - The screen (2026-11-12): `flipper_rpc::screen` starts the stream, collects frames (broadcasts, command id 0),
   drops any frame that is not 1024 bytes, as the C++ streamer now does, and stops the stream again;
   `argus-cli screen DIR [--frames N]` writes them as PBM images (lit pixels black, the frame's own layout; the
@@ -280,8 +288,9 @@ failed, and does not read `devinfo` or start the screen.
 
 ## Resume here
 
-1. The rest of phase 3: `chymaera watch` and a device in the Rust `serve` (`argus-cli --port DEV chymaera serve`:
-   `device.status` and asynchronous `capture.pull`/`pullAll` as the GUI's server has them; the fake can stand in
-   for the device, and `compare-api.sh` can then run both against it). The screen stream is there
+1. The rest of phase 3: compare the device side of the two servers. The C++ `chymaera serve` has no device (only the
+   GUI attaches one); give it one the way `watch` does (opt-in, the test hook keeps it on the fake), then run both
+   servers against the fake in `compare-api.sh` (status, async pulls, rows, the final log line). The Rust side is
+   done and tested against the fake (`tests/device.rs`). The screen stream is there
    (`flipper_rpc::screen`) for the UI phase: buttons (`GuiSendInputRequest`) and the virtual display come with it.
 2. `restore` needs writes (phase 4); then the fake can check each app's restore of the other's backup.

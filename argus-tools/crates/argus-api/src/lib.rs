@@ -5,10 +5,12 @@
 //! - [`qjson`]: JSON as Qt reads and writes it.
 //! - [`eventlog`]: the live event log (`log.tail`), persisted to the datastore.
 //! - [`bridge`]: the commands.
+//! - [`device`]: a named Flipper, read by a worker thread (pulls, keepalive).
 //! - [`server`]: loopback TCP, the token, one request per line.
 //! - [`pcap`]: pcap and pcapng files.
 
 pub mod bridge;
+pub mod device;
 pub mod eventlog;
 pub mod pcap;
 pub mod qjson;

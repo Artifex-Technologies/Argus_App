@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use argus_api::bridge::Bridge;
+use argus_api::device::Device;
 use argus_api::eventlog::source_name;
 use argus_api::server::{self, Conn, Server, DEFAULT_PORT};
 use argus_api::{pcap, qjson};
@@ -18,16 +19,21 @@ Usage: argus-cli chymaera <command> [args]
 
 Commands:
   selftest              Verify the Chymaera subsystem end-to-end (no device needed)
-  serve [port] [token]  Start the Sarina control API (loopback). Default port 44700
+  serve [port] [token]  Start the Sarina control API (loopback). Default port 44700.
+                        With --port DEVICE or --socket PATH before `chymaera`, that Flipper
+                        is attached: device.status, capture.pull and capture.pullAll use it
+  watch [seconds]       Stream live device events from the Flipper named with --port/--socket
   parse <file>          Parse a Flipper file (.nfc/.sub/...) and print JSON
   import <file>         Parse and record a capture in the datastore
 ";
 
-pub fn run(args: &[String]) -> ExitCode {
+pub fn run(cmd: &super::Cmd) -> ExitCode {
+    let args = &cmd.words[1..];
     let rest = args.get(1..).unwrap_or_default();
     match args.first().map(String::as_str) {
         Some("selftest") => selftest(),
-        Some("serve") => serve(rest),
+        Some("serve") => serve(cmd, rest),
+        Some("watch") => watch(cmd, rest),
         Some("parse") => parse(rest),
         Some("import") => import(rest),
         other => {
@@ -87,7 +93,58 @@ fn import(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn serve(args: &[String]) -> ExitCode {
+/// Opens the Flipper named with --port/--socket, if any.
+fn device(cmd: &super::Cmd, datastore: &str) -> Option<Result<Device, String>> {
+    let target = cmd.target.as_ref()?;
+    Some(
+        super::open(target, cmd.timeout)
+            .and_then(|io| Device::connect(io, cmd.timeout, std::path::PathBuf::from(datastore)))
+            .map_err(|e| e.to_string()),
+    )
+}
+
+fn watch(cmd: &super::Cmd, args: &[String]) -> ExitCode {
+    let seconds = match args.first() {
+        None => 0,
+        Some(s) => match s.trim().parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => {
+                println!("Not a number of seconds: {s}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    if cmd.target.is_none() {
+        println!("Name the Flipper with --port DEVICE or --socket PATH (argus-cli never searches for one)");
+        return ExitCode::from(1);
+    }
+    let Some(mut bridge) = Bridge::open_default() else {
+        println!("No data folder (HOME or XDG_DATA_HOME) for the datastore");
+        return ExitCode::from(1);
+    };
+    bridge.on_entry(|e| {
+        println!("[{}] {}", source_name(e.source), String::from_utf16_lossy(&e.message));
+    });
+    let stop = server::stop_on_signals();
+    let during = if seconds > 0 { format!(" for {seconds}s") } else { String::new() };
+    println!("Watching for device events{during} (Ctrl+C to stop)…");
+    match device(cmd, bridge.datastore_path()) {
+        Some(Ok(d)) => bridge.attach_device(d),
+        Some(Err(e)) => {
+            println!("[device] Cannot open the device: {e}");
+            return ExitCode::from(1);
+        }
+        None => unreachable!("checked above"),
+    }
+    let end = (seconds > 0).then(|| std::time::Instant::now() + std::time::Duration::from_secs(seconds));
+    while !stop.load(std::sync::atomic::Ordering::Relaxed) && end.is_none_or(|t| std::time::Instant::now() < t) && bridge.has_device() {
+        bridge.poll_device();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    ExitCode::SUCCESS
+}
+
+fn serve(cmd: &super::Cmd, args: &[String]) -> ExitCode {
     let port = match args.first() {
         None => DEFAULT_PORT,
         Some(p) => match p.trim().parse::<u16>() {
@@ -125,6 +182,15 @@ fn serve(args: &[String]) -> ExitCode {
         server.port(),
         bridge.datastore_path()
     );
+    match device(cmd, bridge.datastore_path()) {
+        None => {}
+        Some(Ok(d)) => bridge.attach_device(d),
+        Some(Err(e)) => {
+            println!("Cannot open the device: {e}");
+            server.stop(&mut bridge);
+            return ExitCode::from(1);
+        }
+    }
     server.run(&mut bridge, stop);
     server.stop(&mut bridge);
     ExitCode::SUCCESS

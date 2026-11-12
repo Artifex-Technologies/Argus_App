@@ -38,6 +38,8 @@ version = "0.1.0"
 dependencies = [
  "argus-capture",
  "argus-tools",
+ "flipper-fake",
+ "flipper-rpc",
  "hex",
  "libc",
  "rusqlite",

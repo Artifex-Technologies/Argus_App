@@ -152,15 +152,35 @@ fn remove_empty_dirs(dir: &Path) {
     let _ = std::fs::remove_dir(dir);
 }
 
+/// Where a pull reports its steps: (severity, source, message, detail).
+pub type Log<'a> = &'a mut dyn FnMut(Severity, Source, &str, &str) -> Result<(), StoreError>;
+
 /// Pulls `roots` (each a capture folder or inside one) into a new staging folder next to the
-/// datastore (`pulls/<UTC time>`), records new captures and logs every step. A file that cannot
-/// be read is reported and the pull goes on, as in the C++ app; a broken session stops it.
+/// datastore (`pulls/<UTC time>`), records new captures and logs every step to the datastore. A
+/// file that cannot be read is reported and the pull goes on, as in the C++ app; a broken session
+/// stops it.
 pub fn pull<T: Transport>(
     session: &mut Session<T>,
     store: &Store,
     roots: &[&str],
     label: &str,
     limits: &Limits,
+) -> Result<PullReport, PullError> {
+    store.log_event(Severity::Notice, Source::Device, &format!("Pulling {label} from device…"), "")?;
+    let mut log = |sev: Severity, src: Source, msg: &str, detail: &str| store.log_event(sev, src, msg, detail);
+    pull_logged(session, store, None, roots, label, limits, &mut log)
+}
+
+/// [`pull`] without its first line ("Pulling LABEL from device…", which the caller logs when it
+/// starts the pull), recording captures in `session_id` and handing every step to `log`.
+pub fn pull_logged<T: Transport>(
+    session: &mut Session<T>,
+    store: &Store,
+    session_id: Option<i64>,
+    roots: &[&str],
+    label: &str,
+    limits: &Limits,
+    log: Log,
 ) -> Result<PullReport, PullError> {
     if let Some(bad) = roots.iter().find(|r| !is_capture_root(r)) {
         return Err(PullError::NotAllowed((*bad).to_string()));
@@ -177,12 +197,11 @@ pub fn pull<T: Transport>(
         staging = base.join(format!("{}-{n}", stamp()));
     }
     let mut report = PullReport { staging: staging.clone(), ..Default::default() };
-    store.log_event(Severity::Notice, Source::Device, &format!("Pulling {label} from device…"), "")?;
 
-    let result = pull_roots(session, store, roots, &staging, limits, &mut report);
+    let result = pull_roots(session, store, session_id, roots, &staging, limits, &mut report, log);
 
     let ok = result.is_ok() && report.failed.is_empty();
-    store.log_event(
+    log(
         if ok { Severity::Notice } else { Severity::Warning },
         Source::Device,
         &format!(
@@ -199,13 +218,16 @@ pub fn pull<T: Transport>(
     result.map(|_| report)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pull_roots<T: Transport>(
     session: &mut Session<T>,
     store: &Store,
+    session_id: Option<i64>,
     roots: &[&str],
     staging: &Path,
     limits: &Limits,
     report: &mut PullReport,
+    log: Log,
 ) -> Result<(), PullError> {
     let mut queue = Vec::new();
     for root in roots {
@@ -214,13 +236,13 @@ fn pull_roots<T: Transport>(
             Ok(tree) => {
                 for path in tree.refused {
                     let reason = "refused: the device sent a name that leads outside the staging folder".to_string();
-                    store.log_event(Severity::Warning, Source::Device, &format!("Could not read {path}"), &reason)?;
+                    log(Severity::Warning, Source::Device, &format!("Could not read {path}"), &reason)?;
                     report.failed.push((path, reason));
                 }
                 queue.extend(tree.entries.into_iter().filter(|e| e.kind == FileKind::File && !is_excluded(&e.path)));
             }
             Err(RpcError::Device(_)) | Err(RpcError::UnknownStatus(_)) | Err(RpcError::Invalid(_)) => {
-                store.log_event(Severity::Info, Source::Device, &format!("Skipped {root}: not on the device or unreadable"), "")?;
+                log(Severity::Info, Source::Device, &format!("Skipped {root}: not on the device or unreadable"), "")?;
                 report.missing_roots.push(root);
             }
             Err(e) => return Err(PullError::Rpc(e)),
@@ -245,7 +267,7 @@ fn pull_roots<T: Transport>(
             Err(e) => {
                 drop(w);
                 let _ = std::fs::remove_file(&local);
-                store.log_event(Severity::Warning, Source::Device, &format!("Could not read {}", entry.path), &e.to_string())?;
+                log(Severity::Warning, Source::Device, &format!("Could not read {}", entry.path), &e.to_string())?;
                 let broken =
                     matches!(e, RpcError::Broken | RpcError::Io(_) | RpcError::Timeout(_) | RpcError::Closed(_) | RpcError::Frame(_));
                 report.failed.push((entry.path.clone(), e.to_string()));
@@ -279,16 +301,19 @@ fn pull_roots<T: Transport>(
             (meta::raw_kind(&name).to_string(), format!(r#"{{"kind":"{}"}}"#, meta::raw_kind(&name)))
         };
         let summary = meta::summary(&name, size, &meta_json);
-        store.add_capture(&Capture {
-            kind,
-            name,
-            source_path: entry.path.clone(),
-            size,
-            meta: meta_json,
-            sha256,
-            local_path: local.display().to_string(),
-        })?;
-        store.log_event(Severity::Info, Source::Capture, &format!("Recorded capture: {summary}"), &entry.path)?;
+        store.add_capture_in(
+            session_id,
+            &Capture {
+                kind,
+                name,
+                source_path: entry.path.clone(),
+                size,
+                meta: meta_json,
+                sha256,
+                local_path: local.display().to_string(),
+            },
+        )?;
+        log(Severity::Info, Source::Capture, &format!("Recorded capture: {summary}"), &entry.path)?;
         report.recorded.push(summary);
         report.new += 1;
     }
