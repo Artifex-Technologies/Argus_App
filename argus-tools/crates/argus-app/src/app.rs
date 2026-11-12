@@ -52,7 +52,8 @@ const LOG_H: f32 = 200.0;
 /// The device view: its size, and where its left edge sits at home and during an operation (card coordinates).
 const DEVICE: [f32; 2] = [360.0, 160.0];
 const DEVICE_HOME_X: f32 = 415.0;
-const DEVICE_BUSY_X: f32 = 216.0;
+/// Centred in the card, where qFlipper puts its device (216 in its 800-wide card, for its own picture).
+const DEVICE_BUSY_X: f32 = (CARD_W - DEVICE[0]) / 2.0;
 const DEVICE_Y: f32 = 82.0;
 /// Where the name, the main button and its links centre on the home screen.
 const CENTER_X: f32 = 595.0;
@@ -98,8 +99,14 @@ pub enum Stage {
     Ready,
     Streaming,
     Busy(Op),
-    Finished { warning: Option<String>, summary: String },
-    Error { title: String, text: String },
+    /// The end of an operation; a warning is a partial success (`DeviceState::warningString`).
+    Finished {
+        warning: Option<String>,
+    },
+    Error {
+        title: String,
+        text: String,
+    },
 }
 
 /// What a confirmation dialog runs when it is confirmed.
@@ -398,8 +405,15 @@ impl ArgusApp {
                     self.directory = DirState::Error(e);
                 }
                 NetEvent::UpdateReady(Ok(job)) => {
-                    if self.worker.is_some() && self.stage == Stage::Busy(Op::Update) {
-                        self.send(Cmd::Update(job));
+                    if self.stage == Stage::Busy(Op::Update) {
+                        if self.worker.is_some() {
+                            self.send(Cmd::Update(job));
+                        } else {
+                            self.stage = Stage::Error {
+                                title: "Update Failed".into(),
+                                text: "The device left before the update could start.".into(),
+                            };
+                        }
                     }
                 }
                 NetEvent::UpdateReady(Err(e)) => {
@@ -450,7 +464,7 @@ impl ArgusApp {
                 match (&result, op.is_big()) {
                     (Ok(o), true) => {
                         self.logline(o.summary.clone());
-                        self.stage = Stage::Finished { warning: o.warning.clone(), summary: o.summary.clone() };
+                        self.stage = Stage::Finished { warning: o.warning.clone() };
                     }
                     (Err(e), true) => {
                         self.logline(format!("{} failed: {e}", op.title()));
@@ -1405,15 +1419,14 @@ impl ArgusApp {
     }
 
     fn finished_ui(&mut self, ui: &mut egui::Ui, card: Rect, pal: &Palette) {
-        let Stage::Finished { warning, summary } = self.stage.clone() else { return };
+        let Stage::Finished { warning } = self.stage.clone() else { return };
         let title = if warning.is_some() { "Done, with a warning" } else { "Success!" };
         label_at(ui, card.center_top() + vec2(0.0, 40.0), Align2::CENTER_CENTER, title, FontId::proportional(26.0), pal.text);
         let text = Rect::from_center_size(pos2(card.center().x, card.top() + 278.0), vec2(600.0, 40.0));
         ui.scope_builder(UiBuilder::new().max_rect(text).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
-            match &warning {
-                Some(w) => ui.label(RichText::new(w).color(pal.amber)),
-                None => ui.label(RichText::new(summary).color(pal.dim)),
-            };
+            if let Some(w) = &warning {
+                ui.label(RichText::new(w).color(pal.amber));
+            }
         });
         let b = Rect::from_center_size(pos2(card.center().x, card.top() + 338.0), vec2(200.0, 42.0));
         let resp = ui.put(

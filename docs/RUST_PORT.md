@@ -751,8 +751,15 @@ for the file manager, as qFlipper's), the keypad's inputs, and once a second whi
 notice an unplugged device. The file manager browses with back and forward, names the storages "SD Card" and "Internal
 Flash", hides dot files unless asked, and downloads into new local files only. Upload, new folder, rename and delete
 each go through a confirmation dialog (qFlipper confirms only delete); a screenshot is saved as a PNG four times the
-screen's size, or copied. The Actions tab, the main button, the console and settings are drawn and wired; backup,
-restore, erase and updates are tested in the next step (Resume here).
+screen's size, or copied. The Actions tab and the main button do what qFlipper's do, each through its dialog: backup
+(into a new `.tgz`), restore (the archive checked whole before anything is sent, then a restart), erase, reinstall,
+and the update through the device's updater, from the selected channel on the update server or from a `.tgz` (with
+the warning that official firmware replaces a fork). Before an update, a device of any region but the development
+one gets its region data from the server, as the C++ `FullUpdateOperation` does; a failure there is noted and the
+update goes on. Files are fetched only after the dialog is confirmed. The main button follows the C++ rules
+(`firmware.rs`: `canUpdate`, `canInstall`, `canRepair`, the branch's channel); the directory is read when a device
+connects (Settings can turn that off) or on "Try again". After an operation that restarts the device, Continue waits
+for it to come back and connects again.
 
 **How it is tested** (`crates/argus-app/tests`, never a real device, never a window on my desktop):
 
@@ -762,13 +769,19 @@ restore, erase and updates are tested in the next step (Resume here).
 - Pixel snapshots: egui's own output (the tessellated meshes and textures a GPU would get) is rasterised in software
   and compared with the pictures in `tests/snapshots/` (no GPU, no window, no compositor). A missing snapshot fails;
   `ARGUS_UPDATE_SNAPSHOTS=1` writes them. Snapshots so far: no device (dark and light), home with the device
-  information and the live screen, the full-size screen with the keypad, the file manager on the SD card.
+  information and the live screen, home with an update offered, the full-size screen with the keypad, the file manager
+  on the SD card, the end of an operation.
 - The fake on a Unix socket, session after session, recording every request as it arrives: the app's reads are the
   C++ helper's (protobuf version, devinfo, `/ext` space, `/ext/Manifest`) and then the stream; the keypad sends
   qFlipper's sequences (press-short-release for a click, press-long-repeat-release for a hold, the keyboard's keys).
 - Every confirmation: cancelled once, nothing that changes the device (write, mkdir, delete, rename, reboot, reset,
   update) reaches the fake; confirmed, exactly that request and the change on the fake. Bad names are refused in the
   dialog, an existing local file is never overwritten.
+- Operations (`tests/operations.rs`): backup (the archive read back), restore onto a changed `/int` (the backup's
+  files back, the restart last, the device reconnected), a hostile backup refused with nothing sent, erase, an update
+  from a file and one the device refuses (no restart), an update from `flipper_fake::update_server` on 127.0.0.1 with
+  the test's own CA for a region-1 device (nothing downloaded before the dialog is confirmed; the region data written
+  first), and an unreachable server ("Try again").
 - The live screen's protocol (`flipper-fake/tests/stream.rs`): stream start, input events and stop are the C++ app's
   bytes (the nanopb fixture), a quiet device leaves the session usable, frames of the wrong length are skipped.
 
@@ -793,9 +806,8 @@ smoke test of the real binary inside that compositor (`tests/apps.rs` there show
    read is noted for Argus_Firmware (its local PROGRESS.md). Left: look at the GUI's partial-success warning once on a
    screen.
 5. The UI phase (section 6) has started: shell, device information, live screen and keypad, file manager, tested
-   headless with snapshots and a test per confirmation. Next, in this order: backup, restore, erase and the update
-   (from the server and from a file) through their dialogs against the fake and `flipper_fake::update_server`; then
-   the console (capture pulls, the capture list, the Sarina API toggle on a test port); then recovery (repair through
+   headless with snapshots and a test per confirmation; backup, restore, erase and the update (server and file) done
+   the same way against the fake and `flipper_fake::update_server`. Next, in this order: the console (capture pulls, the capture list, the Sarina API toggle on a test port); then recovery (repair through
    `flipper_dfu::recovery` behind an interface, only `--dfu-socket`, no USB). Not started: the developer tab, the
    Argus tools window (apps, check-up, rebuild, snapshots, capture library search), app installs. The app has never
    run on my desktop or against my Flipper: the first run is with me watching.

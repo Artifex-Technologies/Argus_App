@@ -95,9 +95,11 @@ impl Fake {
             let marker = b"start_rpc_session\r";
             let Some(start) = bytes.windows(marker.len()).position(|w| w == marker) else { continue };
             let mut d = FrameDecoder::new();
-            d.push(&bytes[start + marker.len()..]).unwrap();
-            while let Ok(Some(m)) = d.next_frame() {
-                out.push(m);
+            for chunk in bytes[start + marker.len()..].chunks(4096) {
+                d.push(chunk).unwrap();
+                while let Ok(Some(m)) = d.next_frame() {
+                    out.push(m);
+                }
             }
         }
         out
@@ -314,9 +316,15 @@ impl Harness {
             .collect()
     }
 
-    /// The enabled widget labelled exactly `label` (the last one drawn, which is on top).
+    /// The confirmation dialog's area while it is open: only what is inside it can be clicked then.
+    fn modal(&self) -> Option<Rect> {
+        self.app.dialog().and_then(|_| self.ctx.memory(|m| m.area_rect(egui::Id::new("confirm"))))
+    }
+
+    /// The enabled widget labelled exactly `label` that a click can reach (inside the open modal, if any).
     pub fn find(&self, label: &str) -> Option<Widget> {
-        self.widgets().into_iter().rfind(|w| w.label == label && w.enabled)
+        let modal = self.modal();
+        self.widgets().into_iter().rfind(|w| w.label == label && w.enabled && modal.is_none_or(|m| m.contains_rect(w.rect)))
     }
 
     pub fn has(&self, label: &str) -> bool {

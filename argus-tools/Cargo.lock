@@ -261,6 +261,7 @@ dependencies = [
  "flipper-rpc",
  "flipper-updates",
  "png",
+ "ureq",
 ]
 
 [[package]]
