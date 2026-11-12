@@ -149,6 +149,14 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-11 — The app shows its own version (VERSION), not ARG-...
+- The app's version is the `VERSION` file (1.0.0; Labyrinth_OS's docs/VERSIONING.md, its `scripts/release.sh`
+  tags releases `vX.Y.Z`). `qflipper_common.pri` reads it into `APP_VERSION`: the main window, `qFlipper-cli --version`,
+  the log line, the Windows manifest and the Chymaera API's `version` (ping and status, was 0.1.0) all say 1.0.0.
+  `argus-tools version` reads the same file. The Linux tarball is `argus-app-1.0.0-linux-x86_64.tar.gz` and its build stops
+  if `qFlipper-cli --version` says otherwise; `linux.yml` runs for `v*` tags.
+- The firmware keeps its `ARG-<upstream>r<N>` names; nothing the app reads from a device changed.
+
 ### 2026-11-09 — Argus tools: app extractor, check-up, Limbo rebuild, SD snapshots, capture library (API v1.3)
 - New **`argus-tools/`** Rust crate (library + JSON CLI, run through QProcess) and
   **`backend/argus/`** (device side + `ArgusController`, `Chymaera.argus` in QML), a new window

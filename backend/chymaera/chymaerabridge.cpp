@@ -102,7 +102,8 @@ QString Bridge::datastorePath() const
 
 QString Bridge::version() const
 {
-    return QStringLiteral("0.1.0");
+    // the app's own version (VERSION, through qflipper_common.pri)
+    return QStringLiteral(APP_VERSION);
 }
 
 QString Bridge::defaultDatastorePath()

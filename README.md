@@ -16,11 +16,11 @@ Argus_App is a fork of the official [qFlipper](https://github.com/flipperdevices
 
 Prebuilt packages are on the [Releases page](https://github.com/Artifex-Technologies/Argus_App/releases):
 
-- **Linux (x86_64):** `argus-app-ARG-<version>-linux-x86_64.tar.gz`. It is built against the Qt 6 in
+- **Linux (x86_64):** `argus-app-<version>-linux-x86_64.tar.gz` (older releases: `argus-app-ARG-...`). It is built against the Qt 6 in
   Arch Linux, so it runs on Arch, CachyOS and other Arch-based systems with the Qt 6 packages installed:
   ```sh
   sudo pacman -S --needed qt6-base qt6-declarative qt6-svg qt6-5compat qt6-serialport libusb
-  tar xzf argus-app-ARG-*-linux-x86_64.tar.gz && cd argus-app-ARG-*-linux-x86_64
+  tar xzf argus-app-*-linux-x86_64.tar.gz && cd argus-app-*-linux-x86_64
   sh setup_rules.sh        # once: lets your user reach the Flipper (sudo), then replug it
   ./bin/qFlipper
   ```
@@ -46,7 +46,7 @@ This is a work in progress. See the current design and status:
 
 ## Versions
 
-Argus_App versions read `ARG-<upstream qFlipper>r<N>`, the same scheme as [Argus_Firmware](https://github.com/Artifex-Technologies/Argus_Firmware) (`ARG-1.5.1r2`). The current one is **`ARG-1.3.3r2`**, based on qFlipper 1.3.3, which is still upstream's latest release. The upstream half is `UPSTREAM_VERSION` in [`qflipper_common.pri`](./qflipper_common.pri), bumped by hand when we merge a new upstream release (N restarts at 1). Our half comes from the nearest `ARG-<upstream>r*` git tag. Builds after a tag keep its name, with no `+N` suffix; the commit hash in the log tells them apart. An untagged tree builds as `ARG-1.3.3-dev`.
+The app's version is its own `MAJOR.MINOR.PATCH`, the `VERSION` file at the top of this repository (1.0.0 since 2026-11-11; releases are tagged `vX.Y.Z`). The window, `qFlipper-cli --version`, the log, the Chymaera API's `version` and `argus-tools version` all show it; [`qflipper_common.pri`](./qflipper_common.pri) and `argus-tools` read the file when they are built, and builds between releases are told apart by the commit in the log. Before 2026-11-11 the app was named `ARG-<upstream qFlipper>r<N>` (the last was `ARG-1.3.3r2`); [Argus_Firmware](https://github.com/Artifex-Technologies/Argus_Firmware) keeps that scheme (`ARG-1.5.1r2`). The qFlipper release this fork is based on (1.3.3, still upstream's latest) is `UPSTREAM_VERSION` there, updated by hand when we merge upstream.
 
 ## Using it with Argus firmware
 

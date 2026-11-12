@@ -62,8 +62,8 @@ unix|win32 {
 }
 
 win32 {
-    # The Windows manifest only takes a numeric version, so it carries the upstream base
-    VERSION = $$UPSTREAM_VERSION
+    # The Windows manifest only takes a numeric version, as the app's is (MAJOR.MINOR.PATCH)
+    VERSION = $$ARGUS_VERSION
 }
 
 macx: ICON = assets/icons/$${NAME}.icns

@@ -27,17 +27,14 @@ unix:!macx {
     error("Unsupported OS or compiler")
 }
 
-# Argus versions read "ARG-<upstream qFlipper>r<N>", e.g. ARG-1.3.3r1, matching Argus_Firmware.
-# Update UPSTREAM_VERSION by hand when merging upstream; N restarts at 1 (ARG-1.3.4r1).
-# Our half comes from the nearest ARG-<upstream>r* tag; later commits keep that name
-# (no "+N" suffix, by maintainer choice), and APP_COMMIT tells such builds apart.
-UPSTREAM_VERSION = 1.3.3
-VERSION_BASE = ARG-$$UPSTREAM_VERSION
+# The app's version is its own: the VERSION file at the top of this repository (Labyrinth_OS's docs/VERSIONING.md; its
+# scripts/release.sh writes the file and tags the release vX.Y.Z). APP_COMMIT tells builds between releases apart. The
+# firmware keeps its own ARG-<upstream>r<N> names (Argus_Firmware); nothing here names it.
+ARGUS_VERSION = $$cat($$PWD/VERSION, lines)
+isEmpty(ARGUS_VERSION): error("no version in $$PWD/VERSION")
 
-GIT_VERSION = $$system("git describe --tags --abbrev=0 --match=$${VERSION_BASE}r*","lines", HAS_VERSION)
-!equals(HAS_VERSION, 0) {
-    GIT_VERSION = $${VERSION_BASE}-dev
-}
+# The upstream qFlipper release this fork is based on: update it by hand when merging upstream. Not part of the version.
+UPSTREAM_VERSION = 1.3.3
 
 GIT_COMMIT = $$system("git rev-parse --short=8 HEAD","lines", HAS_COMMIT)
 !equals(HAS_COMMIT, 0) {
@@ -54,7 +51,7 @@ GIT_TIMESTAMP = $$system("git log -1 --pretty=format:%ct","lines", HAS_TIMESTAMP
 DEFINES += DISABLE_APPLICATION_UPDATES
 
 DEFINES += APP_NAME=\\\"$$NAME\\\" \
-           APP_VERSION=\\\"$$GIT_VERSION\\\" \
+           APP_VERSION=\\\"$$ARGUS_VERSION\\\" \
            APP_COMMIT=\\\"$$GIT_COMMIT\\\" \
            APP_TIMESTAMP=$$GIT_TIMESTAMP \
            PB_ENABLE_MALLOC

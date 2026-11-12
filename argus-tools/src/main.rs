@@ -15,6 +15,9 @@ use argus_tools::package::{self, Limits};
 use argus_tools::snapshot::{self, Listing, Snapshots};
 use argus_tools::{fap, paths, Error, Result};
 
+/// The Argus app's own version (the VERSION file at the top of the repository, read when this is built), as the app reports it.
+const APP_VERSION: &str = include_str!("../../VERSION").trim_ascii();
+
 const HELP: &str = "argus-tools — Argus_App's logic (JSON on stdout)
 
   fap inspect FILE [--api 88.2[/7]]
@@ -96,7 +99,7 @@ fn run(raw: Vec<String>) -> Result<Value> {
     let a = Args::parse(raw)?;
     let p: Vec<&str> = a.pos.iter().map(String::as_str).collect();
     match p.as_slice() {
-        ["version"] => Ok(ok(json!({"version": env!("CARGO_PKG_VERSION")}))),
+        ["version"] => Ok(ok(json!({"version": APP_VERSION}))),
         [] | ["help"] => Ok(ok(json!({"help": HELP}))),
         ["fap", "inspect", file] => {
             let data = std::fs::read(file)?;

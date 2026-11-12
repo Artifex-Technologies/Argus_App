@@ -40,13 +40,8 @@
   Name ${NAME}
   OutFile "build\${NAME}Setup-${ARCH_BITS}bit.exe"
 
-  ; Get version tag from git. Will be used in titles
-  !tempfile StdOut
-  !echo "${StdOut}"
-  !system '"git" describe --tags --abbrev=0 --exclude "*-rc*" > "${StdOut}"'
-  !define /file VERSION "${StdOut}"
-  !delfile "${StdOut}"
-  !undef StdOut
+  ; The app's own version (the VERSION file). Will be used in titles
+  !define /file VERSION "VERSION"
 
   ; Default installation Dir. On Windows it will be C:\Program Files\qFlipper
   InstallDir "$PROGRAMFILES64\${NAME}"

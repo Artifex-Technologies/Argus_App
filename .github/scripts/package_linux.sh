@@ -19,7 +19,9 @@ make -j"$JOBS"
 # The subsystem self-test needs no Flipper and no display.
 QT_QPA_PLATFORM=offscreen ./qFlipper-cli chymaera selftest
 
-VERSION="$(git -C "$SRC" describe --tags --abbrev=0 --match='ARG-*r*' 2>/dev/null || echo ARG-dev)"
+# The app's own version (the VERSION file), which the program reports
+VERSION="$(cat "$SRC/VERSION")"
+[[ $(QT_QPA_PLATFORM=offscreen ./qFlipper-cli --version) == *" $VERSION" ]] || { echo "qFlipper-cli --version does not say $VERSION" >&2; exit 1; }
 NAME="argus-app-${VERSION}-linux-x86_64"
 STAGE="$(pwd)/stage"
 rm -rf "$STAGE" "$NAME" "$NAME.tar.gz" "$NAME.tar.gz.sha256"

@@ -107,5 +107,5 @@ fi
 dmgbuild \
     -s "../installer-assets/macos/dmgbuild-config.py" \
     -D "app=$PROJECT.app" \
-    "$PROJECT-$(git describe --tags --abbrev=0)" \
+    "$PROJECT-$(cat ../VERSION)" \
     "$PROJECT.dmg";
