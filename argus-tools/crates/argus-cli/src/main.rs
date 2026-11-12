@@ -4,7 +4,8 @@
 //! 1 device or protocol error, 2 usage error.
 //!
 //! It never looks for devices: the Flipper's serial port (`--port`) or a socket carrying its
-//! byte stream (`--socket`) must be named. Nothing it does writes to the device.
+//! byte stream (`--socket`) must be named. Nothing it does writes to the device; `pull` and
+//! `backup` write only new local files (they never overwrite).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -12,7 +13,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use flipper_rpc::ops::InfoSource;
+use flipper_rpc::ops::{Entry, InfoSource};
+use flipper_rpc::transfer::Limits;
 use flipper_rpc::transport::{SerialTransport, Transport};
 use flipper_rpc::{RpcError, Session};
 
@@ -22,9 +24,18 @@ const HELP: &str = "argus-cli — talk to a Flipper Zero over RPC (JSON on stdou
 
   argus-cli (--port DEVICE | --socket PATH) [--timeout MS] COMMAND
 
-  info        protobuf version and device information (read-only)
-  ls PATH     list a directory on the device, e.g. /ext (read-only)
+  info               protobuf version and device information
+  ls PATH            list a directory on the device, e.g. /ext
+  stat PATH          one file or directory (exists: false when missing)
+  df PATH            total and free space of /int or /ext
+  md5 PATH           MD5 of a file, computed on the device
+  date               the device clock
+  pull PATH DEST     copy a file or directory off the device to DEST (must not exist)
+  backup FILE        /int as a .tar.gz the C++ app's restore reads (FILE must not exist)
   version | help
+
+  All commands only read from the device. Names the device lists that could lead outside
+  DEST (.., /, \\, NUL, control characters) are refused and listed under \"refused\".
 
   --port DEVICE   the Flipper's serial port, e.g. /dev/ttyACM0 (never guessed)
   --socket PATH   a Unix socket carrying the same byte stream (tests use a fake Flipper here)
@@ -136,12 +147,52 @@ fn run(cmd: &Cmd) -> Result<Value, RpcError> {
         }
         "ls" => {
             let path = &cmd.words[1];
-            let entries: Vec<Value> =
-                s.storage_list(path)?.into_iter().map(|e| json!({"name": e.name, "type": e.kind.as_str(), "size": e.size})).collect();
+            let entries: Vec<Value> = s.storage_list(path)?.iter().map(entry).collect();
             Ok(json!({"ok": true, "command": "ls", "path": path, "entries": entries}))
+        }
+        "stat" => {
+            let path = &cmd.words[1];
+            Ok(match s.storage_stat(path)? {
+                Some(e) => json!({"ok": true, "command": "stat", "path": path, "exists": true, "entry": entry(&e)}),
+                None => json!({"ok": true, "command": "stat", "path": path, "exists": false}),
+            })
+        }
+        "df" => {
+            let path = &cmd.words[1];
+            Ok(match s.storage_info(path)? {
+                Some(sp) => json!({"ok": true, "command": "df", "path": path, "present": true, "total": sp.total, "free": sp.free}),
+                None => json!({"ok": true, "command": "df", "path": path, "present": false}),
+            })
+        }
+        "md5" => {
+            let path = &cmd.words[1];
+            Ok(json!({"ok": true, "command": "md5", "path": path, "md5": s.storage_md5(path)?}))
+        }
+        "date" => {
+            let d = s.system_datetime()?;
+            Ok(json!({"ok": true, "command": "date", "datetime": d.iso(), "weekday": d.weekday}))
+        }
+        "pull" => {
+            let (remote, dest) = (&cmd.words[1], PathBuf::from(&cmd.words[2]));
+            let r = s.pull(remote, &dest, &Limits::default())?;
+            Ok(
+                json!({"ok": true, "command": "pull", "path": remote, "dest": dest.display().to_string(), "files": r.files, "dirs": r.dirs, "bytes": r.bytes, "refused": r.refused}),
+            )
+        }
+        "backup" => {
+            let out = PathBuf::from(&cmd.words[1]);
+            let mtime = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let r = s.backup(&out, &Limits::backup(), mtime)?;
+            Ok(
+                json!({"ok": true, "command": "backup", "file": out.display().to_string(), "files": r.files, "dirs": r.dirs, "bytes": r.bytes, "refused": r.refused}),
+            )
         }
         _ => unreachable!("checked by main"),
     }
+}
+
+fn entry(e: &Entry) -> Value {
+    json!({"name": e.name, "type": e.kind.as_str(), "size": e.size})
 }
 
 fn main() -> ExitCode {
@@ -159,8 +210,10 @@ fn main() -> ExitCode {
             print(json!({"ok": true, "version": APP_VERSION}));
             return ExitCode::SUCCESS;
         }
-        ["info"] | ["ls", _] => {}
-        ["ls"] => return fail("usage", "ls needs a device path".into(), 2),
+        ["info"] | ["date"] | ["ls" | "stat" | "df" | "md5", _] | ["pull", _, _] | ["backup", _] => {}
+        ["ls" | "stat" | "df" | "md5"] => return fail("usage", format!("{} needs a device path", words[0]), 2),
+        ["pull", ..] => return fail("usage", "pull needs a device path and a new local path".into(), 2),
+        ["backup"] => return fail("usage", "backup needs a new local file".into(), 2),
         _ => return fail("usage", format!("unknown command: {}", words.join(" ")), 2),
     }
     if cmd.target.is_none() {

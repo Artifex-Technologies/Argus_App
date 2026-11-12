@@ -313,14 +313,18 @@ dependencies = [
 name = "flipper-fake"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "flipper-rpc",
+ "md-5",
  "prost",
+ "tar",
 ]
 
 [[package]]
 name = "flipper-rpc"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "proptest",
  "prost",
  "prost-build",

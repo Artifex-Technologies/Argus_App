@@ -183,3 +183,68 @@ fn version_is_the_app_version() {
     assert_eq!(r.status, 0);
     assert_eq!(r.json["version"], include_str!("../../../../VERSION").trim());
 }
+
+fn node(path: &str) -> flipper_fake::Node {
+    FakeFlipper::standard().nodes.into_iter().find(|n| n.path == path).unwrap()
+}
+
+#[test]
+fn stat_df_md5_date() {
+    let r = run_with(FakeFlipper::standard(), &["stat", "/ext/Manifest"]);
+    assert_eq!((r.status, &r.json["exists"], &r.json["entry"]["size"]), (0, &Value::Bool(true), &Value::from(48213)));
+    let r = run_with(FakeFlipper::standard(), &["stat", "/ext/nope"]);
+    assert_eq!((r.status, &r.json["exists"]), (0, &Value::Bool(false)));
+    let r = run_with(FakeFlipper::standard(), &["df", "/ext"]);
+    assert_eq!(r.json["total"], 31_902_400_512u64);
+    let r = run_with(FakeFlipper { sd_card: false, ..FakeFlipper::standard() }, &["df", "/ext"]);
+    assert_eq!(r.json["present"], false);
+    let r = run_with(FakeFlipper::standard(), &["md5", "/int/favorites.txt"]);
+    assert_eq!(r.json["md5"].as_str().unwrap().len(), 32);
+    let r = run_with(FakeFlipper::standard(), &["date"]);
+    assert_eq!(r.json["datetime"], "2026-11-09T12:34:56");
+    let r = run_with(FakeFlipper::standard(), &["md5", "/ext/nope"]);
+    assert_eq!((r.status, &r.json["error"]["code"]), (1, &Value::from("device")));
+}
+
+#[test]
+fn pull_and_backup_write_new_files_only() {
+    let dir = tempdir();
+    let dest = dir.join("int");
+    let r = run_with(FakeFlipper::standard(), &["pull", "/int", dest.to_str().unwrap()]);
+    assert_eq!(r.status, 0, "{}", r.json);
+    assert_eq!(r.json["files"], 4);
+    assert_eq!(std::fs::read(dest.join("sub/deep.txt")).unwrap(), node("/int/sub/deep.txt").content());
+    // a second pull to the same place is refused and changes nothing
+    let r = run_with(FakeFlipper::standard(), &["pull", "/int", dest.to_str().unwrap()]);
+    assert_eq!((r.status, &r.json["error"]["code"]), (1, &Value::from("local")));
+
+    let out = dir.join("backup.tgz");
+    let r = run_with(FakeFlipper::standard(), &["backup", out.to_str().unwrap()]);
+    assert_eq!(r.status, 0, "{}", r.json);
+    assert_eq!((r.json["files"].as_u64(), r.json["dirs"].as_u64()), (Some(4), Some(2)));
+    assert!(out.is_file());
+    let r = run_with(FakeFlipper::standard(), &["backup", out.to_str().unwrap()]);
+    assert_eq!(r.status, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pull_reports_hostile_names() {
+    let dir = tempdir();
+    let mut fake = FakeFlipper::standard();
+    fake.hostile.push(("/int".into(), "../../outside".into(), false));
+    let dest = dir.join("int");
+    let r = run_with(fake, &["pull", "/int", dest.to_str().unwrap()]);
+    assert_eq!(r.status, 0);
+    assert_eq!(r.json["refused"][0], "/int/\"../../outside\"");
+    assert!(!dir.join("outside").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn new_commands_check_their_arguments() {
+    for args in [&["stat"][..], &["df"], &["md5"], &["pull", "/int"], &["backup"], &["date", "x"]] {
+        let r = usage(args);
+        assert_eq!(r.status, 2, "{args:?}");
+    }
+}

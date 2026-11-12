@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 prost = "0.14"
 serialport = { version = "4.10", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [build-dependencies]
 prost-build = "0.14"

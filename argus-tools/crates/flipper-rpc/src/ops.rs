@@ -36,6 +36,26 @@ pub struct Entry {
     pub size: u32,
 }
 
+/// The device clock, as `PB_System.DateTime` carries it (no time zone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DateTime {
+    pub year: u32,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+    /// 1 = Monday ... 7 = Sunday, as the firmware counts.
+    pub weekday: u32,
+}
+
+impl DateTime {
+    /// `YYYY-MM-DDTHH:MM:SS`.
+    pub fn iso(&self) -> String {
+        format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", self.year, self.month, self.day, self.hour, self.minute, self.second)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageSpace {
     pub total: u64,
@@ -191,6 +211,102 @@ impl<T: Transport> Session<T> {
             Err(e) => Err(e),
             Ok(()) => Ok(out),
         }
+    }
+}
+
+impl<T: Transport> Session<T> {
+    /// `PB_System.GetDateTimeRequest`: the device clock. Values out of range are refused.
+    pub fn system_datetime(&mut self) -> Result<DateTime, RpcError> {
+        let mut out = None;
+        self.request(Content::SystemGetDatetimeRequest(pb_system::GetDateTimeRequest {}), |m| match m.content {
+            Some(Content::SystemGetDatetimeResponse(r)) => {
+                let d = r.datetime.unwrap_or_default();
+                let dt = DateTime {
+                    year: d.year,
+                    month: d.month,
+                    day: d.day,
+                    hour: d.hour,
+                    minute: d.minute,
+                    second: d.second,
+                    weekday: d.weekday,
+                };
+                let ok = (2000..=2099).contains(&dt.year)
+                    && (1..=12).contains(&dt.month)
+                    && (1..=31).contains(&dt.day)
+                    && dt.hour < 24
+                    && dt.minute < 60
+                    && dt.second < 60
+                    && (1..=7).contains(&dt.weekday);
+                if !ok {
+                    return Err(RpcError::Unexpected(format!("date/time out of range: {dt:?}")));
+                }
+                out = Some(dt);
+                Ok(())
+            }
+            other => Err(unexpected("a date/time response", &other)),
+        })?;
+        out.ok_or_else(|| RpcError::Unexpected("no date/time in the response".into()))
+    }
+
+    /// `PB_Storage.Md5sumRequest`: the MD5 of a file, computed on the device, as 32 lowercase
+    /// hex digits.
+    pub fn storage_md5(&mut self, path: &str) -> Result<String, RpcError> {
+        check_path(path)?;
+        let mut out = None;
+        self.request(Content::StorageMd5sumRequest(pb_storage::Md5sumRequest { path: path.to_string() }), |m| match m.content {
+            Some(Content::StorageMd5sumResponse(r)) => {
+                if r.md5sum.len() != 32 || !r.md5sum.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+                    return Err(RpcError::Unexpected(format!("not an MD5 digest: {:?}", r.md5sum)));
+                }
+                out = Some(r.md5sum);
+                Ok(())
+            }
+            other => Err(unexpected("an MD5 response", &other)),
+        })?;
+        out.ok_or_else(|| RpcError::Unexpected("no MD5 in the response".into()))
+    }
+
+    /// Reads a file into `out`, as the C++ `StorageReadOperation` does: a stat and a read
+    /// request under one command id, the size from the stat, then the data in chunks until
+    /// `has_next` is false. Refuses files larger than `max` before any data is written, and
+    /// fails if the device sends more or fewer bytes than its stat said. Returns the size.
+    pub fn storage_read(&mut self, path: &str, out: &mut dyn std::io::Write, max: u64) -> Result<u64, RpcError> {
+        check_path(path)?;
+        let p = path.to_string();
+        let id = self.send(vec![
+            Content::StorageStatRequest(pb_storage::StatRequest { path: p.clone() }),
+            Content::StorageReadRequest(pb_storage::ReadRequest { path: p }),
+        ])?;
+        let mut size: Option<u64> = None;
+        let mut got = 0u64;
+        self.receive(id, |m| {
+            let last = !m.has_next;
+            match (m.content, size) {
+                (Some(Content::StorageStatResponse(r)), None) => {
+                    let f = r.file.ok_or_else(|| RpcError::Unexpected("stat response without a file".into()))?;
+                    if u64::from(f.size) > max {
+                        return Err(RpcError::Limit(format!("{path} is {} bytes, more than the {max} allowed", f.size)));
+                    }
+                    size = Some(u64::from(f.size));
+                    Ok(false)
+                }
+                (Some(Content::StorageReadResponse(r)), Some(total)) => {
+                    let data = r.file.map(|f| f.data).unwrap_or_default();
+                    got += data.len() as u64;
+                    if got > total {
+                        return Err(RpcError::Unexpected(format!("{path}: more data than the {total} bytes its stat said")));
+                    }
+                    out.write_all(&data).map_err(|e| RpcError::Local(format!("cannot write {path}: {e}")))?;
+                    Ok(last)
+                }
+                (other, _) => Err(unexpected(if size.is_none() { "a stat response" } else { "a read response" }, &other)),
+            }
+        })?;
+        let total = size.unwrap_or(0);
+        if got != total {
+            return Err(RpcError::Unexpected(format!("{path}: {got} bytes read, its stat said {total}")));
+        }
+        Ok(got)
     }
 }
 

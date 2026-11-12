@@ -46,6 +46,10 @@ pub enum RpcError {
     Limit(String),
     /// A caller-supplied argument the device would refuse anyway (checked before sending).
     Invalid(String),
+    /// An earlier error left the stream in an unknown place; open a new session.
+    Broken,
+    /// A local file could not be written or read.
+    Local(String),
 }
 
 impl RpcError {
@@ -61,6 +65,8 @@ impl RpcError {
             RpcError::Unexpected(_) => "unexpected",
             RpcError::Limit(_) => "limit",
             RpcError::Invalid(_) => "invalid",
+            RpcError::Broken => "broken",
+            RpcError::Local(_) => "local",
         }
     }
 }
@@ -78,6 +84,8 @@ impl std::fmt::Display for RpcError {
             RpcError::Unexpected(m) => write!(f, "unexpected response: {m}"),
             RpcError::Limit(m) => write!(f, "{m}"),
             RpcError::Invalid(m) => write!(f, "{m}"),
+            RpcError::Broken => write!(f, "the session is unusable after an earlier error"),
+            RpcError::Local(m) => write!(f, "{m}"),
         }
     }
 }
@@ -126,6 +134,7 @@ pub struct Session<T: Transport> {
     io: T,
     decoder: FrameDecoder,
     counter: u32,
+    broken: bool,
 }
 
 impl<T: Transport> Session<T> {
@@ -140,7 +149,7 @@ impl<T: Transport> Session<T> {
         let after_echo = read_until(&mut io, &mut rest, START_RPC_ECHO, MAX_BANNER, "the start_rpc_session echo")?;
         let mut decoder = FrameDecoder::new();
         decoder.push(&rest[after_echo..])?;
-        Ok(Session { io, decoder, counter: 0 })
+        Ok(Session { io, decoder, counter: 0, broken: false })
     }
 
     /// The next command id. 0 is reserved for broadcasts, as in the C++ app.
@@ -156,11 +165,51 @@ impl<T: Transport> Session<T> {
     /// with `has_next` false. A non-OK status ends the exchange with [`RpcError::Device`].
     /// Frames with other ids are skipped (the C++ app logs and drops them too), up to a limit.
     pub fn request(&mut self, content: Content, mut on_response: impl FnMut(Main) -> Result<(), RpcError>) -> Result<(), RpcError> {
-        let id = self.next_id();
-        let msg = Main { command_id: id, content: Some(content), ..Default::default() };
-        let frame = encode_frame(&msg)?;
-        self.io.write_all(&frame).and_then(|_| self.io.flush()).map_err(RpcError::Io)?;
+        let id = self.send(vec![content])?;
+        self.receive(id, |m| {
+            let last = !m.has_next;
+            on_response(m)?;
+            Ok(last)
+        })
+    }
 
+    /// Writes one frame per content, all with one new command id (the C++ storage read sends
+    /// its stat and read requests that way). Returns the id.
+    pub fn send(&mut self, contents: Vec<Content>) -> Result<u32, RpcError> {
+        if self.broken {
+            return Err(RpcError::Broken);
+        }
+        let id = self.next_id();
+        let mut bytes = Vec::new();
+        for content in contents {
+            bytes.extend(encode_frame(&Main { command_id: id, content: Some(content), ..Default::default() })?);
+        }
+        let r = self.io.write_all(&bytes).and_then(|_| self.io.flush()).map_err(RpcError::Io);
+        self.check(r).map(|_| id)
+    }
+
+    /// Hands every OK response with `id` to `on_response` until it returns `true` (done).
+    /// A non-OK status ends the exchange with [`RpcError::Device`]; the session stays usable.
+    /// Any other error leaves the stream in an unknown place, so the session refuses further
+    /// requests ([`RpcError::Broken`]).
+    pub fn receive(&mut self, id: u32, mut on_response: impl FnMut(Main) -> Result<bool, RpcError>) -> Result<(), RpcError> {
+        if self.broken {
+            return Err(RpcError::Broken);
+        }
+        let r = self.receive_inner(id, &mut on_response);
+        self.check(r)
+    }
+
+    fn check<V>(&mut self, r: Result<V, RpcError>) -> Result<V, RpcError> {
+        if let Err(e) = &r {
+            if !matches!(e, RpcError::Device(_) | RpcError::UnknownStatus(_) | RpcError::Invalid(_)) {
+                self.broken = true;
+            }
+        }
+        r
+    }
+
+    fn receive_inner(&mut self, id: u32, on_response: &mut impl FnMut(Main) -> Result<bool, RpcError>) -> Result<(), RpcError> {
         let mut ignored = 0usize;
         let mut answered = 0usize;
         loop {
@@ -180,9 +229,7 @@ impl<T: Transport> Session<T> {
             if status != CommandStatus::Ok {
                 return Err(RpcError::Device(status));
             }
-            let more = resp.has_next;
-            on_response(resp)?;
-            if !more {
+            if on_response(resp)? {
                 return Ok(());
             }
         }

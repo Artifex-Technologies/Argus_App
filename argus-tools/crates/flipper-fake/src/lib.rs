@@ -39,6 +39,10 @@ pub enum Fault {
     WrongType,
     /// Send half a frame, then close.
     CloseMidFrame,
+    /// Every file read sends one byte fewer than its stat said.
+    ShortRead,
+    /// Every file read sends one byte more than its stat said.
+    LongRead,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +51,17 @@ pub struct Node {
     pub dir: bool,
     pub size: u32,
 }
+
+impl Node {
+    /// The file's bytes: a pattern derived from its path, so tests can recompute them.
+    pub fn content(&self) -> Vec<u8> {
+        let seed = self.path.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
+        (0..self.size).map(|i| (seed.wrapping_add(i.wrapping_mul(131)) % 251) as u8).collect()
+    }
+}
+
+/// The device clock the fake reports: 2026-11-09 12:34:56, a Monday.
+pub const FAKE_DATETIME: (u32, u32, u32, u32, u32, u32, u32) = (2026, 11, 9, 12, 34, 56, 1);
 
 #[derive(Debug, Clone)]
 pub struct FakeFlipper {
@@ -58,6 +73,9 @@ pub struct FakeFlipper {
     pub nodes: Vec<Node>,
     pub sd_card: bool,
     pub fault: Fault,
+    /// Raw entries added to a folder's listing as they are, bypassing the firmware's
+    /// rules: (folder, name, is_dir). For tests of what a hostile device could send.
+    pub hostile: Vec<(String, String, bool)>,
 }
 
 /// What passed over the connection.
@@ -133,12 +151,17 @@ impl FakeFlipper {
             Node { path: "/ext/nfc/badge.nfc".into(), dir: false, size: 512 },
             Node { path: "/ext/nfc/caf\u{e9}.nfc".into(), dir: false, size: 77 },
             Node { path: "/int/.bt.settings".into(), dir: false, size: 1024 },
+            Node { path: "/int/favorites.txt".into(), dir: false, size: 37 },
+            Node { path: "/int/empty.txt".into(), dir: false, size: 0 },
+            Node { path: "/int/sub".into(), dir: true, size: 0 },
+            Node { path: "/int/sub/deep.txt".into(), dir: false, size: 1536 },
+            Node { path: "/int/sub/inner".into(), dir: true, size: 0 },
         ];
         // 19 files: two full frames of 8 and a last one of 3.
         for i in 0..19 {
             nodes.push(Node { path: format!("/ext/subghz/signal_{i:02}.sub"), dir: false, size: 100 + i });
         }
-        FakeFlipper { protobuf_version: (0, 25), devinfo, legacy_info, nodes, sd_card: true, fault: Fault::None }
+        FakeFlipper { protobuf_version: (0, 25), devinfo, legacy_info, nodes, sd_card: true, fault: Fault::None, hostile: Vec::new() }
     }
 
     /// Serves one connection until the client closes it. Returns what the client sent.
@@ -201,7 +224,7 @@ impl FakeFlipper {
     fn answer(&self, io: &mut impl Write, req: &Main, fault: &Fault) -> io::Result<bool> {
         let id = req.command_id;
         match fault {
-            Fault::None | Fault::NoPrompt => {}
+            Fault::None | Fault::NoPrompt | Fault::ShortRead | Fault::LongRead => {}
             Fault::Silent => return Ok(true),
             Fault::GarbageFrame => {
                 io.write_all(&[0x02, 0x0f, 0x00])?;
@@ -292,6 +315,48 @@ impl FakeFlipper {
                 }
                 None => send(io, error(CommandStatus::ErrorStorageNotExist))?,
             },
+            Some(Content::StorageReadRequest(r)) => match self.nodes.iter().find(|n| n.path == r.path && !n.dir) {
+                None => send(io, error(CommandStatus::ErrorStorageNotExist))?,
+                Some(n) => {
+                    let mut data = n.content();
+                    match self.fault {
+                        Fault::ShortRead if !data.is_empty() => {
+                            data.pop();
+                        }
+                        Fault::LongRead => data.push(0),
+                        _ => {}
+                    }
+                    // As the firmware: 512 bytes per frame, has_next while bytes are left; an
+                    // empty file is one frame with empty data.
+                    let read = |chunk: &[u8], has_next: bool| {
+                        let file = pb_storage::File { data: chunk.to_vec(), ..Default::default() };
+                        ok(Content::StorageReadResponse(pb_storage::ReadResponse { file: Some(file) }), has_next)
+                    };
+                    if data.is_empty() {
+                        send(io, read(&[], false))?;
+                    }
+                    let mut chunks = data.chunks(512).peekable();
+                    while let Some(c) = chunks.next() {
+                        send(io, read(c, chunks.peek().is_some()))?;
+                    }
+                }
+            },
+            Some(Content::StorageMd5sumRequest(r)) => match self.nodes.iter().find(|n| n.path == r.path && !n.dir) {
+                None => send(io, error(CommandStatus::ErrorStorageNotExist))?,
+                Some(n) => {
+                    use md5::Digest;
+                    let md5sum: String = md5::Md5::digest(n.content()).iter().map(|b| format!("{b:02x}")).collect();
+                    send(io, ok(Content::StorageMd5sumResponse(pb_storage::Md5sumResponse { md5sum }), false))?;
+                }
+            },
+            Some(Content::SystemGetDatetimeRequest(_)) => {
+                let (year, month, day, hour, minute, second, weekday) = FAKE_DATETIME;
+                let datetime = pb_system::DateTime { hour, minute, second, day, month, year, weekday };
+                send(io, ok(Content::SystemGetDatetimeResponse(pb_system::GetDateTimeResponse { datetime: Some(datetime) }), false))?;
+            }
+            // The C++ app sets the clock on every connection; the fake accepts it (and the
+            // transcript records it) but its clock does not change.
+            Some(Content::SystemSetDatetimeRequest(_)) => send(io, ok(Content::Empty(Empty {}), false))?,
             _ => send(io, error(CommandStatus::ErrorNotImplemented))?,
         }
         Ok(true)
@@ -324,6 +389,7 @@ impl FakeFlipper {
             .filter_map(|n| n.path.strip_prefix(&prefix).filter(|rest| !rest.contains('/')).map(|name| (n, name)))
             .filter(|(_, name)| name.is_ascii())
             .map(|(n, name)| file(name, n.dir, n.size))
+            .chain(self.hostile.iter().filter(|(d, _, _)| d == path).map(|(_, name, dir)| file(name, *dir, 1)))
             .collect();
         let mut chunks = children.chunks(8).peekable();
         if chunks.peek().is_none() {

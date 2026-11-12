@@ -55,6 +55,8 @@ fn requests_are_byte_identical_to_the_cpp_app() {
         ("req_ping_abc", req(10, Content::SystemPingRequest(pb_system::PingRequest { data: b"abc".to_vec() }))),
         ("req_get_datetime", req(12, Content::SystemGetDatetimeRequest(pb_system::GetDateTimeRequest {}))),
         ("req_protobuf_version_idmax", req(u32::MAX, Content::SystemProtobufVersionRequest(pb_system::ProtobufVersionRequest {}))),
+        ("req_read_pair_stat", req(13, Content::StorageStatRequest(pb_storage::StatRequest { path: path("/int/favorites.txt") }))),
+        ("req_read_pair_read", req(13, Content::StorageReadRequest(pb_storage::ReadRequest { path: path("/int/favorites.txt") }))),
     ];
     for (name, msg) in cases {
         let want = f.get(name).unwrap_or_else(|| panic!("fixture {name} missing"));
@@ -118,6 +120,31 @@ fn firmware_style_responses_decode_and_re_encode_identically() {
         ),
         ("resp_stat_manifest", req(7, Content::StorageStatResponse(pb_storage::StatResponse { file: Some(file(false, "", 48213)) }))),
         ("resp_ping_abc", req(10, Content::SystemPingResponse(pb_system::PingResponse { data: b"abc".to_vec() }))),
+        (
+            "resp_md5",
+            req(8, Content::StorageMd5sumResponse(pb_storage::Md5sumResponse { md5sum: "d41d8cd98f00b204e9800998ecf8427e".into() })),
+        ),
+        (
+            "resp_read_chunk",
+            Main {
+                has_next: true,
+                ..req(
+                    9,
+                    Content::StorageReadResponse(pb_storage::ReadResponse {
+                        file: Some(pb_storage::File { data: b"hello".to_vec(), ..Default::default() }),
+                    }),
+                )
+            },
+        ),
+        (
+            "resp_datetime",
+            req(
+                12,
+                Content::SystemGetDatetimeResponse(pb_system::GetDateTimeResponse {
+                    datetime: Some(pb_system::DateTime { hour: 12, minute: 34, second: 56, day: 9, month: 11, year: 2026, weekday: 1 }),
+                }),
+            ),
+        ),
     ];
     for (name, want) in cases {
         let bytes = f.get(name).unwrap_or_else(|| panic!("fixture {name} missing"));
@@ -127,7 +154,17 @@ fn firmware_style_responses_decode_and_re_encode_identically() {
 }
 
 #[test]
+fn empty_file_read_differs_on_the_wire_but_not_in_meaning() {
+    // The firmware sends an empty file as a set zero-length `data`; prost leaves it out.
+    let f = fixtures();
+    let cpp = &f["resp_read_empty_file"];
+    let want = req(9, Content::StorageReadResponse(pb_storage::ReadResponse { file: Some(pb_storage::File::default()) }));
+    assert_eq!(decode_one(cpp), want);
+    assert_ne!(&encode_frame(&want).unwrap(), cpp);
+}
+
+#[test]
 fn every_fixture_is_covered() {
     let f = fixtures();
-    assert_eq!(f.len(), 24, "a frame was added to driver.c; add it to these tests");
+    assert_eq!(f.len(), 30, "a frame was added to driver.c; add it to these tests");
 }

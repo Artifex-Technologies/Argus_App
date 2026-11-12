@@ -178,5 +178,44 @@ int main(void)
     emit("resp_ping_abc", &m);
     free(m.content.system_ping_response.data);
 
+    /* ---- phase 2: md5, read, date/time ---- */
+    char md5hex[] = "d41d8cd98f00b204e9800998ecf8427e";
+    m = response(8, PB_Main_storage_md5sum_response_tag, false, PB_CommandStatus_OK);
+    memcpy(m.content.storage_md5sum_response.md5sum, md5hex, 33);
+    emit("resp_md5", &m);
+
+    m = response(9, PB_Main_storage_read_response_tag, true, PB_CommandStatus_OK);
+    m.content.storage_read_response.has_file = true;
+    m.content.storage_read_response.file.data = bytes("hello", 5);
+    emit("resp_read_chunk", &m);
+    free(m.content.storage_read_response.file.data);
+
+    /* the firmware's answer for an empty file: has_file with a zero-length data array */
+    m = response(9, PB_Main_storage_read_response_tag, false, PB_CommandStatus_OK);
+    m.content.storage_read_response.has_file = true;
+    m.content.storage_read_response.file.data = bytes("", 0);
+    emit("resp_read_empty_file", &m);
+    free(m.content.storage_read_response.file.data);
+
+    m = response(12, PB_Main_system_get_datetime_response_tag, false, PB_CommandStatus_OK);
+    m.content.system_get_datetime_response.has_datetime = true;
+    m.content.system_get_datetime_response.datetime.year = 2026;
+    m.content.system_get_datetime_response.datetime.month = 11;
+    m.content.system_get_datetime_response.datetime.day = 9;
+    m.content.system_get_datetime_response.datetime.hour = 12;
+    m.content.system_get_datetime_response.datetime.minute = 34;
+    m.content.system_get_datetime_response.datetime.second = 56;
+    m.content.system_get_datetime_response.datetime.weekday = 1;
+    emit("resp_datetime", &m);
+
+    /* StorageReadOperation: stat and read under one id, written back to back */
+    char favs[] = "/int/favorites.txt";
+    m = request(13, PB_Main_storage_stat_request_tag, false);
+    m.content.storage_stat_request.path = favs;
+    emit("req_read_pair_stat", &m);
+    m = request(13, PB_Main_storage_read_request_tag, false);
+    m.content.storage_read_request.path = favs;
+    emit("req_read_pair_read", &m);
+
     return 0;
 }
