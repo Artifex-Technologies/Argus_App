@@ -927,36 +927,40 @@ impl ArgusApp {
         if device_alpha > 0.0 {
             let x = DEVICE_BUSY_X + (DEVICE_HOME_X - DEVICE_BUSY_X) * at_home;
             let r = Rect::from_min_size(card.min + vec2(x, DEVICE_Y), vec2(DEVICE[0], DEVICE[1]));
-            self.layer(ui, card, device_alpha, device_shown, |app, ui| app.device_view(ui, r, pal));
+            self.layer(ui, "device_alpha", card, device_alpha, device_shown, |app, ui| app.device_view(ui, r, pal));
         }
         if waiting > 0.0 {
-            self.layer(ui, card, waiting, matches!(self.stage, Stage::Waiting | Stage::Connecting), |app, ui| {
+            self.layer(ui, "waiting", card, waiting, matches!(self.stage, Stage::Waiting | Stage::Connecting), |app, ui| {
                 app.waiting_ui(ui, card, pal)
             });
         }
         if home > 0.0 {
-            self.layer(ui, card, home, self.stage == Stage::Ready, |app, ui| app.home_ui(ui, card, pal));
+            self.layer(ui, "home", card, home, self.stage == Stage::Ready, |app, ui| app.home_ui(ui, card, pal));
         }
         if busy > 0.0 {
-            self.layer(ui, card, busy, true, |app, ui| app.busy_ui(ui, card, pal));
+            self.layer(ui, "busy", card, busy, true, |app, ui| app.busy_ui(ui, card, pal));
         }
         if finished > 0.0 {
-            self.layer(ui, card, finished, matches!(self.stage, Stage::Finished { .. }), |app, ui| app.finished_ui(ui, card, pal));
+            self.layer(ui, "finished", card, finished, matches!(self.stage, Stage::Finished { .. }), |app, ui| {
+                app.finished_ui(ui, card, pal)
+            });
         }
         if error > 0.0 {
-            self.layer(ui, card, error, matches!(self.stage, Stage::Error { .. }), |app, ui| app.error_ui(ui, card, pal));
+            self.layer(ui, "error", card, error, matches!(self.stage, Stage::Error { .. }), |app, ui| app.error_ui(ui, card, pal));
         }
         if stream > 0.0 {
-            self.layer(ui, card, stream, self.stage == Stage::Streaming, |app, ui| app.stream_ui(ui, card, pal));
+            self.layer(ui, "stream", card, stream, self.stage == Stage::Streaming, |app, ui| app.stream_ui(ui, card, pal));
         }
         if console > 0.0 {
-            self.layer(ui, card, console, self.console, |app, ui| app.console_ui(ui, card, pal));
+            self.layer(ui, "console", card, console, self.console, |app, ui| app.console_ui(ui, card, pal));
         }
     }
 
-    /// One overlay at `alpha`; an overlay that is fading out takes no input.
-    fn layer(&mut self, ui: &mut egui::Ui, rect: Rect, alpha: f32, active: bool, f: impl FnOnce(&mut Self, &mut egui::Ui)) {
-        ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+    /// One overlay at `alpha`; an overlay that is fading out takes no input. Each has an explicit id (an `id_salt` is
+    /// not enough: egui derives the widgets' automatic ids from the parent's counter), so its widgets keep their ids
+    /// while other overlays come and go (a press and its release must meet the same widget).
+    fn layer(&mut self, ui: &mut egui::Ui, name: &str, rect: Rect, alpha: f32, active: bool, f: impl FnOnce(&mut Self, &mut egui::Ui)) {
+        ui.scope_builder(UiBuilder::new().id(Id::new(("overlay", name))).max_rect(rect), |ui| {
             ui.set_clip_rect(rect);
             ui.multiply_opacity(alpha);
             if !active {
@@ -1056,7 +1060,7 @@ impl ArgusApp {
             ui.ctx().request_repaint();
         } else if !self.found.is_empty() && (!self.settings.auto_connect || self.found.len() > 1 || self.failed.is_some()) {
             let list = Rect::from_center_size(c + vec2(0.0, 70.0), vec2(460.0, 110.0));
-            ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
+            ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 1))).max_rect(list), |ui| {
                 for f in self.found.clone() {
                     ui.horizontal(|ui| {
                         let what = if f.is_recovery() { "Recovery mode" } else { "Flipper Zero" };
@@ -1109,13 +1113,16 @@ impl ArgusApp {
         let links_y = button.bottom() + 16.0;
         if let Some(label) = self.latest_label() {
             let r = Rect::from_min_size(pos2(card.left() + CENTER_X - 206.0, links_y - 9.0), vec2(200.0, 18.0));
-            ui.scope_builder(UiBuilder::new().max_rect(r).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
-                ui.label(RichText::new(label).color(pal.accent));
-            });
+            ui.scope_builder(
+                UiBuilder::new().id(Id::new(("scope", 2))).max_rect(r).layout(egui::Layout::right_to_left(egui::Align::Center)),
+                |ui| {
+                    ui.label(RichText::new(label).color(pal.accent));
+                },
+            );
         }
         if !self.recovery() {
             let r = Rect::from_min_size(pos2(card.left() + CENTER_X + 6.0, links_y - 9.0), vec2(200.0, 18.0));
-            ui.scope_builder(UiBuilder::new().max_rect(r), |ui| {
+            ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 3))).max_rect(r), |ui| {
                 if ui.add_enabled(self.worker.is_some(), egui::Button::new("Install from file").frame(false)).clicked() {
                     self.ask(Action::InstallFile);
                 }
@@ -1124,7 +1131,7 @@ impl ArgusApp {
 
         // the tabs and their pane on the left
         let tabs = Rect::from_min_size(card.min + vec2(28.0, 22.0), vec2(360.0, 34.0));
-        ui.scope_builder(UiBuilder::new().max_rect(tabs), |ui| {
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 4))).max_rect(tabs), |ui| {
             ui.horizontal(|ui| {
                 for (t, label) in [(Tab::Info, "Info"), (Tab::Actions, "Actions"), (Tab::Files, "Files")] {
                     let enabled = !(t == Tab::Files && self.recovery());
@@ -1142,7 +1149,7 @@ impl ArgusApp {
         ui.painter().rect_filled(pane, 12.0, pal.bg);
         ui.painter().rect_stroke(pane, 12.0, Stroke::new(1.0, pal.border), StrokeKind::Inside);
         let inner = pane.shrink(10.0);
-        ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| match self.tab {
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 5))).max_rect(inner), |ui| match self.tab {
             Tab::Info => self.info_tab(ui, pal),
             Tab::Actions => self.actions_tab(ui, pal),
             Tab::Files => self.files_tab(ui, pal),
@@ -1423,11 +1430,14 @@ impl ArgusApp {
         let title = if warning.is_some() { "Done, with a warning" } else { "Success!" };
         label_at(ui, card.center_top() + vec2(0.0, 40.0), Align2::CENTER_CENTER, title, FontId::proportional(26.0), pal.text);
         let text = Rect::from_center_size(pos2(card.center().x, card.top() + 278.0), vec2(600.0, 40.0));
-        ui.scope_builder(UiBuilder::new().max_rect(text).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
-            if let Some(w) = &warning {
-                ui.label(RichText::new(w).color(pal.amber));
-            }
-        });
+        ui.scope_builder(
+            UiBuilder::new().id(Id::new(("scope", 6))).max_rect(text).layout(egui::Layout::top_down(egui::Align::Center)),
+            |ui| {
+                if let Some(w) = &warning {
+                    ui.label(RichText::new(w).color(pal.amber));
+                }
+            },
+        );
         let b = Rect::from_center_size(pos2(card.center().x, card.top() + 338.0), vec2(200.0, 42.0));
         let resp = ui.put(
             b,
@@ -1447,9 +1457,12 @@ impl ArgusApp {
         ui.painter().text(c + vec2(0.0, -110.0), Align2::CENTER_CENTER, "!", FontId::proportional(30.0), pal.red);
         label_at(ui, c + vec2(0.0, -56.0), Align2::CENTER_CENTER, &title, FontId::proportional(26.0), pal.text);
         let r = Rect::from_center_size(c + vec2(0.0, 10.0), vec2(620.0, 70.0));
-        ui.scope_builder(UiBuilder::new().max_rect(r).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
-            ui.label(RichText::new(text).color(pal.dim));
-        });
+        ui.scope_builder(
+            UiBuilder::new().id(Id::new(("scope", 7))).max_rect(r).layout(egui::Layout::top_down(egui::Align::Center)),
+            |ui| {
+                ui.label(RichText::new(text).color(pal.dim));
+            },
+        );
         let b = Rect::from_center_size(c + vec2(0.0, 120.0), vec2(160.0, 38.0));
         if ui.put(b, egui::Button::new(RichText::new("Back").size(16.0)).corner_radius(CornerRadius::same(10))).clicked() {
             self.finish();
@@ -1547,7 +1560,7 @@ impl ArgusApp {
         }
 
         let row = Rect::from_min_size(pos2(frame.left(), frame.bottom() + 16.0), vec2(frame.width(), 34.0));
-        ui.scope_builder(UiBuilder::new().max_rect(row), |ui| {
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 8))).max_rect(row), |ui| {
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new("Back").min_size(vec2(90.0, 32.0))).clicked() {
                     self.release_keypad();
@@ -1588,7 +1601,7 @@ impl ArgusApp {
             let b = self.bridge.lock().unwrap_or_else(|e| e.into_inner());
             (b.session().map(|(_, n)| n.to_string()), b.datastore_path().to_string())
         };
-        ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 9))).max_rect(inner), |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Console").size(20.0));
                 ui.label(
@@ -1713,7 +1726,7 @@ impl ArgusApp {
     // ---------------------------------------------------------------- footer, log, dialogs
 
     fn footer(&mut self, ui: &mut egui::Ui, r: Rect, pal: &Palette) {
-        ui.scope_builder(UiBuilder::new().max_rect(r), |ui| {
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 10))).max_rect(r), |ui| {
             ui.horizontal_centered(|ui| {
                 let size = vec2(100.0, r.height());
                 for (label, which) in [("LOGS", 0), ("CONSOLE", 1), ("SETTINGS", 2)] {
@@ -1772,7 +1785,7 @@ impl ArgusApp {
 
     fn log_drawer(&mut self, ui: &mut egui::Ui, r: Rect, pal: &Palette) {
         ui.painter().rect_filled(r, 10.0, pal.field);
-        ui.scope_builder(UiBuilder::new().max_rect(r.shrink(8.0)), |ui| {
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 11))).max_rect(r.shrink(8.0)), |ui| {
             ui.set_clip_rect(r);
             egui::ScrollArea::vertical().id_salt("log").stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                 for l in &self.log {

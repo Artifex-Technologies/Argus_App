@@ -155,3 +155,18 @@ fn a_device_that_leaves_is_waited_for_again() {
     assert!(h.has("Connect"));
     assert_eq!(fake.sessions(), 1);
 }
+
+#[test]
+fn settings_are_saved_as_they_change() {
+    let dir = tempdir("settings");
+    let mut h = Harness::new(&dir, vec![], Options::default());
+    h.click("SETTINGS");
+    h.wait("the settings", |h| h.has("Show hidden files"));
+    h.click("Light");
+    h.click("Show hidden files");
+    h.click("Done");
+    h.settle();
+    assert!(!h.shows("Show hidden files"), "closed");
+    let saved = std::fs::read_to_string(dir.join("config").join(argus_app::settings::FILE)).unwrap();
+    assert!(saved.contains("style = light") && saved.contains("show_hidden = true"), "{saved}");
+}

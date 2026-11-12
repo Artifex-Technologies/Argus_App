@@ -761,6 +761,19 @@ update goes on. Files are fetched only after the dialog is confirmed. The main b
 connects (Settings can turn that off) or on "Try again". After an operation that restarts the device, Continue waits
 for it to come back and connects again.
 
+The console (CONSOLE in the footer: qFlipper's Chymaera console and the capture part of its Argus window) pulls
+captures from the device (all capture folders, NFC, Sub-GHz; `argus_capture::sync`, the allowlist, secrets never read)
+into the shared datastore, lists the stored captures, starts and ends sessions, takes notes and shows the event log,
+and starts and stops the Sarina control API (`Server::run_shared`: the app's console and the API share one bridge and
+one event log). In the app, the API has no device attached yet: `device.status` says so, and `capture.pull` over the
+API needs `argus-cli chymaera serve --port` for now (the device belongs to the app's worker). Settings: the style
+(follow the system, light, dark), auto-connect, the update check, hidden files, the API's port.
+
+Found while testing: a click that landed while another overlay finished fading was lost. egui derives a widget's
+automatic id from its parent's counter, and an `id_salt` on the parent does not change that, so when a fading overlay
+stopped being drawn every widget after it changed its id between the press and the release. Every overlay and area
+now has an explicit id; the console tests click right after the console opens.
+
 **How it is tested** (`crates/argus-app/tests`, never a real device, never a window on my desktop):
 
 - `tests/common` runs the app headless: it makes up input (pointer moves and clicks, keys, text) on a clock of its own,
@@ -782,6 +795,10 @@ for it to come back and connects again.
   from a file and one the device refuses (no restart), an update from `flipper_fake::update_server` on 127.0.0.1 with
   the test's own CA for a region-1 device (nothing downloaded before the dialog is confirmed; the region data written
   first), and an unreachable server ("Try again").
+- The console (`tests/console.rs`): a pull of all capture folders (26 rows; nothing under `/ext/u2f` or an `assets`
+  folder read; nothing changed on the device; a second pull finds nothing new), notes and the log, and the API started
+  from the app on a free port with the test's token (ping, a wrong token refused, `log.tail` sees the console's note),
+  then stopped (the port closes). The settings window saves what changes.
 - The live screen's protocol (`flipper-fake/tests/stream.rs`): stream start, input events and stop are the C++ app's
   bytes (the nanopb fixture), a quiet device leaves the session usable, frames of the wrong length are skipped.
 
@@ -807,7 +824,10 @@ smoke test of the real binary inside that compositor (`tests/apps.rs` there show
    screen.
 5. The UI phase (section 6) has started: shell, device information, live screen and keypad, file manager, tested
    headless with snapshots and a test per confirmation; backup, restore, erase and the update (server and file) done
-   the same way against the fake and `flipper_fake::update_server`. Next, in this order: the console (capture pulls, the capture list, the Sarina API toggle on a test port); then recovery (repair through
+   the same way against the fake and `flipper_fake::update_server`; the console (capture pulls and list, sessions,
+   notes, the Sarina API toggle) too. Next: recovery (repair through
    `flipper_dfu::recovery` behind an interface, only `--dfu-socket`, no USB). Not started: the developer tab, the
-   Argus tools window (apps, check-up, rebuild, snapshots, capture library search), app installs. The app has never
+   Argus tools window (apps, check-up, rebuild, snapshots, capture library search), app installs, the API's
+   `device.status` and `capture.pull` through the app's own device worker (the C++ GUI's server has the device). The
+   file manager takes paths as text (no file picker yet; Yggdrasil's portal could give one). The app has never
    run on my desktop or against my Flipper: the first run is with me watching.

@@ -346,6 +346,10 @@ impl Harness {
         all.iter().any(|w| w.enabled)
     }
 
+    pub fn push_event(&mut self, e: Event) {
+        self.events.push(e);
+    }
+
     fn pointer(&mut self, p: Pos2, pressed: bool) {
         self.events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
     }
