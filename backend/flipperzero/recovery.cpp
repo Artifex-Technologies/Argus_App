@@ -271,9 +271,20 @@ bool Recovery::downloadWirelessStack(QIODevice *file, uint32_t addr)
         }
 
         const auto origin = device.partitionOrigin((uint8_t)STM32WB55::Partition::Flash);
-        const auto pageSize = (uint32_t)0x1000; // TODO: do not hardcode page size
+        const auto pageSize = (quint64)0x1000; // TODO: do not hardcode page size
 
-        addr = (origin + (pageSize * ob.value("SFSA")) - file->bytesAvailable()) & (~(pageSize - 1));
+        // Right below the secure flash start, on a page boundary. This used to wrap around for an image larger
+        // than the room below SFSA; now it must fit between the start of the flash and SFSA (the same rule as
+        // the Rust port's flipper_dfu::recovery::wireless_stack_address).
+        const auto top = (quint64)origin + pageSize * ob.value("SFSA");
+        const auto size = (quint64)file->bytesAvailable();
+
+        if(size > top || ((top - size) & ~(pageSize - 1)) < origin || top > (Q_UINT64_C(1) << 32)) {
+            setErrorString("Can't flash co-processor firmware image: It does not fit below the secure flash.");
+            return false;
+        }
+
+        addr = (uint32_t)((top - size) & ~(pageSize - 1));
 
         debug_msg(QString("SFSA value is 0x%1").arg(QString::number(ob.value("SFSA"), 16)));
         debug_msg(QString("Target address for co-processor firmware image is 0x%1").arg(QString::number(addr, 16)));
@@ -355,6 +366,16 @@ bool Recovery::downloadOptionBytes(QIODevice *file)
 
     check_return_bool(device.beginTransaction(), "Failed to initiate transaction");
     const OptionBytes actual = device.optionBytes();
+
+    // A failed read used to be compared and "corrected" anyway: every field the file names was written over
+    // nothing, with zeros (or, before that, whatever was on the stack) everywhere else.
+    if(!actual.isValid()) {
+        setErrorString("Can't correct option bytes: Failed to read them.");
+        begin_ignore_block();
+        device.endTransaction();
+        end_ignore_block();
+        return false;
+    }
 
     const auto diff = actual.compare(loaded);
 

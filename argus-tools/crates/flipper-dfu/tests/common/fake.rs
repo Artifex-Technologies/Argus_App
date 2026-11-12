@@ -46,6 +46,79 @@ pub struct Faults {
     pub start_in_error: bool,
     /// The device starts in dfuDNLOAD-IDLE.
     pub start_dnload_idle: bool,
+    /// The FUS status and error bytes at 0xFFFF0054 (default: idle, no error).
+    pub fus: Option<[u8; 2]>,
+    /// The device information table (56 bytes) at SRAM2A + 0x100 (default: a FUS table).
+    pub info_table: Option<Vec<u8>>,
+    /// What SRAM2A's first word points to (default: SRAM2A + 0x100).
+    pub table_address: Option<u32>,
+    /// The option bytes as the device holds them (default: Flipper's ob.data).
+    pub option_bytes: Option<Vec<u8>>,
+}
+
+pub const FUS_STATUS: u32 = 0xFFFF_0054;
+
+/// Flipper's `scripts/ob.data` as the chip holds it: every word followed by its complement, RDP
+/// 0xAA (level 0), and a pattern in the bits no field covers (so a write that does not keep them
+/// shows).
+pub fn flipper_option_bytes() -> Vec<u8> {
+    use flipper_dfu::wb55::OptionBytes;
+    let mut raw = vec![0xA5u8; 128];
+    for w in (0..128).step_by(8) {
+        // complement words start as the complement of the pattern
+        raw[w + 4..w + 8].copy_from_slice(&[0x5A; 4]);
+    }
+    raw[0] = 0xAA;
+    raw[4] = 0x55;
+    let mut ob = OptionBytes::from_bytes(&raw).unwrap();
+    for (name, value) in [
+        ("BOR_LEV", 0x4),
+        ("nBOOT0", 1),
+        ("nBOOT1", 1),
+        ("nSWBOOT0", 1),
+        ("SRAM2RST", 0),
+        ("SRAM2PE", 1),
+        ("nRST_STOP", 1),
+        ("nRST_STDBY", 1),
+        ("nRSTSHDW", 1),
+        ("WWDGSW", 1),
+        ("IWDGSTDBY", 1),
+        ("IWDGSTOP", 1),
+        ("IWDGSW", 1),
+        ("IPCCDBA", 0),
+        ("ESE", 1),
+        ("SFSA", 0xD7),
+        ("FSD", 0),
+        ("DDS", 1),
+        ("C2OPT", 1),
+        ("NBRSD", 0),
+        ("SNBRSA", 0xB),
+        ("BRSD", 0),
+        ("SBRSA", 0x12),
+        ("SBRV", 0x35C00),
+        ("PCROP1A_STRT", 0x1FF),
+        ("PCROP1A_END", 0),
+        ("PCROP_RDP", 1),
+        ("PCROP1B_STRT", 0x1FF),
+        ("PCROP1B_END", 0),
+        ("WRP1A_STRT", 0xFF),
+        ("WRP1A_END", 0),
+        ("WRP1B_STRT", 0xFF),
+        ("WRP1B_END", 0),
+        ("AGC_TRIM", 0),
+    ] {
+        ob.set(name, value).unwrap();
+    }
+    ob.bytes().to_vec()
+}
+
+/// A FUS device information table: FUS 1.2.0, wireless stack 1.17.3.
+pub fn fus_info_table() -> Vec<u8> {
+    let mut t = vec![0u8; 56];
+    t[..4].copy_from_slice(&flipper_dfu::wb55::DIT_FUS_MAGIC.to_le_bytes());
+    t[12..16].copy_from_slice(&[0x00, 0, 2, 1]);
+    t[20..24].copy_from_slice(&[0x00, 3, 17, 1]);
+    t
 }
 
 pub struct FakeDfu {
@@ -54,6 +127,7 @@ pub struct FakeDfu {
     pub option_bytes: Vec<u8>,
     pub otp: Vec<u8>,
     pub sram: Vec<u8>,
+    pub fus: Vec<u8>,
     pub erased_pages: Vec<u32>,
     pub fus_commands: Vec<u8>,
     pub left: bool,
@@ -76,12 +150,13 @@ pub fn hex(b: &[u8]) -> String {
 
 impl FakeDfu {
     pub fn new(faults: Faults) -> FakeDfu {
-        let mut option_bytes = vec![0; 128];
-        // nBOOT0 and nSWBOOT0 set, as on a device that boots its firmware
-        option_bytes[3] = 0x0C;
+        let option_bytes = faults.option_bytes.clone().unwrap_or_else(flipper_option_bytes);
         let mut sram = vec![0; 0x400];
-        // the device information table's address, at the start of SRAM2A
-        sram[..4].copy_from_slice(&(SRAM2A + 0x100).to_le_bytes());
+        // the device information table's address, at the start of SRAM2A, and the table
+        sram[..4].copy_from_slice(&faults.table_address.unwrap_or(SRAM2A + 0x100).to_le_bytes());
+        let table = faults.info_table.clone().unwrap_or_else(fus_info_table);
+        sram[0x100..0x100 + table.len()].copy_from_slice(&table);
+        let fus = faults.fus.unwrap_or([0, 0]).to_vec();
         let (state, status) = if faults.start_in_error {
             (state::ERROR, ERR_TARGET)
         } else if faults.start_dnload_idle {
@@ -95,6 +170,7 @@ impl FakeDfu {
             option_bytes,
             otp: (0..1024).map(|i| i as u8).collect(),
             sram,
+            fus,
             erased_pages: Vec::new(),
             fus_commands: Vec::new(),
             left: false,
@@ -128,6 +204,7 @@ impl FakeDfu {
     /// The memory an address range of the current alternate setting falls in: (region, offset).
     fn region(&mut self, address: u32, len: usize) -> Option<(&mut Vec<u8>, usize)> {
         let (base, mem) = match self.alt {
+            0 if address >= FUS_STATUS => (FUS_STATUS, &mut self.fus),
             0 if address >= SRAM2A => (SRAM2A, &mut self.sram),
             0 => (FLASH, &mut self.flash),
             1 => (OPTION_BYTES, &mut self.option_bytes),
@@ -170,7 +247,9 @@ impl FakeDfu {
                 }
                 [command::ERASE, a @ ..] if a.len() == 4 => {
                     let address = u32::from_le_bytes([a[0], a[1], a[2], a[3]]);
-                    if self.alt != 0 || !(FLASH..FLASH + FLASH_SIZE as u32).contains(&address) {
+                    // by address, whatever alternate setting is selected: upstream's wireless stack update erases
+                    // right after reading the option bytes (alternate setting 1 still selected)
+                    if !(FLASH..FLASH + FLASH_SIZE as u32).contains(&address) {
                         return ERR_ADDRESS;
                     }
                     let page = (address - FLASH) as usize / PAGE;
@@ -189,6 +268,9 @@ impl FakeDfu {
                 let address = u64::from(self.pointer) + (u64::from(n) - 2) * self.transfer_size() as u64;
                 let Ok(address) = u32::try_from(address) else { return ERR_ADDRESS };
                 let flash = self.alt == 0 && address < SRAM2A;
+                if self.alt == 0 && address >= FUS_STATUS {
+                    return ERR_TARGET;
+                }
                 let Some((mem, off)) = self.region(address, data.len()) else { return ERR_ADDRESS };
                 if flash && mem[off..off + data.len()].iter().any(|&b| b != 0xFF) {
                     return ERR_PROG;
@@ -271,6 +353,11 @@ impl Transport for FakeDfu {
                         } else {
                             let (block, data) = self.pending.take().unwrap_or_default();
                             let status = self.execute(block, &data);
+                            if status == 0 && self.alt == 1 && block >= 2 {
+                                // the option bytes are reloaded: the chip resets and leaves USB
+                                self.left = true;
+                                return Err(TransportError("device reset".into()));
+                            }
                             if status != 0 {
                                 self.state = state::ERROR;
                                 self.status = status;

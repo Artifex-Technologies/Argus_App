@@ -5,6 +5,10 @@
 //! - [`layout`]: the memory layout a DfuSe device describes in its interface strings.
 //! - [`device`]: ST's DfuSe protocol over a [`device::Transport`] (status polling, set address,
 //!   erase, download, upload, leave), every wait bounded.
+//! - [`wb55`]: the STM32WB55 on top of it: option bytes, FUS state, the device information table,
+//!   OTP.
+//! - [`recovery`]: the C++ app's recovery flows (boot mode, FUS and wireless stack, firmware,
+//!   option bytes from a file) on top of those.
 //!
 //! - `usb` (feature `usb` only): the nusb transport for a real device, which no test uses.
 //!
@@ -14,5 +18,7 @@
 pub mod device;
 pub mod dfuse;
 pub mod layout;
+pub mod recovery;
 #[cfg(feature = "usb")]
 pub mod usb;
+pub mod wb55;

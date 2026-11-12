@@ -103,7 +103,7 @@ bool DfuseDevice::download(const QByteArray &data)
     return pollWhileBusy("Failed to raw download a buffer");
 }
 
-bool DfuseDevice::download(QIODevice *file, uint32_t addr, uint8_t alt)
+bool DfuseDevice::download(QIODevice *file, uint32_t addr, uint8_t alt, bool mayReset)
 {
     check_return_bool(setInterfaceAltSetting(0, alt), "Failed to set interface alternate setting");
     check_return_bool(prepare(), "Failed to prepare the device");
@@ -123,8 +123,9 @@ bool DfuseDevice::download(QIODevice *file, uint32_t addr, uint8_t alt)
 
     for(size_t totalSize = 0, transaction = FIRST_DATA_BLOCK, prevProgress = std::numeric_limits<size_t>::max(); !file->atEnd(); ++transaction) {
         const auto buf = file->read(maxTransferSize);
+        const auto last = file->atEnd();
         check_return_bool(controlTransfer(REQUEST_OUT, DFU_DNLOAD, (uint16_t)transaction, 0, buf), "Failed to perform DFU_DNLOAD transfer");
-        check_return_bool(pollUntil(StatusType::DFU_DNLOAD_IDLE, "An error has occurred during download phase"), "Download step failed");
+        check_return_bool(pollUntil(StatusType::DFU_DNLOAD_IDLE, "An error has occurred during download phase", mayReset && last), "Download step failed");
 
         totalSize += buf.size();
 
@@ -242,10 +243,16 @@ bool DfuseDevice::pollWhileBusy(const char *failMsg)
     return false;
 }
 
-bool DfuseDevice::pollUntil(StatusType::State state, const char *failMsg)
+bool DfuseDevice::pollUntil(StatusType::State state, const char *failMsg, bool resetOk)
 {
     for(auto i = 0; i < MaxPolls; ++i) {
         const auto status = getStatus();
+
+        if(resetOk && !status.isValid) {
+            debug_msg("The device has reset, as expected");
+            return true;
+        }
+
         check_return_bool(status.bStatus == StatusType::OK, failMsg);
         QThread::msleep(status.waitTime());
 

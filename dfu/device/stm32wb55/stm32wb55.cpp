@@ -44,18 +44,17 @@ bool STM32WB55::setOptionBytes(const OptionBytes &ob)
 
     const auto success = (buf.write(ob.data()) == OptionBytes::size()) && buf.reset();
 
-    if(success) {
-        begin_ignore_block();
-        download(&buf, OPTION_BYTES_ADDR, (uint8_t)Partition::OptionBytes);
-        end_ignore_block();
-
-    } else {
+    if(!success) {
         error_msg("Failed to fill buffer");
         return false;
     }
 
+    // The device reloads its option bytes and resets after the write, so losing it then is success; any
+    // failure before (it used to be ignored too, and the write reported as done) or an error status is not.
+    const auto res = download(&buf, OPTION_BYTES_ADDR, (uint8_t)Partition::OptionBytes, true);
+
     buf.close();
-    return true;
+    return res;
 }
 
 VersionInfo STM32WB55::versionInfo()

@@ -97,7 +97,8 @@ public:
 
     bool erase(uint32_t addr, size_t maxSize);
     bool download(DfuseFile *file);
-    bool download(QIODevice *file, uint32_t addr, uint8_t alt = 0);
+    // mayReset: the device resets after the last block (the option bytes), so losing it then is success
+    bool download(QIODevice *file, uint32_t addr, uint8_t alt = 0, bool mayReset = false);
     bool download(const QByteArray &data);
     bool upload(QIODevice *file, uint32_t addr, size_t maxSize, uint8_t alt = 0);
     bool leave();
@@ -113,7 +114,7 @@ private:
 
     bool prepare();
     bool pollWhileBusy(const char *failMsg);
-    bool pollUntil(StatusType::State state, const char *failMsg);
+    bool pollUntil(StatusType::State state, const char *failMsg, bool resetOk = false);
     bool setAddressPointer(uint32_t addr);
     bool erasePage(uint32_t addr);
 };

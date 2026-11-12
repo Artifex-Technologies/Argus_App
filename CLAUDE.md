@@ -152,6 +152,17 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — Rust port phase 6: the STM32WB55 layer and the recovery flows (both apps fixed)
+- `flipper_dfu::wb55` (option bytes, FUS state and commands, device information table, OTP) and `flipper_dfu::recovery`
+  (`recovery.cpp`'s steps), compared with the C++ `STM32WB55` built into the oracle: Flipper's `ob.data` and 2000
+  damaged files, 600 option-byte encodings, 35 device scenarios on the fake bootloader (`linux.yml`).
+- **Fixed in both (C++ and Rust):** option bytes were written from an uninitialised stack buffer (every reserved bit
+  random); an option bytes file could rewrite RDP (`RDP:0x1CC` was cut to 0xCC, level 2, a permanent lock) and every
+  read-only field, because its `r`/`rw` column was ignored; a failed read was "corrected" anyway; a failed write was
+  reported as done; the wireless stack's address could wrap around. RDP is now never written.
+- **@Argus_Firmware:** `scripts/ob.data` reads the same as before. `ob_custradio.data` has `#` comment lines, which the
+  app never accepted (and still does not). Nothing flashed; no device opened.
+
 ### 2026-11-12 — Rust port phase 6: the DfuSe protocol (both apps fixed)
 - `flipper_dfu::device`: ST's DfuSe protocol (status polling, set address, erase, download, upload, FUS commands,
   leave) over a transport trait; a fake STM32WB55 bootloader in the tests. The C++ `DfuseDevice` is built into the

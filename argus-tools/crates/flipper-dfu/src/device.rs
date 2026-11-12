@@ -240,8 +240,17 @@ impl<T: Transport> Dfu<T> {
     /// Polls after a download until the device leaves `busy_state` (`DNBUSY`), or, with `until`,
     /// until it reaches that state. Every status must be OK.
     fn poll(&mut self, during: &'static str, until: Option<u8>) -> Result<(), Error> {
+        self.poll_or_reset(during, until, false)
+    }
+
+    /// [`Self::poll`]; with `reset_ok`, a status that cannot be read means the device has reset
+    /// (as it does after its option bytes are written) and counts as done.
+    fn poll_or_reset(&mut self, during: &'static str, until: Option<u8>, reset_ok: bool) -> Result<(), Error> {
         for _ in 0..MAX_POLLS {
-            let s = self.get_status()?;
+            let s = match self.get_status() {
+                Err(Error::Transport { .. } | Error::BadStatus { .. }) if reset_ok => return Ok(()),
+                s => s?,
+            };
             if s.status != STATUS_OK {
                 return Err(Error::Device { during, status: s.status, state: s.state });
             }
@@ -312,6 +321,16 @@ impl<T: Transport> Dfu<T> {
     /// Writes `data` at `address` through alternate setting `alt`, one transfer-size block at a
     /// time. The memory must have been erased.
     pub fn download(&mut self, data: &[u8], address: u32, alt: u8) -> Result<(), Error> {
+        self.download_impl(data, address, alt, false)
+    }
+
+    /// [`Self::download`] for a write after which the device resets (the option bytes): losing the
+    /// device after the last block has been sent is success. An error status is still an error.
+    pub fn download_may_reset(&mut self, data: &[u8], address: u32, alt: u8) -> Result<(), Error> {
+        self.download_impl(data, address, alt, true)
+    }
+
+    fn download_impl(&mut self, data: &[u8], address: u32, alt: u8, may_reset: bool) -> Result<(), Error> {
         self.set_alt(alt)?;
         self.prepare()?;
         self.set_address(address)?;
@@ -319,10 +338,11 @@ impl<T: Transport> Dfu<T> {
         if data.len().div_ceil(usize::from(size)) as u64 > 0x1_0000 - FIRST_DATA_BLOCK {
             return Err(Error::TooLarge { len: data.len() });
         }
+        let blocks = data.len().div_ceil(usize::from(size));
         for (i, chunk) in data.chunks(usize::from(size)).enumerate() {
             let block = (FIRST_DATA_BLOCK + i as u64) as u16;
             self.out("DFU_DNLOAD", request::DNLOAD, block, chunk)?;
-            self.poll("download", Some(state::DNLOAD_IDLE))?;
+            self.poll_or_reset("download", Some(state::DNLOAD_IDLE), may_reset && i + 1 == blocks)?;
         }
         Ok(())
     }

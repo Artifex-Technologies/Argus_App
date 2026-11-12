@@ -133,13 +133,23 @@ public:
     void setData(const QByteArray &data);
 
     uint32_t value(const QByteArray &fieldName) const;
-    void setValue(const QByteArray &fieldName, uint32_t value);
+    // False (and nothing set) for an unknown field, RDP, or a value wider than the field
+    bool setValue(const QByteArray &fieldName, uint32_t value);
 
     DataMap compare(const OptionBytes &other) const;
     OptionBytes corrected(const DataMap &diff) const;
 
+    // The largest option bytes file read
+    static const qint64 MaxFileSize = 64 * 1024;
+
 private:
+    static int fieldWidth(const QByteArray &fieldName);
+
     DataMap m_data;
+    // The 128 bytes read from the device: data() changes only the fields on top of them
+    QByteArray m_raw;
+    // Fields of a loaded file marked "r": compared, never corrected
+    QList<QByteArray> m_readOnly;
     bool m_isValid;
 };
 

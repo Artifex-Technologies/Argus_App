@@ -83,7 +83,8 @@ Protocol and device logic first, with the CLI as the proof surface; the UI last.
    *Started 2026-11-12: the DfuSe file parser and the memory layout reader (`crates/flipper-dfu`), checked against
    the C++ parsers themselves, then ST's DfuSe protocol (`flipper_dfu::device`), checked request for request against
    the C++ `DfuseDevice` on one fake bootloader; both fixed. nusb is a thin adapter behind the `usb` feature that no
-   test uses. Option bytes, FUS and the radio stack next.*
+   test uses. Then the STM32WB55 layer (`flipper_dfu::wb55`: option bytes, FUS, device information table, OTP) and
+   `recovery.cpp`'s flows (`flipper_dfu::recovery`), compared with the C++ `STM32WB55` on the same fake; both fixed.*
 7. **Update registry and region provisioning** (HTTPS with rustls, SHA-256 checked before anything is used).
 8. **The UI** in egui/eframe, window by window. When it covers what the QML does, the C++ goes (no dead code left).
 
@@ -150,6 +151,21 @@ dnload-idle, send short or no statuses, report a transfer size of 0 or 1, answer
 hostile memory layout. Before the fixes below, 12 of them differed; now all 51 agree. The Linux workflow runs it.
 `tests/device.rs` (9 tests) checks the Rust side alone: a firmware written and read back, the exact pages erased,
 writes onto unerased flash refused, every fault bounded and nothing written after one.
+
+**The STM32WB55 layer against the C++ app's.** The oracle also builds `dfu/device/stm32wb55/` (with Qt's Core5Compat
+for its `QRegExp`). `tests/qt_wb55.rs` compares (1) option bytes files: Flipper's `ob.data` and 2000 damaged variants
+per seed (lines dropped, doubled or swapped, access changed, values too wide, `RDP:0x1CC`, comments, CRLF, lower case,
+the misspelled alias), same accepted files and fields; (2) option bytes from 600 sets of raw bytes with changes asked
+for: the same fields, the same yes or no to each change, and the same 128 bytes to write; (3) 35 device scenarios on
+the fake, request for request: reading the option bytes, the boot mode (also with the write or the set address
+refused, and unreadable option bytes), correcting them from a file (nothing to do, `rw` fields differing, a read-only
+field differing, a file marking SFSA `rw` with RDP 0xBB, unreadable option bytes, a damaged file), the device
+information table (FUS and wireless stack layouts, no magic, a pointer below or past SRAM2A), OTP, the FUS state and
+commands, starting the FUS, and the wireless stack's address below SFSA (fitting, too large, SFSA 0). The fake now
+has the FUS status word, the information table, Flipper's option bytes with a pattern in every bit no field covers,
+and resets when its option bytes are written. Against the C++ code before the fixes below, 11 of the 35 scenarios,
+744 of the 2002 files and all 600 encodings differed; now all agree. `tests/wb55.rs` (6 tests) checks the Rust side
+alone.
 
 **The C++ CLI against the same fake.** The C++ app finds a Flipper by USB VID/PID. A test-only hook
 (`backend/testhooks.h`) changes that only when `ARGUS_TEST_SERIAL_PORT` names a port: the registry then does not
@@ -295,6 +311,11 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   nusb transport: it opens only a device it is handed and only ST's DFU bootloader (0483:DF11), claims interface 0,
   and does not retry transfers (a retried download could erase or write twice). No test enables it; CI lints it.
   Nothing calls it yet: a CLI command for recovery comes with option bytes and FUS, behind `--yes`.
+- The STM32WB55 and recovery (2026-11-12): `flipper_dfu::wb55` (option bytes as their raw 128 bytes, changed field by
+  field with complements; RDP never written; Flipper's `ob.data` format with its access column; FUS state; version
+  table; OTP) and `flipper_dfu::recovery` (exit, boot mode, wireless status, start FUS, FUS delete/upgrade/start,
+  firmware `.dfu`, wireless stack image below SFSA, option bytes from a file). The option bytes write tolerates the
+  chip's reset after it (`Dfu::download_may_reset`); an error status before it is still an error.
 
 Differences from the C++ app found so far, all on purpose or harmless:
 
@@ -449,6 +470,26 @@ has a scenario for each, and the two now send the same requests:
 - **An upload answered with nothing counted as success** (as the end of memory). It is a failure now; a short but
   non-empty answer is still the end.
 
+Found while porting the STM32WB55 layer (phase 6), and **fixed in both versions** on 2026-11-12. `tests/qt_wb55.rs`
+has cases for each:
+
+- **Option bytes were written from an uninitialised buffer.** `OptionBytes::data()` filled a stack structure field by
+  field, so every bit no field covers (the twelve reserved words among them) went to the chip as whatever was on the
+  stack. A write now starts from the 128 bytes read from the device, and option bytes never read (a failed read)
+  cannot be written at all.
+- **A file could set RDP, and set it wrong.** The file's access column (`r`/`rw`) was ignored, so every field that
+  differed was rewritten, RDP and SFSA included, and a value was cut to its field's width: `RDP:0x1CC` became 0xCC,
+  read protection level 2, which locks the chip for good, and `RDP:0xBB` would have meant level 1. Now RDP is never
+  written, only `rw` fields are corrected, a value must fit its field, and a field named twice (also through ST's
+  misspelling `IWGDSTDBY`) is refused.
+- **Correcting the option bytes went on after their read failed**, writing the file's fields over nothing.
+  `Recovery::downloadOptionBytes` now stops.
+- **A failed option bytes write counted as done.** `setOptionBytes` ignored everything (the chip resets after a good
+  write, so errors were expected); a refused set address or write was reported as success. Now only losing the
+  device after the last block is success.
+- **The wireless stack's address could wrap around.** `origin + 4 KiB x SFSA - size` in 32 bits: an image larger than
+  the room below SFSA gave an address near 4 GiB. It now has to fit between the start of the flash and SFSA.
+
 A regression of my own, caught by porting the capture sync: once `GetFileTreeOperation` left unsafe names out,
 the C++ capture pull stopped counting them as failed (as `stagedPath` used to). `CaptureSync` now counts every
 refused name as failed again, and the Rust pull does the same.
@@ -478,9 +519,9 @@ failed, and does not read `devinfo` or start the screen.
    Before either is used on my Flipper: run `argus-cli update` and `erase` against it once with me watching.
 3. Phase 6 (DFU and recovery): the DfuSe parser, the memory layout and the DfuSe protocol are done and match the C++
    ones (`crates/flipper-dfu`; the nusb transport behind the `usb` feature, unused by tests and by any command).
-   Next: the STM32WB55 layer (`dfu/device/stm32wb55/`: option bytes read, compare and write, FUS state, the device
-   information table, OTP) as pure code over `Dfu`, compared with the C++ `STM32WB55` on the same fake (the fake
-   already has the option bytes, OTP and the info-table pointer in SRAM2A); then `recovery.cpp`'s flows. A recovery
-   command in `argus-cli` only after that, behind `--yes`. No flashing in tests, and none on my device until I say so.
+   The STM32WB55 layer and `recovery.cpp`'s flows are done too (`flipper_dfu::wb55`, `flipper_dfu::recovery`). Next:
+   an `argus-cli recovery ...` command behind `--yes`, tested only against the fake (a DFU transport over a socket to
+   a fake served by a test binary); the nusb transport stays unused by tests. No flashing in tests, and none on my
+   device until I say so.
 4. For the UI phase: the screen stream is there (`flipper_rpc::screen`); buttons (`GuiSendInputRequest`) and the
    virtual display come with it.

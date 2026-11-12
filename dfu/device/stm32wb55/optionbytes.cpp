@@ -3,6 +3,8 @@
 #include <QRegExp>
 #include <QIODevice>
 
+#include <cstring>
+
 #include "debug.h"
 
 #define OPTION_BYTES_SIZE 128
@@ -23,18 +25,34 @@ OptionBytes::OptionBytes(const QByteArray &data):
     setData(data);
 }
 
+// Reads Flipper's ob.data: NAME:0xVALUE:r|rw per line. The same rules as the Rust port
+// (argus-tools/crates/flipper-dfu, src/wb55.rs): the access column is honoured (only "rw" fields are ever
+// corrected; it used to be ignored, so RDP, SFSA and the other read-only fields were rewritten), a value
+// must fit its field (RDP:0x1CC used to become 0xCC, level 2, which locks the chip for good), the
+// misspelled IWGDSTDBY is IWDGSTDBY, and a field named twice is refused.
 OptionBytes::OptionBytes(QIODevice *file):
     OptionBytes()
 {
+    check_return_void(file->size() <= MaxFileSize, "Option Bytes file too large");
+
     while(!file->atEnd()) {
-        const auto tokens = file->readLine().split(':');
+        auto line = file->readLine(MaxFileSize + 1);
+        if(line.endsWith('\n')) {
+            line.chop(1);
+        }
+        if(line.endsWith('\r')) {
+            line.chop(1);
+        }
+
+        const auto tokens = line.split(':');
         check_return_void(tokens.size() == 3, "Malformed Option Bytes file");
 
         QRegExp alphanum("[^A-Za-z0-9_]");
         QRegExp hex("[^0-9xXA-Fa-f]");
 
-        const auto &fieldName = tokens[0];
+        const auto fieldName = tokens[0] == "IWGDSTDBY" ? QByteArray("IWDGSTDBY") : tokens[0];
         const auto &hexValue = tokens[1];
+        const auto &access = tokens[2];
 
         check_return_void(alphanum.indexIn(fieldName) < 0, QString("Illegal character(s) in the field name: ") + fieldName);
         check_return_void(hex.indexIn(hexValue) < 0, QString("Illegal character(s) in the field value: ") + hexValue);
@@ -45,10 +63,31 @@ OptionBytes::OptionBytes(QIODevice *file):
         const auto value = hexValue.toUInt(&canConvert, 16);
         check_return_void(canConvert, QString("Cannot convert given register value to a number: ") + hexValue);
 
+        const auto width = fieldWidth(fieldName);
+        check_return_void(width == 32 || (value >> width) == 0, QString("Value does not fit the field: ") + fieldName);
+        check_return_void(access == "r" || access == "rw", QString("Access is not r or rw: ") + fieldName);
+        check_return_void(fieldName != "RDP" || access == "r", "RDP must be read-only");
+        check_return_void(!m_data.contains(fieldName), QString("Field named twice: ") + fieldName);
+
         m_data.insert(fieldName, value);
+
+        if(access == "r") {
+            m_readOnly.append(fieldName);
+        }
     }
 
     m_isValid = true;
+}
+
+int OptionBytes::fieldWidth(const QByteArray &fieldName)
+{
+    static const QHash<QByteArray, int> widths {
+        {"RDP", 8}, {"BOR_LEV", 3}, {"IPCCDBA", 14}, {"SFSA", 8}, {"SNBRSA", 5}, {"SBRSA", 5}, {"SBRV", 18},
+        {"PCROP1A_STRT", 9}, {"PCROP1A_END", 9}, {"PCROP1B_STRT", 9}, {"PCROP1B_END", 9},
+        {"WRP1A_STRT", 8}, {"WRP1A_END", 8}, {"WRP1B_STRT", 8}, {"WRP1B_END", 8}, {"AGC_TRIM", 3}
+    };
+
+    return widths.value(fieldName, 1);
 }
 
 OptionBytes OptionBytes::invalid()
@@ -116,15 +155,21 @@ bool OptionBytes::isValid() const
 
 QByteArray OptionBytes::data() const
 {
+    // Start from the bytes read from the device: this used to be an uninitialised buffer, so every bit no
+    // field covers (the twelve reserved words among them) was written with whatever was on the stack.
+    // Option bytes that were never read from the device (a failed read, a file) have nothing to start from:
+    // writing them would put zeros, RDP among them, into every field the map does not name.
+    check_return_val(m_raw.size() == OPTION_BYTES_SIZE, "No option bytes read from the device to change", QByteArray());
+
     OptionBytesData ds;
+    memcpy(&ds, m_raw.constData(), sizeof(ds));
 
     for(auto it = m_data.constKeyValueBegin(); it != m_data.constKeyValueEnd(); ++it) {
         const auto &fieldName = (*it).first;
         const auto value = (*it).second;
 
         if(fieldName == fieldNames()[0]) {
-            ds.word1[NORMAL].RDP = value;
-            ds.word1[COMPLEMENT].RDP = ~value;
+            // RDP (read protection) is never written: it stays what the device has
         } else if(fieldName == fieldNames()[1]) {
             ds.word1[NORMAL].BOR_LEV = value;
             ds.word1[COMPLEMENT].BOR_LEV = ~value;
@@ -242,8 +287,10 @@ void OptionBytes::setData(const QByteArray &data)
     check_return_void(m_isValid, "Unexpected data size");
 
     m_data.clear();
+    m_raw = data;
 
-    const auto ds = *((OptionBytesData*)data.data());
+    OptionBytesData ds;
+    memcpy(&ds, data.constData(), sizeof(ds));
 
     m_data.insert(fieldNames()[ 0], ds.word1[NORMAL].RDP);
     m_data.insert(fieldNames()[ 1], ds.word1[NORMAL].BOR_LEV);
@@ -295,10 +342,23 @@ uint32_t OptionBytes::value(const QByteArray &fieldName) const
     return m_data[fieldName];
 }
 
-void OptionBytes::setValue(const QByteArray &fieldName, uint32_t value)
+bool OptionBytes::setValue(const QByteArray &fieldName, uint32_t value)
 {
-    check_return_void(fieldNames().contains(fieldName), QString("Illegal field name: ") + fieldName);
+    check_return_bool(fieldNames().contains(fieldName), QString("Illegal field name: ") + fieldName);
+    check_return_bool(fieldName != "RDP", "Read protection (RDP) is never changed");
+
+    const auto width = fieldWidth(fieldName);
+    check_return_bool(width == 32 || (value >> width) == 0, QString("Value does not fit the field: ") + fieldName);
+
     m_data[fieldName] = value;
+
+    // the misspelled alias is the same bit
+    if(fieldName == "IWDGSTDBY" || fieldName == "IWGDSTDBY") {
+        m_data["IWDGSTDBY"] = value;
+        m_data["IWGDSTDBY"] = value;
+    }
+
+    return true;
 }
 
 OptionBytes::DataMap OptionBytes::compare(const OptionBytes &other) const
@@ -307,6 +367,14 @@ OptionBytes::DataMap OptionBytes::compare(const OptionBytes &other) const
 
     for(auto it = other.m_data.constKeyValueBegin(); it != other.m_data.constKeyValueEnd(); ++it) {
         const auto &fieldName = (*it).first;
+
+        // read-only fields of a file are compared by the caller, never corrected
+        if(other.m_readOnly.contains(fieldName)) {
+            if(m_data.value(fieldName) != (*it).second) {
+                error_msg(QString("Read-only option byte %1 differs from the file; not changed").arg(QString(fieldName)));
+            }
+            continue;
+        }
 
         if(m_data.contains(fieldName)) {
             const auto right = (*it).second;

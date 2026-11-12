@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod fake;
+pub mod oracle;
 
 use flipper_dfu::dfuse::crc32;
 

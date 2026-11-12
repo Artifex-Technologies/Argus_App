@@ -79,17 +79,25 @@ fn option_bytes_otp_and_short_reads() {
     let mut d = dfu(Faults::default());
     let ob = d.upload(OPTION_BYTES, 128, 1).unwrap();
     assert_eq!(ob.len(), 128);
-    assert_eq!(ob[3], 0x0C);
+    assert_eq!(ob[0], 0xAA);
     // past the end: the device answers short, and that is the end
     assert_eq!(d.upload(OPTION_BYTES, 4096, 1).unwrap().len(), 128);
     assert_eq!(d.upload(fake::OTP, 1024, 2).unwrap(), (0..1024).map(|i| i as u8).collect::<Vec<_>>());
     assert_eq!(d.partition_origin(0).unwrap(), FLASH);
     assert_eq!(d.partition_origin(1).unwrap(), OPTION_BYTES);
-    // option bytes written in place (no erase on that memory)
+    // option bytes written in place (no erase on that memory); the chip then resets, which a plain
+    // download reports as an error and download_may_reset as done
     let mut new = ob.clone();
     new[3] = 0;
-    d.download(&new, OPTION_BYTES, 1).unwrap();
-    assert_eq!(d.into_inner().option_bytes, new);
+    assert!(matches!(d.download(&new, OPTION_BYTES, 1), Err(Error::Transport { .. })));
+    let mut d = dfu(Faults::default());
+    d.download_may_reset(&new, OPTION_BYTES, 1).unwrap();
+    let fake = d.into_inner();
+    assert!(fake.left);
+    assert_eq!(fake.option_bytes, new);
+    // an error status before the reset is still an error
+    let mut d = dfu(Faults { fail_op: Some((2, fake::ERR_WRITE)), ..Faults::default() });
+    assert!(matches!(d.download_may_reset(&new, OPTION_BYTES, 1), Err(Error::Device { .. })));
 }
 
 #[test]
