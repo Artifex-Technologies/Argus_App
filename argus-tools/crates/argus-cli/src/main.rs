@@ -83,6 +83,7 @@ struct Cmd {
     target: Option<Target>,
     datastore: Option<PathBuf>,
     dfu_socket: Option<PathBuf>,
+    poll: Duration,
     timeout: Duration,
     frames: usize,
     yes: bool,
@@ -95,6 +96,7 @@ fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
         target: None,
         datastore: None,
         dfu_socket: None,
+        poll: Duration::from_millis(1000),
         timeout: Duration::from_millis(5000),
         frames: 1,
         yes: false,
@@ -114,6 +116,13 @@ fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
             }
             "--datastore" => cmd.datastore = Some(PathBuf::from(value("--datastore")?)),
             "--dfu-socket" => cmd.dfu_socket = Some(PathBuf::from(value("--dfu-socket")?)),
+            "--poll-ms" => {
+                let ms: u64 = value("--poll-ms")?.parse().map_err(|_| Usage("--poll-ms takes milliseconds".into()))?;
+                if !(10..=5000).contains(&ms) {
+                    return Err(Usage("--poll-ms must be between 10 and 5000".into()));
+                }
+                cmd.poll = Duration::from_millis(ms);
+            }
             "--yes" => cmd.yes = true,
             "--recursive" => cmd.recursive = true,
             "--frames" => {

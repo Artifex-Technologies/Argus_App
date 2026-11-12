@@ -181,3 +181,71 @@ fn device_errors_exit_1() {
     assert_eq!(r.status, 1);
     assert!(r.fake.log.iter().all(|l| !l.starts_with("OUT 1 2 ")), "nothing written over unread option bytes");
 }
+
+const OB_DATA: &[u8] = b"RDP:0xAA:r\nBOR_LEV:0x4:rw\nnBOOT0:0x1:rw\nnSWBOOT0:0x1:rw\nSFSA:0xD7:r\n";
+
+/// A repair against the fake across its resets: the socket goes away after each reset and comes
+/// back while the chip is in its bootloader.
+fn repair(faults: Faults, args: &[&str], files: &[(&str, &[u8])]) -> Run {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    let dir = tempdir();
+    let sock = dir.join("dfu.sock");
+    let stop = Arc::new(AtomicBool::new(false));
+    let (path, flag) = (sock.clone(), stop.clone());
+    let server = thread::spawn(move || dfu::serve_with_resets(FakeDfu::new(faults), &path, std::time::Duration::from_millis(20), &flag));
+    while !sock.exists() {
+        thread::sleep(std::time::Duration::from_millis(2));
+    }
+    for (name, data) in files {
+        std::fs::write(dir.join(name), data).unwrap();
+    }
+    let args: Vec<String> = args.iter().map(|a| a.replace("{dir}", dir.to_str().unwrap())).collect();
+    let out = Command::new(BIN).arg("--dfu-socket").arg(&sock).args(["--poll-ms", "10"]).args(&args).output().unwrap();
+    stop.store(true, Ordering::SeqCst);
+    let fake = server.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let json = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("not one JSON object ({e}): {stdout}"));
+    Run { status: out.status.code().unwrap(), json, fake }
+}
+
+#[test]
+fn full_repair_across_resets() {
+    let fw: Vec<u8> = (0..9000).map(|i| (i * 13) as u8).collect();
+    let radio = vec![0x5A; 3 * 4096 + 5];
+    let files: [(&str, &[u8]); 3] = [("fw.dfu", &firmware(&fw)), ("ob.data", OB_DATA), ("radio.bin", &radio)];
+    let args = ["recovery", "repair", "{dir}/fw.dfu", "{dir}/ob.data", "{dir}/radio.bin", "--yes"];
+
+    // the wireless stack running, as on a Flipper in normal use
+    let r = repair(Faults { fus_model: true, fus: Some([0xFF, 0xFE]), ..Faults::default() }, &args, &files);
+    assert_eq!(r.status, 0, "{}", r.json);
+    assert_eq!(r.json["radio"]["installed"], true, "{}", r.json);
+    assert_eq!(r.json["option_bytes_written"], true);
+    assert_eq!(r.json["fixed"]["nBOOT0"], 1);
+    let f = &r.fake;
+    assert_eq!(&f.flash[..fw.len()], &fw[..]);
+    assert_eq!(&f.flash[0xD_3000..0xD_3000 + radio.len()], &radio[..]);
+    assert_eq!(f.fus_commands, [0x52, 0x53]);
+    assert!(f.booted_firmware, "the chip boots its firmware at the end");
+    // boot mode, FUS start, upgrade, option bytes
+    assert_eq!(f.resets, 4);
+    let ob = OptionBytes::from_bytes(&f.option_bytes).unwrap();
+    assert_eq!((ob.value("nBOOT0").unwrap(), ob.value("nSWBOOT0").unwrap(), ob.value("RDP").unwrap()), (1, 1, 0xAA));
+
+    // a FUS stuck in a state the flow does not know: the wireless stack step fails, the repair goes on
+    let r = repair(Faults { fus_model: true, fus: Some([0x30, 0x02]), ..Faults::default() }, &args, &files);
+    assert_eq!(r.status, 0, "{}", r.json);
+    assert_eq!(r.json["radio"]["installed"], false);
+    assert!(r.json["radio"]["error"].as_str().unwrap().contains("FUS"), "{}", r.json);
+    assert_eq!(&r.fake.flash[..fw.len()], &fw[..]);
+    assert!(r.fake.booted_firmware);
+
+    // without a radio image; and nothing at all without --yes
+    let r = repair(Faults::default(), &args[..4].iter().copied().chain(["--yes"]).collect::<Vec<_>>(), &files);
+    assert_eq!(r.status, 0, "{}", r.json);
+    assert!(r.json["radio"].is_null());
+    let r = repair(Faults::default(), &args[..5], &files);
+    assert_eq!(r.status, 2);
+    assert!(r.fake.log.is_empty());
+}

@@ -55,6 +55,12 @@ pub struct Faults {
     pub table_address: Option<u32>,
     /// The option bytes as the device holds them (default: Flipper's ob.data).
     pub option_bytes: Option<Vec<u8>>,
+    /// The FUS as AN5185 describes it: a second state read while the wireless stack runs starts the
+    /// FUS (the chip resets), delete and upgrade report "service ongoing" / "upgrade ongoing" for two
+    /// reads, the upgrade ends with a reset into the new wireless stack, and the start command resets
+    /// into it. A reset brings the chip back in the bootloader when nBOOT0 is 0, else it boots its
+    /// firmware (`booted_firmware`) and the bootloader is gone.
+    pub fus_model: bool,
 }
 
 pub const FUS_STATUS: u32 = 0xFFFF_0054;
@@ -132,6 +138,13 @@ pub struct FakeDfu {
     pub erased_pages: Vec<u32>,
     pub fus_commands: Vec<u8>,
     pub left: bool,
+    /// Resets so far, and whether the last one booted the firmware.
+    pub resets: usize,
+    pub booted_firmware: bool,
+    reset_pending: bool,
+    not_running_reads: usize,
+    fus_countdown: usize,
+    fus_after: Option<([u8; 2], bool)>,
     alt: u8,
     state: u8,
     status: u8,
@@ -175,6 +188,12 @@ impl FakeDfu {
             erased_pages: Vec::new(),
             fus_commands: Vec::new(),
             left: false,
+            resets: 0,
+            booted_firmware: false,
+            reset_pending: false,
+            not_running_reads: 0,
+            fus_countdown: 0,
+            fus_after: None,
             alt: 0,
             state,
             status,
@@ -184,6 +203,50 @@ impl FakeDfu {
             ops: 0,
             faults,
         }
+    }
+
+    /// The chip resets: it leaves USB, and comes back in the bootloader only when nBOOT0 is 0.
+    fn reset(&mut self) {
+        self.left = true;
+        self.reset_pending = false;
+        self.resets += 1;
+        self.state = state::DFU_IDLE;
+        self.status = 0;
+        self.alt = 0;
+        self.pending = None;
+        // nBOOT0 is bit 27 of the first option word
+        self.booted_firmware = self.option_bytes[3] & 0x08 != 0;
+    }
+
+    /// A FUS state read, with the FUS model's transitions.
+    fn fus_read(&mut self) {
+        if self.fus == [0xFF, 0xFE] {
+            self.not_running_reads += 1;
+            if self.not_running_reads == 2 {
+                // the second read starts the FUS: the chip resets into it
+                self.not_running_reads = 0;
+                self.fus = vec![0, 0];
+                self.reset_pending = true;
+            }
+            return;
+        }
+        if self.fus_countdown > 0 {
+            self.fus_countdown -= 1;
+            if self.fus_countdown == 0 {
+                if let Some((after, reset)) = self.fus_after.take() {
+                    self.fus = after.to_vec();
+                    if reset {
+                        self.set_wireless_version([1, 17, 3]);
+                        self.reset_pending = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn set_wireless_version(&mut self, v: [u8; 3]) {
+        // the FUS information table at SRAM2A + 0x100: wireless stack version at bytes 20..24
+        self.sram[0x100 + 20..0x100 + 24].copy_from_slice(&[0, v[2], v[1], v[0]]);
     }
 
     fn strings(&self) -> Vec<Vec<u8>> {
@@ -260,6 +323,25 @@ impl FakeDfu {
                 }
                 [c @ (command::FUS_FW_DELETE | command::FUS_FW_UPGRADE | command::FUS_START_WS)] => {
                     self.fus_commands.push(*c);
+                    if self.faults.fus_model {
+                        match *c {
+                            command::FUS_FW_DELETE => {
+                                self.fus = vec![0x30, 0];
+                                self.fus_countdown = 2;
+                                self.fus_after = Some(([0, 0], false));
+                                self.set_wireless_version([0, 0, 0]);
+                            }
+                            command::FUS_FW_UPGRADE => {
+                                self.fus = vec![0x10, 0];
+                                self.fus_countdown = 2;
+                                self.fus_after = Some(([0xFF, 0xFE], true));
+                            }
+                            _ => {
+                                self.fus = vec![0xFF, 0xFE];
+                                self.reset_pending = true;
+                            }
+                        }
+                    }
                     0
                 }
                 _ => ERR_TARGET,
@@ -300,6 +382,9 @@ impl Transport for FakeDfu {
 
     fn control_out(&mut self, req: u8, value: u16, data: &[u8]) -> Result<usize, TransportError> {
         self.log.push(format!("OUT {req} {value} {}", hex(data)));
+        if self.reset_pending {
+            self.reset();
+        }
         if self.left {
             return Err(TransportError("device gone".into()));
         }
@@ -339,6 +424,9 @@ impl Transport for FakeDfu {
 
     fn control_in(&mut self, req: u8, value: u16, length: u16) -> Result<Vec<u8>, TransportError> {
         self.log.push(format!("IN {req} {value} {length}"));
+        if self.reset_pending {
+            self.reset();
+        }
         if self.left {
             return Err(TransportError("device gone".into()));
         }
@@ -356,7 +444,7 @@ impl Transport for FakeDfu {
                             let status = self.execute(block, &data);
                             if status == 0 && self.alt == 1 && block >= 2 {
                                 // the option bytes are reloaded: the chip resets and leaves USB
-                                self.left = true;
+                                self.reset();
                                 return Err(TransportError("device reset".into()));
                             }
                             if status != 0 {
@@ -370,8 +458,8 @@ impl Transport for FakeDfu {
                         }
                     }
                     state::MANIFEST_SYNC => {
-                        // the bootloader resets into the firmware: the device is gone
-                        self.left = true;
+                        // the bootloader leaves: the chip resets
+                        self.reset();
                         return Err(TransportError("device gone".into()));
                     }
                     _ => {}
@@ -399,6 +487,9 @@ impl Transport for FakeDfu {
                 let Some((mem, off)) = self.region(address, 0) else { return Err(self.stall()) };
                 let n = usize::from(length).min(mem.len() - off);
                 let out = mem[off..off + n].to_vec();
+                if self.faults.fus_model && self.alt == 0 && address == FUS_STATUS {
+                    self.fus_read();
+                }
                 self.state = if n < usize::from(length) { state::DFU_IDLE } else { state::UPLOAD_IDLE };
                 Ok(out)
             }
@@ -475,6 +566,55 @@ pub fn serve(mut f: FakeDfu, stream: std::os::unix::net::UnixStream) -> FakeDfu 
                 break;
             }
         }
+        if f.left {
+            // the chip reset: it is off the bus
+            break;
+        }
     }
+    f
+}
+
+/// Serves the fake on a socket at `path` across resets, as a chip that leaves USB and comes back:
+/// every connection is one session; after a reset the socket goes away for `gap` and comes back if
+/// the chip is in its bootloader again, and stays away once it has booted its firmware. Runs until
+/// `stop` is set; returns the fake.
+pub fn serve_with_resets(
+    mut f: FakeDfu,
+    path: &std::path::Path,
+    gap: std::time::Duration,
+    stop: &std::sync::atomic::AtomicBool,
+) -> FakeDfu {
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::Ordering;
+    let bind = || {
+        let _ = std::fs::remove_file(path);
+        let l = UnixListener::bind(path).expect("bind the fake bootloader's socket");
+        l.set_nonblocking(true).expect("non-blocking listener");
+        l
+    };
+    let mut listener = Some(bind());
+    while !stop.load(Ordering::SeqCst) {
+        let Some(l) = &listener else {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            continue;
+        };
+        match l.accept() {
+            Ok((s, _)) => {
+                let _ = s.set_nonblocking(false);
+                f = serve(f, s);
+                if f.left {
+                    drop(listener.take());
+                    let _ = std::fs::remove_file(path);
+                    if !f.booted_firmware {
+                        std::thread::sleep(gap);
+                        f.left = false;
+                        listener = Some(bind());
+                    }
+                }
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(2)),
+        }
+    }
+    let _ = std::fs::remove_file(path);
     f
 }

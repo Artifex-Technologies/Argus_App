@@ -18,6 +18,10 @@ using namespace Zero;
 static constexpr int INSTALL_TRY_COUNT = 3;
 static constexpr int CHECK_TRY_COUNT = 3;
 static constexpr int TIMER_INTERVAL_MS = 1000;
+// The FUS status polls while it deletes or installs: they used to go on for ever while the FUS reported a
+// state the flow does not know (the device stays online, so the operation timeout never started). The same
+// bound as the Rust port (flipper_dfu::recovery::MAX_STATUS_POLLS).
+static constexpr int MAX_STATUS_POLLS = 120;
 
 WirelessStackDownloadOperation::WirelessStackDownloadOperation(Recovery *recovery, QIODevice *file, uint32_t targetAddress, QObject *parent):
     AbstractRecoveryOperation(recovery, parent),
@@ -108,6 +112,7 @@ void WirelessStackDownloadOperation::deleteWirelessStack()
     if(!recovery()->deleteWirelessStack()) {
         finishWithError(BackendError::RecoveryError, recovery()->errorString());
     } else {
+        m_statusPolls = 0;
         m_loopTimer->start();
     }
 }
@@ -119,6 +124,10 @@ bool WirelessStackDownloadOperation::isWirelessStackDeleted()
     const auto waitNext = (status == Recovery::WirelessStatus::Invalid) ||
                           (status == Recovery::WirelessStatus::UnhandledState);
     if(waitNext) {
+        if(++m_statusPolls >= MAX_STATUS_POLLS) {
+            m_loopTimer->stop();
+            finishWithError(BackendError::RecoveryError, QStringLiteral("The Firmware Upgrade Service did not finish in time."));
+        }
         return false;
     }
 
@@ -158,6 +167,7 @@ void WirelessStackDownloadOperation::upgradeWirelessStack()
     if(!recovery()->upgradeWirelessStack()) {
         finishWithError(BackendError::RecoveryError, recovery()->errorString());
     } else {
+        m_statusPolls = 0;
         m_loopTimer->start();
     }
 }
@@ -169,6 +179,10 @@ bool WirelessStackDownloadOperation::isWirelessStackUpgraded()
     const auto waitNext = (status == Recovery::WirelessStatus::Invalid) ||
                           (status == Recovery::WirelessStatus::UnhandledState);
     if(waitNext) {
+        if(++m_statusPolls >= MAX_STATUS_POLLS) {
+            m_loopTimer->stop();
+            finishWithError(BackendError::RecoveryError, QStringLiteral("The Firmware Upgrade Service did not finish in time."));
+        }
         return false;
     }
 

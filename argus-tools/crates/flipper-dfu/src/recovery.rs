@@ -189,3 +189,140 @@ pub fn download_option_bytes<T: Transport>(d: &mut Dfu<T>, file: &[u8]) -> Resul
     d.set_option_bytes(&ob, &actual)?;
     Ok(OptionBytesOutcome::Written { fixed, differ })
 }
+
+/// How the multi-step flows reach the chip across its resets: each step opens the bootloader
+/// again, waiting (bounded) for it to come back, as the C++ operations wait for the device to
+/// re-enumerate.
+pub trait Bootloader {
+    type T: Transport;
+    /// The bootloader, once it answers; an error once the wait is over.
+    fn open(&mut self) -> Result<Dfu<Self::T>, Error>;
+    /// Waits between status polls.
+    fn pause(&mut self);
+}
+
+/// `WirelessStackDownloadOperation`'s bounds: whole installs, checks after one, and status polls
+/// while the FUS deletes or installs (the C++ loops polled for ever while the FUS reported a state
+/// it does not expect; both now give up).
+pub const INSTALL_TRIES: usize = 3;
+pub const CHECK_TRIES: usize = 3;
+pub const MAX_STATUS_POLLS: usize = 120;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlowError {
+    Step {
+        step: &'static str,
+        error: Error,
+    },
+    /// The FUS reported an error, or the wireless stack still running after a delete.
+    Fus {
+        step: &'static str,
+        status: WirelessStatus,
+    },
+    /// The FUS never settled within [`MAX_STATUS_POLLS`] polls.
+    FusTimeout {
+        step: &'static str,
+    },
+    GaveUp,
+}
+
+impl fmt::Display for FlowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FlowError::Step { step, error } => write!(f, "{step}: {error}"),
+            FlowError::Fus { step, status } => write!(f, "{step}: the FUS reports {status:?}"),
+            FlowError::FusTimeout { step } => write!(f, "{step}: the FUS did not finish within {MAX_STATUS_POLLS} polls"),
+            FlowError::GaveUp => write!(f, "could not install the wireless stack after {INSTALL_TRIES} tries"),
+        }
+    }
+}
+
+impl std::error::Error for FlowError {}
+
+fn step<B: Bootloader, R>(b: &mut B, name: &'static str, f: impl FnOnce(&mut Dfu<B::T>) -> Result<R, Error>) -> Result<R, FlowError> {
+    let mut d = b.open().map_err(|error| FlowError::Step { step: name, error })?;
+    f(&mut d).map_err(|error| FlowError::Step { step: name, error })
+}
+
+/// Polls the wireless status until `settled` says it is done (Ok(true)) or failed (Err). A status
+/// that cannot be read (the chip is resetting) or that the flow does not know means "wait".
+fn poll_fus<B: Bootloader>(
+    b: &mut B,
+    name: &'static str,
+    settled: impl Fn(WirelessStatus) -> Result<bool, WirelessStatus>,
+) -> Result<(), FlowError> {
+    for _ in 0..MAX_STATUS_POLLS {
+        b.pause();
+        let Ok(mut d) = b.open() else { continue };
+        let Ok(status) = wireless_status(&mut d) else { continue };
+        match settled(status) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(status) => return Err(FlowError::Fus { step: name, status }),
+        }
+    }
+    Err(FlowError::FusTimeout { step: name })
+}
+
+/// `WirelessStackDownloadOperation`: start the FUS, delete the wireless stack, write the image
+/// below SFSA, have the FUS install it, and check its version; the whole install up to
+/// [`INSTALL_TRIES`] times.
+pub fn install_wireless_stack<B: Bootloader>(b: &mut B, image: &[u8]) -> Result<(), FlowError> {
+    for _ in 0..INSTALL_TRIES {
+        step(b, "start the FUS", start_fus)?;
+        step(b, "delete the wireless stack", delete_wireless_stack)?;
+        poll_fus(b, "delete the wireless stack", |s| match s {
+            WirelessStatus::FusRunning => Ok(true),
+            WirelessStatus::WirelessStackRunning | WirelessStatus::ErrorOccurred => Err(s),
+            WirelessStatus::Unhandled => Ok(false),
+        })?;
+        step(b, "write the wireless stack", |d| download_wireless_stack(d, image, None).map(|_| ()))?;
+        step(b, "install the wireless stack", upgrade_wireless_stack)?;
+        poll_fus(b, "install the wireless stack", |s| match s {
+            WirelessStatus::ErrorOccurred => Err(s),
+            WirelessStatus::Unhandled => Ok(false),
+            _ => Ok(true),
+        })?;
+        for _ in 0..CHECK_TRIES {
+            b.pause();
+            if let Ok(mut d) = b.open() {
+                if check_wireless_stack(&mut d).unwrap_or(false) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Err(FlowError::GaveUp)
+}
+
+/// What a repair did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairReport {
+    /// The wireless stack step's error; the repair goes on without it, as the C++ app does.
+    pub radio_error: Option<String>,
+    pub option_bytes: OptionBytesOutcome,
+}
+
+/// `FullRepairOperation`'s steps on the bootloader, with local files instead of the update server's:
+/// recovery boot mode, the wireless stack (if given; a failure there does not stop the repair),
+/// the firmware, then the option bytes from the file, after which the chip boots its firmware. The
+/// steps after that (assets, region data, a restart) run on the firmware over RPC and are not here.
+pub fn full_repair<B: Bootloader>(
+    b: &mut B,
+    firmware: &[u8],
+    radio: Option<&[u8]>,
+    option_bytes: &[u8],
+) -> Result<RepairReport, FlowError> {
+    // checked before anything changes
+    let fw = dfuse::parse(firmware).map_err(|e| FlowError::Step { step: "read the firmware", error: Error::File(e) })?;
+    OptionBytesFile::parse(option_bytes)
+        .map_err(|e| FlowError::Step { step: "read the option bytes file", error: Error::OptionBytesFile(e) })?;
+    step(b, "set the recovery boot mode", |d| set_boot_mode(d, false))?;
+    let radio_error = match radio {
+        Some(image) => install_wireless_stack(b, image).err().map(|e| e.to_string()),
+        None => None,
+    };
+    step(b, "write the firmware", |d| Ok(d.download_file(&fw)?))?;
+    let option_bytes = step(b, "correct the option bytes", |d| download_option_bytes(d, option_bytes))?;
+    Ok(RepairReport { radio_error, option_bytes })
+}

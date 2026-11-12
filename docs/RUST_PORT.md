@@ -321,6 +321,19 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   so `tests/recovery.rs` (5 tests) runs the binary against it: nothing changes without `--yes`, bad files never reach
   the device, `info` writes nothing, every command's effect on the fake, device errors exit 1. A USB transport for
   the CLI (the `usb` feature's `flipper_dfu::usb`) is deliberately not wired in.
+- The full repair (2026-11-12): `flipper_dfu::recovery::full_repair` and `install_wireless_stack` follow
+  `FullRepairOperation` and `WirelessStackDownloadOperation` with local files instead of the update server's:
+  recovery boot mode, the wireless stack (start the FUS, delete, poll, write below SFSA, install, poll, check its
+  version; up to 3 installs and 3 checks; a failure there does not stop the repair, as in the C++ app), the
+  firmware, the option bytes from the file, after which the chip boots its firmware. Every step opens the bootloader
+  again through a `Bootloader` (waits at most 30 s for it to come back after a reset, as the C++ operations' timeout);
+  FUS polls are bounded. `argus-cli --dfu-socket PATH recovery repair FIRMWARE.dfu OB.data [RADIO.bin] --yes`
+  (`--poll-ms`, default 1000). The fake has a FUS model (AN5185: a second state read starts the FUS, delete and
+  install report "ongoing" before they finish, resets) and `serve_with_resets` (the socket goes away at a reset and
+  comes back while the chip is in its bootloader). `tests/recovery.rs`: a whole repair across four resets, a FUS stuck
+  in an unknown state (the repair goes on without the wireless stack), no radio image, nothing without `--yes`. The
+  steps that follow on the firmware over RPC (assets, region data, a restart) are not part of it yet: assets and region
+  come from Flipper's server (phase 7).
 - The STM32WB55 and recovery (2026-11-12): `flipper_dfu::wb55` (option bytes as their raw 128 bytes, changed field by
   field with complements; RDP never written; Flipper's `ob.data` format with its access column; FUS state; version
   table; OTP) and `flipper_dfu::recovery` (exit, boot mode, wireless status, start FUS, FUS delete/upgrade/start,
@@ -500,6 +513,14 @@ has cases for each:
 - **The wireless stack's address could wrap around.** `origin + 4 KiB x SFSA - size` in 32 bits: an image larger than
   the room below SFSA gave an address near 4 GiB. It now has to fit between the start of the flash and SFSA.
 
+Found while porting the full repair, and **fixed in both versions** on 2026-11-12:
+
+- **The FUS polls could run for ever.** `WirelessStackDownloadOperation` polled the wireless status every second
+  while the FUS deleted or installed the stack, until it reported a state the flow knows; a FUS stuck in another state
+  (or a device that answered, but not with that) kept it polling, and with the device online the operation's timeout
+  never started. Both now give up after 120 polls. (Rust: `tests/recovery.rs`; the C++ change is not covered by a
+  comparison yet, see Resume here.)
+
 A regression of my own, caught by porting the capture sync: once `GetFileTreeOperation` left unsafe names out,
 the C++ capture pull stopped counting them as failed (as `stagedPath` used to). `CaptureSync` now counts every
 refused name as failed again, and the Rust pull does the same.
@@ -530,10 +551,19 @@ failed, and does not read `devinfo` or start the screen.
 3. Phase 6 (DFU and recovery): the DfuSe parser, the memory layout and the DfuSe protocol are done and match the C++
    ones (`crates/flipper-dfu`; the nusb transport behind the `usb` feature, unused by tests and by any command).
    The STM32WB55 layer, `recovery.cpp`'s flows and `argus-cli recovery` (behind `--yes`, `--dfu-socket` only) are done
-   too. Left for phase 6: the C++ app's multi-step operations around recovery (`backend/flipperzero/recovery/*`
-   operations, the full repair and the legacy update in `toplevel/`, which wait for the device to re-enumerate) as one
-   `argus-cli recovery repair`, and wiring `flipper_dfu::usb` into argus-cli. That last step opens a real USB device:
-   only when I say so, with me watching, and never from a test. No flashing in tests, and none on my device until I
-   say so.
+   too, and the full repair (`argus-cli recovery repair`, fake only). Left for phase 6:
+   - **Compare the repair with the C++ app on the fakes.** The C++ `FullRepairOperation` needs the whole backend, so it
+     needs test hooks (`backend/testhooks.h`, unset = no change): `ARGUS_TEST_DFU_SOCKET` in
+     `dfu/libusb/usbdevice.cpp` (the line protocol over a Unix socket instead of libusb); the registry polling a state
+     file the harness writes (`dfu`, `serial`, `none`) instead of USB hot-plug, so resets look like re-enumeration;
+     OTP in the fake holding a valid `FactoryInfo` (the DFU device must carry the serial device's name to be "the same
+     device back online"); `FirmwareHelper` reading a local folder (`ARGUS_TEST_FIRMWARE_DIR`) instead of the update
+     server; and the RPC fake on its pseudo-terminal for the steps after the firmware boots (assets, region, restart).
+     The legacy update (`LegacyUpdateOperation`) also backs up `/int` first and restores it after: the same hooks
+     cover it.
+   - The steps on the firmware after a repair (assets from the bundle, region data, restart) in Rust.
+   - Wiring `flipper_dfu::usb` into argus-cli opens a real USB device: only when I say so, with me watching, and
+     never from a test.
+   No flashing in tests, and none on my device until I say so.
 4. For the UI phase: the screen stream is there (`flipper_rpc::screen`); buttons (`GuiSendInputRequest`) and the
    virtual display come with it.

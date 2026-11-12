@@ -152,6 +152,14 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — `argus-cli recovery repair` (the full repair with local files, fake only)
+- `argus-cli --dfu-socket PATH recovery repair FIRMWARE.dfu OB.data [RADIO.bin] --yes`: recovery boot mode, the
+  wireless stack through the FUS (delete, write below SFSA, install, version check; bounded retries), the firmware,
+  the option bytes; waits (at most 30 s) for the chip after every reset. Tested against the fake bootloader across its
+  resets; not yet compared with the C++ `FullRepairOperation` (needs backend test hooks; plan in docs/RUST_PORT.md).
+- **Fixed in both:** the FUS status polls during delete and install could run for ever; now 120 at most.
+- No USB in argus-cli; nothing flashed; no device opened.
+
 ### 2026-11-12 — `argus-cli recovery` (DFU bootloader commands, behind `--yes`, fake only)
 - `argus-cli --dfu-socket PATH recovery info | exit | boot normal|dfu | firmware F.dfu | radio F.bin | fus ... |
   option-bytes F`; everything but `info` needs `--yes`, files are checked before anything is opened. The only transport

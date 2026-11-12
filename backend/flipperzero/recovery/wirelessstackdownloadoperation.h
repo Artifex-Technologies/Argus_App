@@ -43,6 +43,7 @@ private:
     QTimer *m_loopTimer;
     uint32_t m_targetAddress;
     int m_installTryCount;
+    int m_statusPolls = 0;
     int m_checkTryCount;
 };
 
