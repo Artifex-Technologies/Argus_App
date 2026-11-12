@@ -20,7 +20,10 @@ use flipper_dfu::recovery::{self, Bootloader, OptionBytesOutcome, WirelessStatus
 use flipper_dfu::wb55::{OptionBytesFile, Wb55};
 use flipper_dfu::{dfuse, wb55};
 
-use super::{fail, print, Cmd};
+use flipper_rpc::assets::{self, Bundle};
+use flipper_rpc::session::{RpcError, Session};
+
+use super::{fail, open, print, Cmd, GONE_WAIT};
 
 const USAGE: &str = "argus-cli --dfu-socket PATH recovery COMMAND (the DFU bootloader; JSON on stdout)
 
@@ -36,15 +39,22 @@ const USAGE: &str = "argus-cli --dfu-socket PATH recovery COMMAND (the DFU bootl
                            install the image written by radio, start the wireless stack
   option-bytes FILE        correct the option bytes from a file like Flipper's ob.data:
                            only its rw fields are written, RDP never
-  repair FIRMWARE.dfu OB.data [RADIO.bin]
+  repair FIRMWARE.dfu OB.data [RADIO.bin] [--resources RESOURCES.tgz --port DEVICE]
                            the C++ app's full repair with local files: recovery boot mode,
                            the wireless stack (FUS: delete, write, install, check; a failure
                            there does not stop the repair), the firmware, the option bytes;
                            the chip then boots its firmware. Waits for the chip after each
-                           reset (at most 30 s), polls the FUS every --poll-ms (1000)
+                           reset (at most 30 s), polls the FUS every --poll-ms (1000).
+                           With --resources: then, on the firmware at --port, what finish does
+  finish RESOURCES.tgz     on the firmware at --port (no --dfu-socket): the C++ app's steps
+                           after a repair or update: the resources onto /ext (compared with
+                           /ext/Manifest; only what changed is removed and written), region
+                           data (the development region needs none; any other is refused,
+                           as its data comes from Flipper's server), and a restart
 
   --dfu-socket PATH        a Unix socket to a DFU bootloader (tests use the fake); USB
-                           recovery is not built into argus-cli";
+                           recovery is not built into argus-cli
+  --port DEVICE            the Flipper's serial port once its firmware runs (never guessed)";
 
 /// The largest wireless stack image: the whole flash.
 const MAX_RADIO: u64 = 1 << 20;
@@ -74,6 +84,7 @@ enum Plan {
     Fus(&'static str),
     OptionBytes(Vec<u8>),
     Repair { firmware: Vec<u8>, option_bytes: Vec<u8>, radio: Option<Vec<u8>> },
+    Finish,
 }
 
 fn plan(words: &[&str]) -> Result<Plan, (String, String, u8)> {
@@ -123,6 +134,7 @@ fn plan(words: &[&str]) -> Result<Plan, (String, String, u8)> {
             };
             Plan::Repair { firmware, option_bytes, radio }
         }
+        ["finish", _] => Plan::Finish,
         [] | ["help"] => return Err(usage("recovery needs a command")),
         _ => return Err(usage(&format!("unknown recovery command: {}", words.join(" ")))),
     })
@@ -224,7 +236,7 @@ fn execute(d: &mut Device, plan: Plan) -> Result<Value, String> {
             .map_err(|x| e(&x))?;
             json!({"ok": true, "command": "recovery fus", "step": step})
         }
-        Plan::Repair { .. } => unreachable!("run by repair()"),
+        Plan::Repair { .. } | Plan::Finish => unreachable!("run by run()"),
         Plan::OptionBytes(data) => match recovery::download_option_bytes(d, &data).map_err(|x| e(&x))? {
             OptionBytesOutcome::Left { differ } => {
                 json!({"ok": true, "command": "recovery option-bytes", "written": false, "read_only_differ": fields(&differ)})
@@ -243,6 +255,19 @@ pub fn run(cmd: &Cmd) -> ExitCode {
         Ok(p) => p,
         Err((code, m, status)) => return fail(&code, m, status),
     };
+    // the resources (for finish, or a repair that goes on to the firmware) are checked before anything opens
+    let bundle = match (&plan, &cmd.resources) {
+        (Plan::Finish, Some(_)) => return fail("usage", "finish takes RESOURCES.tgz as its argument, not --resources".into(), 2),
+        (Plan::Finish, None) => Some(read_bundle(Path::new(&words[1]))),
+        (Plan::Repair { .. }, Some(r)) => Some(read_bundle(r)),
+        (_, Some(_)) => return fail("usage", "--resources goes with recovery repair".into(), 2),
+        (_, None) => None,
+    };
+    let bundle = match bundle {
+        Some(Ok(b)) => Some(b),
+        Some(Err(m)) => return fail("file", m, 1),
+        None => None,
+    };
     if !matches!(plan, Plan::Info) && !cmd.yes {
         let what = words.join(" ");
         print(json!({
@@ -250,6 +275,18 @@ pub fn run(cmd: &Cmd) -> ExitCode {
             "error": {"code": "confirm", "message": format!("recovery {what} changes the device; run again with --yes")},
         }));
         return ExitCode::from(2);
+    }
+    if bundle.is_some() && cmd.target.is_none() {
+        return fail("usage", "the steps on the firmware need --port DEVICE (the Flipper once its firmware runs)".into(), 2);
+    }
+    if let (Plan::Finish, Some(b)) = (&plan, &bundle) {
+        return match finish(cmd, b) {
+            Ok(v) => {
+                print(json!({"ok": true, "command": "recovery finish", "firmware": v}));
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(e.code(), e.to_string(), 1),
+        };
     }
     let Some(path) = &cmd.dfu_socket else {
         return fail("usage", "recovery needs --dfu-socket PATH; USB recovery is not built into argus-cli".into(), 2);
@@ -262,11 +299,24 @@ pub fn run(cmd: &Cmd) -> ExitCode {
                     OptionBytesOutcome::Left { differ } => (false, Vec::new(), differ),
                     OptionBytesOutcome::Written { fixed, differ } => (true, fixed, differ),
                 };
-                print(json!({
+                let mut out = json!({
                     "ok": true, "command": "recovery repair", "firmware_bytes": firmware.len(),
                     "radio": radio.as_ref().map(|image| json!({"bytes": image.len(), "installed": r.radio_error.is_none(), "error": r.radio_error})),
                     "option_bytes_written": written, "fixed": fields(&fixed), "read_only_differ": fields(&differ),
-                }));
+                });
+                if let Some(b) = &bundle {
+                    match finish(cmd, b) {
+                        Ok(v) => out["firmware"] = v,
+                        Err(e) => {
+                            // the bootloader part is done; say so with the failure
+                            out["ok"] = json!(false);
+                            out["error"] = json!({"code": e.code(), "message": format!("after the repair, on the firmware: {e}")});
+                            print(out);
+                            return ExitCode::from(1);
+                        }
+                    }
+                }
+                print(out);
                 ExitCode::SUCCESS
             }
             Err(e) => fail("device", e.to_string(), 1),
@@ -283,4 +333,36 @@ pub fn run(cmd: &Cmd) -> ExitCode {
         }
         Err(m) => fail("device", m, 1),
     }
+}
+
+/// The largest resources bundle read (Flipper's is about 10 MiB).
+const MAX_BUNDLE: u64 = 64 << 20;
+
+fn read_bundle(path: &Path) -> Result<Bundle, String> {
+    let data = read_limited(&path.to_string_lossy(), MAX_BUNDLE)?;
+    assets::read_bundle(&data[..], &assets::BundleLimits::default()).map_err(|e| format!("{}: {}", path.display(), e.0))
+}
+
+/// The steps on the firmware: waits (at most 30 s, as for the bootloader) until the Flipper answers on
+/// `--port`, reads its region, installs the resources, and restarts it.
+fn finish(cmd: &Cmd, bundle: &Bundle) -> Result<Value, RpcError> {
+    let target = cmd.target.as_ref().expect("checked by run()");
+    let deadline = Instant::now() + REENUMERATION;
+    let mut s = loop {
+        match open(target, cmd.timeout).and_then(|io| Session::start(io, cmd.timeout)) {
+            Ok(s) => break s,
+            Err(e) if Instant::now() >= deadline => return Err(e),
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
+    let devinfo = s.property_get("devinfo")?;
+    let region = assets::builtin_region(&devinfo).ok_or_else(|| RpcError::Unexpected("devinfo has no hardware.region.builtin".into()))?;
+    let r = s.finish_install(bundle, region)?;
+    let gone = s.wait_until_gone(GONE_WAIT);
+    Ok(json!({
+        "region": region, "region_data": "not needed (development region)",
+        "assets": {"card": r.card, "device_manifest": r.device_manifest, "removed": r.removed, "dirs_made": r.dirs_made,
+                   "files_written": r.files_written, "bytes": r.bytes},
+        "restarted": true, "gone": gone,
+    }))
 }

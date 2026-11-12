@@ -33,6 +33,7 @@ private:
     bool parseVersion(const QStringList &tokens);
     bool parseTime(const QStringList &tokens);
     bool parseFile(const QStringList &tokens);
+    bool isAcceptablePath(const QString &path) const;
     bool parseDirectory(const QStringList &tokens);
 
     int m_version;

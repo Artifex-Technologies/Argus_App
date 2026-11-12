@@ -3,6 +3,7 @@
 #include <QFile>
 #include <QDebug>
 #include <QBuffer>
+#include <QCryptographicHash>
 #include <QFileInfo>
 #include <QLoggingCategory>
 
@@ -149,6 +150,31 @@ void AssetsDownloadOperation::readLocalManifest()
     m_localManifest = AssetManifest(text);
     if(m_localManifest.isError()) {
         return finishWithError(m_localManifest.error(), m_localManifest.errorString());
+    }
+
+    // Every file the manifest names must be in the bundle as the manifest describes it. A missing one used to be
+    // written as an empty file (and a different one as it was) under the manifest's size and MD5, after the
+    // device's files had been removed. Now the bundle is refused before anything changes.
+    const auto items = m_localManifest.tree()->toPreOrderList();
+    for(const auto &item : items) {
+        if(item.type != FileNode::Type::RegularFile) {
+            continue;
+        }
+
+        const auto resourcePath = QStringLiteral("resources/") + item.absolutePath;
+        const auto *node = m_archive->file(resourcePath);
+
+        if(!node || (node->type() != FileNode::Type::RegularFile)) {
+            return finishWithError(BackendError::DataError, QStringLiteral("The bundle lacks %1, which its manifest names").arg(item.absolutePath));
+        }
+
+        const auto expected = item.userData.value<AssetManifest::FileInfo>();
+        const auto data = m_archive->fileData(resourcePath);
+        const auto md5 = QCryptographicHash::hash(data, QCryptographicHash::Md5).toHex();
+
+        if((data.size() != expected.size) || (md5 != expected.md5.toLower())) {
+            return finishWithError(BackendError::DataError, QStringLiteral("%1 differs from the manifest (size or MD5)").arg(item.absolutePath));
+        }
     }
 
     advanceOperationState();

@@ -86,7 +86,9 @@ Protocol and device logic first, with the CLI as the proof surface; the UI last.
    test uses. Then the STM32WB55 layer (`flipper_dfu::wb55`: option bytes, FUS, device information table, OTP) and
    `recovery.cpp`'s flows (`flipper_dfu::recovery`), compared with the C++ `STM32WB55` on the same fake; both fixed.
    `argus-cli recovery ...` (behind `--yes`) reaches a bootloader only through `--dfu-socket`, tested against the
-   fake; it has no USB transport.*
+   fake; it has no USB transport. The full repair, with the steps on the firmware after it (resources, restart), is
+   compared with the C++ `FullRepairOperation` across the chip's resets (`compare-repair.sh`); the resources install
+   fixed in both.*
 7. **Update registry and region provisioning** (HTTPS with rustls, SHA-256 checked before anything is used).
 8. **The UI** in egui/eframe, window by window. When it covers what the QML does, the C++ goes (no dead code left).
 
@@ -186,17 +188,23 @@ for it (the second state read while the wireless stack runs, the end of an upgra
 `flipper-fake --write-firmware DIR` writes a made-up update folder: `directory.json`, a two-element firmware `.dfu`,
 `core2_firmware.tgz` (manifest and image), `scripts.tgz` (Flipper's `ob.data`) and `resources.tgz`.
 `argus-tools/crates/flipper-fake/compare-repair.sh` runs `qFlipper-cli` (no command: on a device in recovery mode,
-the full repair) and `argus-cli recovery repair` with the same files in six scenarios (the wireless stack running,
-the FUS already running, a FUS stuck in an unknown state, a FUS that never finishes deleting the stack, a flash block of
-the wireless stack refused, a flash block of the firmware refused) and compares the exit status, every bootloader request in order, the whole 1 MiB flash, the
+the full repair) and `argus-cli recovery repair --resources ... --port PTY` with the same files in eight scenarios (the
+wireless stack running, an older install of the resources on the card with a valid `/ext/Manifest`, no SD card, the FUS
+already running, a FUS stuck in an unknown state, a FUS that never finishes deleting the stack, a flash block of the
+wireless stack refused, a flash block of the firmware refused) and compares the exit status, every bootloader request in order, the whole 1 MiB flash, the
 option bytes (RDP 0xAA, untouched), OTP, FUS state and commands, the wireless stack version, the pages erased, the
 resets and whether the chip booted its firmware. The C++ app's own identification of the device (an OTP read each
 time it appears, which leaves the chip in dfuUPLOAD-IDLE, so its next connection starts with an abort) is left out of
-the request comparison; argus-cli does not name the device. Result on 2026-11-12: 87 checks, all passed; the two do
-the same requests in the same order (450 in the main scenario, 1824 when the FUS never settles: 120 state reads each)
-and leave the same bytes. No difference turned up in the bootloader part, so nothing needed fixing there. The C++ run then goes on over
-RPC on the pseudo-terminal: its device probe (and it **sets the clock**), the resources onto `/ext` (it first deletes
-every file it is about to write, then writes them), no region data (development region), a reboot.
+the request comparison; argus-cli does not name the device. Once the chip boots its firmware, both go on over RPC on the
+pseudo-terminal: the resources onto `/ext` (`flipper_rpc::assets`, the C++ `AssetsDownloadOperation`: the bundle's
+`resources/Manifest` compared with the card's `/ext/Manifest`; on a fresh install every file is removed first, then
+everything written; otherwise only what went away or changed is removed and what is new or changed written, the
+manifest last), no region data (the development region needs none) and a restart; the script compares those
+requests in order and the files on the card afterwards (sizes and MD5). The C++ app also probes the device first (and
+**sets its clock**) and starts its screen; argus-cli reads `devinfo` for the region. Result on 2026-11-12: all checks
+pass (131); the bootloader requests are the same in the same order (450 in the main scenario, 1824 when the FUS never
+settles: 120 state reads each), so are the requests on the firmware, and both leave the same bytes on the chip and the
+card. No difference turned up in the bootloader part; the resources install had two bugs, fixed in both (section 5).
 
 **The C++ CLI against the same fake.** The C++ app finds a Flipper by USB VID/PID. A test-only hook
 (`backend/testhooks.h`) changes that only when `ARGUS_TEST_SERIAL_PORT` names a port: the registry then does not
@@ -550,6 +558,20 @@ Found while porting the full repair, and **fixed in both versions** on 2026-11-1
   never started. Both now give up after 120 polls. (Rust: `tests/recovery.rs`; both: the `never-settles` scenario of
   `compare-repair.sh`, the same 120 state reads.)
 
+Found while porting the steps after a repair (the resources install), and **fixed in both versions** on 2026-11-12.
+`flipper-rpc/tests/assets.rs` has cases for both, `chymaera selftest` for the first (it fails without the C++ fix);
+the second C++ change is not covered by a test yet:
+
+- **A resources manifest could name paths outside `/ext`.** `AssetManifest` took any name: `D:..`, then `D:../int`,
+  then `F:...:../int/.bt.keys` made a valid manifest, and so did names with a backslash or a control character, and
+  files "inside" a file. The device's own `/ext/Manifest` is one of the two manifests compared, and what it lists but
+  the bundle does not is removed, so a card could make the app remove `/ext/../int/.bt.keys`. Now a name with an empty
+  part, `.`, `..`, a backslash or a control character, or under something that is not a folder, makes the manifest
+  invalid (a device's is then treated as missing: a fresh install, which removes only the bundle's own files).
+- **A bundle file missing, or not as its manifest says, was written anyway.** A file the manifest names but the
+  archive lacks was written as an empty file (after the device's copy had been removed), and one with another size or
+  MD5 was written as it was, both under the manifest's claim. Now the bundle is refused before anything changes.
+
 A regression of my own, caught by porting the capture sync: once `GetFileTreeOperation` left unsafe names out,
 the C++ capture pull stopped counting them as failed (as `stagedPath` used to). `CaptureSync` now counts every
 refused name as failed again, and the Rust pull does the same.
@@ -559,7 +581,10 @@ argus-cli does not (it has one device, the one on `--dfu-socket`); a wireless st
 repair with "SUCCESS", exit 0 and the failure only in its log (the chip then runs its firmware without a wireless
 stack), while argus-cli also exits 0 but reports `"radio": {"installed": false, "error": ...}`; the C++ app waits for
 re-enumeration through hot-plug and argus-cli by trying the socket again (at most 30 s, as the C++ timeout); and
-argus-cli stops when the chip boots its firmware (the steps over RPC after that are not ported yet).
+for the steps on the firmware, argus-cli checks the whole resources bundle before it opens anything (the C++ app asks
+the device for its card first), reads the region from `devinfo` (the C++ app has it from its probe), and refuses a
+device of any region but the development one before sending anything, because that region's data comes from
+Flipper's server (the C++ app installs the resources first, then fetches it).
 
 What still differs, on purpose: the C++ app probes the device before a backup (and **sets its clock**) and starts the
 screen stream and a status screen; the Rust CLI only reads what the command needs. For writes: the Rust CLI asks for
@@ -593,7 +618,11 @@ failed, and does not read `devinfo` or start the screen.
      update (`LegacyUpdateOperation`: backup of `/int` over RPC, reboot into DFU, firmware, leave, restore). The hooks
      cover it; the fake needs to start as the firmware on its pseudo-terminal and turn into the bootloader when it
      gets a reboot into DFU (`--no-sd` then selects the legacy path in the C++ app).
-   - The steps on the firmware after a repair (assets from the bundle, region data, restart) in Rust.
+   - The steps on the firmware after a repair are in Rust and compared too (`flipper_rpc::assets`, `argus-cli recovery
+     repair --resources R.tgz --port DEV` and `recovery finish R.tgz`): resources, restart. Region data is only right
+     for the development region; any other region is refused until phase 7 brings Flipper's region bundle (it could
+     also be read from a local file: `regionprovisioningoperation.cpp` and the plugin's `regionBands` are the
+     reference).
    - Wiring `flipper_dfu::usb` into argus-cli opens a real USB device: only when I say so, with me watching, and
      never from a test.
    No flashing in tests, and none on my device until I say so.

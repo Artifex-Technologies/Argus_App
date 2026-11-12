@@ -152,6 +152,17 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — The steps after a repair in Rust (resources, restart), and two fixes in both
+- `flipper_rpc::assets` and `argus-cli recovery repair ... --resources R.tgz --port DEV` / `recovery finish R.tgz`
+  (`--yes`): the resources bundle onto `/ext` as the C++ `AssetsDownloadOperation` does it, then a restart. Development
+  region only; any other region is refused before anything is sent (its data comes from Flipper's server; phase 7).
+  `compare-repair.sh` now compares those requests and the card's files too, in eight scenarios: 131 checks pass.
+- **Fixed in both (C++ and Rust):** a resources manifest (also the card's own `/ext/Manifest`) could name `..` and
+  other paths outside `/ext`, so a card could make the app remove `/ext/../int/...`; such a manifest is now invalid.
+  A file the bundle's manifest names but the bundle lacks (or holds with another size or MD5) was written empty or as
+  it was; now the bundle is refused before anything changes. `chymaera selftest` has a check (18/18).
+- **@Argus_Firmware:** a resources manifest with such names would now be refused; Flipper's own never has them.
+
 ### 2026-11-12 — The full repair compared with the C++ app on the fakes (`compare-repair.sh`)
 - New test-only hooks in the C++ app (`backend/testhooks.h`; unset, nothing changes): `ARGUS_TEST_DFU_SOCKET` (the libusb
   `USBDevice` sends each request to a Unix socket instead of libusb), `ARGUS_TEST_DEVICE_STATE` (the registry reads a state

@@ -17,6 +17,7 @@
 //! - [`transport`]: serial port or Unix socket. Nothing here searches for or opens a device on
 //!   its own; callers name the port.
 
+pub mod assets;
 pub mod frame;
 pub mod ops;
 pub mod restore;

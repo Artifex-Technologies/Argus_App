@@ -1,9 +1,10 @@
 #!/bin/sh
 # Runs the C++ full repair (qFlipper-cli with no command, on a Flipper in recovery mode: FullRepairOperation)
-# and the Rust one (argus-cli recovery repair) against the same fake Flipper across its lives (flipper-fake
+# and the Rust one (argus-cli recovery repair --resources) against the same fake Flipper across its lives (flipper-fake
 # --recovery: the bootloader on a Unix socket, then the firmware on a pseudo-terminal), and compares them: exit
 # status, the bootloader requests in order, the bytes on the fake chip (all of its flash), the option bytes
-# (RDP untouched), the FUS and resets, and what each says. docs/RUST_PORT.md, section 4.
+# (RDP untouched), the FUS and resets, then the requests on the firmware (resources onto the card, restart) and
+# the files on the card afterwards, and what each says. docs/RUST_PORT.md, section 4.
 #
 #   sh compare-repair.sh QFLIPPER_CLI ARGUS_CLI FLIPPER_FAKE OUTDIR
 #
@@ -55,8 +56,9 @@ run() {
             ARGUS_TEST_FIRMWARE_DIR="$fw" \
             timeout 300 "$cpp" -d 2 > stdout.txt 2> stderr.txt)
     else
-        (cd "$dir" && exec timeout 300 "$rs" --dfu-socket dfu.sock --poll-ms 200 recovery repair "$fw/firmware.dfu" \
-            "$fw/ob.data" "$fw/radio.bin" --yes > stdout.txt 2> stderr.txt)
+        (cd "$dir" && exec timeout 300 "$rs" --dfu-socket dfu.sock --port "$port" --poll-ms 200 recovery repair \
+            "$fw/firmware.dfu" "$fw/ob.data" "$fw/radio.bin" --resources "$fw/flipper-z-any-resources-test.tgz" --yes \
+            > stdout.txt 2> stderr.txt)
     fi
     echo $? > "$dir/exit.txt"
     exec 3>&-
@@ -82,6 +84,13 @@ requests() {
         END { if (n) flush() }
     ' "$1/dfu.log"
 }
+# The RPC requests once the firmware runs, without session and command ids: the C++ app's without its device
+# probe (its first session: versions, devinfo, card, manifest, and it sets the clock) and its screen (Gui*), and
+# without the devinfo read argus-cli makes for the region.
+rpc_requests() {
+    if [ "$2" = cpp ]; then grep -v '^1 ' "$1/requests.txt"; else cat "$1/requests.txt"; fi \
+        | cut -d' ' -f3- | grep -v '^Gui\|^PropertyGetRequest'
+}
 field() { sed -n "s/^$2 //p" "$1/chip.txt"; }
 
 # compare SCENARIO EXPECTED_EXIT(0|fail): both sides already run
@@ -104,6 +113,12 @@ compare() {
     for f in option_bytes otp fus fus_commands wireless_stack erased_pages resets booted_firmware; do
         check "$name: same $f ($(field "$r" "$f" | cut -c1-24))" "$(test "$(field "$c" "$f")" = "$(field "$r" "$f")"; echo $?)"
     done
+    rpc_requests "$c" cpp > "$c/requests.rpc"
+    rpc_requests "$r" rs > "$r/requests.rpc"
+    diff "$c/requests.rpc" "$r/requests.rpc" > "$out/$name-rpc.diff"
+    check "$name: same requests on the firmware afterwards ($(wc -l < "$c/requests.rpc") each)" $?
+    cmp -s "$c/dump.txt" "$r/dump.txt"
+    check "$name: same files on the card afterwards" $?
     check "$name: RDP untouched (0xAA, level 0) in both" \
         "$(field "$c" option_bytes | grep -q '^aa' && field "$r" option_bytes | grep -q '^aa'; echo $?)"
 }
@@ -117,8 +132,22 @@ compare running 0
 check "running: C++ says the repair succeeded" "$(grep -q 'Full Repair @Fakeflip SUCCESS' "$out/running-cpp/stderr.txt" "$out/running-cpp/stdout.txt"; echo $?)"
 check "running: Rust installed the wireless stack and wrote the option bytes" \
     "$(grep -q '"radio":{"bytes":12293,"error":null,"installed":true}' "$out/running-rs/stdout.txt" && grep -q '"option_bytes_written":true' "$out/running-rs/stdout.txt"; echo $?)"
+check "running: Rust put the resources on the card and restarted the Flipper" \
+    "$(grep -q '"files_written":4' "$out/running-rs/stdout.txt" && grep -q '"restarted":true' "$out/running-rs/stdout.txt"; echo $?)"
 check "running: firmware and wireless stack where they belong" \
     "$(test "$(field "$out/running-rs" booted_firmware)" = true && test "$(field "$out/running-rs" fus_commands)" = 5253; echo $?)"
+
+# An older install of the resources on the card, with a valid manifest: only the differences are sent.
+run old-resources cpp --fus running --old-resources
+run old-resources rs --fus running --old-resources
+compare old-resources 0
+check "old-resources: Rust read the card's manifest and sent only the differences" \
+    "$(grep -q '"device_manifest":"read"' "$out/old-resources-rs/stdout.txt" && grep -q '"files_written":3' "$out/old-resources-rs/stdout.txt"; echo $?)"
+
+# No SD card: nothing to put on it; both restart the Flipper.
+run no-card cpp --fus running --no-sd
+run no-card rs --fus running --no-sd
+compare no-card 0
 
 # The FUS already running: the C++ app restarts the chip "for consistency" first.
 run fus-idle cpp --fus idle

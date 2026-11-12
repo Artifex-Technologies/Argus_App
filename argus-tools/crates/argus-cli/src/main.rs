@@ -24,7 +24,7 @@ use flipper_rpc::transport::{SerialTransport, Transport};
 use flipper_rpc::{RpcError, Session};
 
 /// How long a reboot or factory reset waits for the device to leave the port (`"gone"`).
-const GONE_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const GONE_WAIT: Duration = Duration::from_secs(5);
 
 const APP_VERSION: &str = include_str!("../../../../VERSION").trim_ascii();
 
@@ -83,6 +83,7 @@ struct Cmd {
     target: Option<Target>,
     datastore: Option<PathBuf>,
     dfu_socket: Option<PathBuf>,
+    resources: Option<PathBuf>,
     poll: Duration,
     timeout: Duration,
     frames: usize,
@@ -96,6 +97,7 @@ fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
         target: None,
         datastore: None,
         dfu_socket: None,
+        resources: None,
         poll: Duration::from_millis(1000),
         timeout: Duration::from_millis(5000),
         frames: 1,
@@ -116,6 +118,7 @@ fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
             }
             "--datastore" => cmd.datastore = Some(PathBuf::from(value("--datastore")?)),
             "--dfu-socket" => cmd.dfu_socket = Some(PathBuf::from(value("--dfu-socket")?)),
+            "--resources" => cmd.resources = Some(PathBuf::from(value("--resources")?)),
             "--poll-ms" => {
                 let ms: u64 = value("--poll-ms")?.parse().map_err(|_| Usage("--poll-ms takes milliseconds".into()))?;
                 if !(10..=5000).contains(&ms) {
@@ -171,7 +174,7 @@ fn fail(code: &str, message: String, status: u8) -> ExitCode {
     ExitCode::from(status)
 }
 
-fn open(target: &Target, timeout: Duration) -> Result<Box<dyn Transport>, RpcError> {
+pub(crate) fn open(target: &Target, timeout: Duration) -> Result<Box<dyn Transport>, RpcError> {
     use std::os::unix::fs::FileTypeExt;
     let check = |p: &Path, want_socket: bool| -> Result<(), RpcError> {
         let ft = std::fs::metadata(p).map_err(RpcError::Io)?.file_type();

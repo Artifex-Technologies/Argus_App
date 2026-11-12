@@ -85,6 +85,34 @@ bool AssetManifest::parseTime(const QStringList &tokens)
     return success;
 }
 
+// A path that stays inside the folder the manifest describes (/ext): no empty part, ".", "..", backslash or
+// control character, and its parent is a folder already listed. Such names used to be taken as they were, so
+// a device's own /ext/Manifest could make the app remove /ext/../int/... (the same rule as the Rust port's
+// flipper_rpc::assets).
+bool AssetManifest::isAcceptablePath(const QString &path) const
+{
+    const auto parts = path.split('/');
+
+    for(const auto &part : parts) {
+        if(part.isEmpty() || part == QStringLiteral(".") || part == QStringLiteral("..") || part.contains('\\')) {
+            return false;
+        }
+
+        for(const auto &c : part) {
+            if(c.category() == QChar::Other_Control) {
+                return false;
+            }
+        }
+    }
+
+    if(parts.size() == 1) {
+        return true;
+    }
+
+    const auto *parent = m_root->find(parts.mid(0, parts.size() - 1).join('/'));
+    return parent && (parent->type() == FileNode::Type::Directory);
+}
+
 bool AssetManifest::parseFile(const QStringList &tokens)
 {
     if((tokens.first() != "F") || (tokens.size() < 4)) {
@@ -97,7 +125,7 @@ bool AssetManifest::parseFile(const QStringList &tokens)
     info.md5 = tokens[1].toLocal8Bit();
     info.size = tokens[2].toLongLong(&success, 10);
 
-    return success && m_root->addFile(tokens[3], QVariant::fromValue(info));
+    return success && isAcceptablePath(tokens[3]) && m_root->addFile(tokens[3], QVariant::fromValue(info));
 }
 
 bool AssetManifest::parseDirectory(const QStringList &tokens)
@@ -107,7 +135,7 @@ bool AssetManifest::parseDirectory(const QStringList &tokens)
     }
 
     const auto dirName = tokens[1].endsWith('/') ? tokens[1].chopped(1) : tokens[1];
-    return m_root->addDirectory(dirName);
+    return isAcceptablePath(dirName) && m_root->addDirectory(dirName);
 }
 
 bool AssetManifest::FileInfo::operator ==(const FileInfo &other) const

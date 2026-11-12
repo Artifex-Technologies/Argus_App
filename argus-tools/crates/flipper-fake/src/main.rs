@@ -23,7 +23,7 @@
 //! `--read-only` refuses every change with "access denied" (a write-protected or failing card).
 //! A reboot or factory reset request ends the session, as the device leaves USB.
 //!
-//! `flipper-fake --recovery DIR [--fus running|idle|stuck|never-settles] [--no-sd] [--fail-write-at HEX]` is one Flipper across
+//! `flipper-fake --recovery DIR [--fus running|idle|stuck|never-settles] [--no-sd] [--old-resources] [--fail-write-at HEX]` is one Flipper across
 //! its lives, for comparing the full repair (`compare-repair.sh`): the fake bootloader (with factory
 //! information in its OTP) on the Unix socket `DIR/dfu.sock`, gone after every reset and back while the
 //! chip boots into it; once the chip boots its firmware, the fake Flipper on a pseudo-terminal (printed as
@@ -33,7 +33,8 @@
 //! `DIR/chip.txt` (option bytes, OTP, FUS state, resets), `DIR/requests.txt` (the RPC requests) and
 //! `DIR/dump.txt` (the storage). `--fus`: the wireless stack running (default), the FUS running, or a FUS
 //! stuck in a state the repair does not know, or one that never finishes deleting the wireless stack; `--fail-write-at HEX`: the data block written over that
-//! address fails (errPROG).
+//! address fails (errPROG); `--old-resources`: the card holds an older install of the resources with a valid
+//! `/ext/Manifest` (src/firmware.rs).
 //! `flipper-fake --write-firmware DIR` writes a made-up update folder (`directory.json` and its files) for
 //! the C++ app's test hook `ARGUS_TEST_FIRMWARE_DIR` (src/firmware.rs) and exits.
 //!
@@ -146,6 +147,7 @@ fn main() -> ExitCode {
             },
             "--legacy" => fake.protobuf_version = (0, 13),
             "--no-sd" => fake.sd_card = false,
+            "--old-resources" => fake = flipper_fake::firmware::with_old_resources(fake),
             "--hostile" => fake = fake.with_hostile_names(),
             "--captures" => fake = fake.with_captures(),
             "--screen-frames" => match args.next().and_then(|n| n.parse().ok()).filter(|n| (0..=1000).contains(n)) {

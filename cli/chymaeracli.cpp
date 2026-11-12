@@ -29,6 +29,7 @@
 #include "flipperzero/flipperzero.h"
 #include "flipperzero/utility/getfiletreeoperation.h"
 #include "tararchive.h"
+#include "flipperzero/assetmanifest.h"
 
 #include <QBuffer>
 #include <QTemporaryDir>
@@ -374,6 +375,16 @@ int ChymaeraCli::cmdSelfTest()
             names = names && !Flipper::Zero::GetFileTreeOperation::isSafeName(bad);
         }
         check(QStringLiteral("device names that could leave a folder are refused"), names, QString(), failures);
+
+        // A resources manifest (the device's own /ext/Manifest too) may only name what stays inside /ext.
+        const Flipper::Zero::AssetManifest goodManifest(QByteArrayLiteral("V:0\nT:5\nD:a\nF:00:1:a/b.txt\nF:00:1:c.txt\n"));
+        bool manifests = !goodManifest.isError();
+        for(const auto *line : {"D:..\nD:../int\nF:00:1:../int/.bt.keys", "F:00:1:a/../../int/x", "D:..", "F:00:1:a//b", "F:00:1:a\\b",
+                                "F:00:1:a/b.txt/c", "F:00:1:x\x1b"}) {
+            const Flipper::Zero::AssetManifest bad(QByteArrayLiteral("V:0\nT:5\nD:a\nF:00:1:a/b.txt\n") + line + '\n');
+            manifests = manifests && bad.isError();
+        }
+        check(QStringLiteral("resource manifests naming paths outside /ext are refused"), manifests, QString(), failures);
     }
 
     out() << "\n" << (failures == 0 ? "SELF-TEST PASSED" : QStringLiteral("SELF-TEST FAILED (%1)").arg(failures)) << "\n";

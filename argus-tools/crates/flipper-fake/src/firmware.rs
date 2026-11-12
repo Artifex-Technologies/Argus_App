@@ -177,3 +177,30 @@ pub fn write(dir: &Path) -> io::Result<()> {
     std::fs::write(dir.join("radio.bin"), radio())?;
     std::fs::write(dir.join("ob.data"), OB_DATA)
 }
+
+/// [`FakeFlipper`](crate::FakeFlipper) with an older install of [`resources`] on its card and a valid
+/// `/ext/Manifest` for it: `dolphin/manifest.txt` as now, `nfc/assets/aid.nfc` older (other bytes), no
+/// `Readme.txt`, and `old/gone.txt`, which the new bundle no longer has. An install compares the two
+/// manifests and sends only the differences.
+pub fn with_old_resources(mut fake: crate::FakeFlipper) -> crate::FakeFlipper {
+    use crate::Node;
+    let new = resources();
+    let old_aid = pattern(650, 9);
+    let gone = b"from an older release\n".to_vec();
+    let files: Vec<(&str, Vec<u8>)> =
+        vec![("dolphin/manifest.txt", new[0].1.clone()), ("nfc/assets/aid.nfc", old_aid), ("old/gone.txt", gone)];
+    let mut manifest = String::from("V:0\nT:1600000000\nD:dolphin\nD:nfc\nD:nfc/assets\nD:old\n");
+    for (path, data) in &files {
+        manifest.push_str(&format!("F:{}:{}:{path}\n", hex(&Md5::digest(data)), data.len()));
+    }
+    fake.nodes.retain(|n| n.path != "/ext/Manifest");
+    for d in ["/ext/dolphin", "/ext/nfc/assets", "/ext/old"] {
+        fake.nodes.push(Node { path: d.into(), dir: true, size: 0 });
+    }
+    for (path, data) in files.into_iter().chain([("Manifest", manifest.into_bytes())]) {
+        let path = format!("/ext/{path}");
+        fake.nodes.push(Node { path: path.clone(), dir: false, size: data.len() as u32 });
+        fake.contents.push((path, data));
+    }
+    fake
+}
