@@ -14,7 +14,9 @@ contracts.
   object per line.
 - **Off by default.** It must be started explicitly (from the Chymaera Console
   UI, or `Chymaera.startServer(port, token)`), or headless with
-  `qFlipper-cli chymaera serve [port] [token]`. The Rust port, `argus-cli chymaera serve [port] [token]`,
+  `qFlipper-cli chymaera serve [port] [token] [--device]` (`--device` attaches a connected Flipper, as the GUI
+  does, so `device.status` and the pulls work headlessly). The Rust port, `argus-cli [--port DEVICE] chymaera serve
+  [port] [token]`,
   is the same server: it answers byte for byte as the C++ one (`argus-tools/crates/argus-api`, proven
   against it in CI; docs/RUST_PORT.md).
 - **Token always required** (since 2026-10-27, `f7d5e44`). Every request must include a

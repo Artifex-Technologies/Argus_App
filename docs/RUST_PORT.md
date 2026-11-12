@@ -133,8 +133,8 @@ padded) to a program built from Qt's own JSON code (`tests/qt-oracle/json_oracle
 errors. (2) `crates/argus-api/compare-api.sh` runs `qFlipper-cli chymaera serve` and `argus-cli chymaera
 serve`, each with its own copy of the same files, an old-schema datastore and a capture library, sends
 both the 71 recorded requests in `tests/fixtures/api_requests.txt` and compares the answers (times, port
-and folders normalised), the datastore rows and events, the token file's life, the port argument, and
-`chymaera parse|import|selftest`: 36 checks. It runs in a private network namespace (`unshare -rn`)
+and folders normalised), the datastore rows and events, the token file's life, the port argument,
+`chymaera parse|import|selftest`, and both servers with the fake attached as their device: 43 checks. It runs in a private network namespace (`unshare -rn`)
 whose only interface is its own loopback, so it can never reach the API I run; in a CI container without
 user namespaces it uses that container's loopback. (3) The C++ answers are kept in
 `tests/fixtures/api_responses.txt`; `tests/api.rs` replays the requests against the Rust bridge in
@@ -170,7 +170,7 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   one thread serving every connection in turn as the C++ event loop does; `pcap`). `argus-cli chymaera
   serve [port] [token] | parse FILE | import FILE | selftest` print the C++ CLI's text. The datastore
   (`argus-capture::store`) gained sessions, events within a session, `capture.list` rows with their NULLs
-  and the event count. `compare-api.sh` 36/36; `chymaera selftest` 13/13 (Rust, no port opened) and 17/17
+  and the event count. `compare-api.sh` 43/43 (with the device sections); `chymaera selftest` 13/13 (Rust, no port opened) and 17/17
   (C++).
 - One Flipper-format reader (2026-11-12): argus-tools' `flipperfile` now holds the Qt-faithful reader that was
   `argus-capture::meta`'s (`FlipperFormat`, exact pairs for the capture `meta`) and builds the capture library's
@@ -187,7 +187,11 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   runs, and a device that stops answering is logged offline and detached. `argus-cli --port DEV chymaera watch
   [seconds]` prints the device's events. `sync::pull_logged` hands a pull's steps to a callback (the server's log)
   instead of only the datastore. While idle the worker asks the protobuf version once a second to notice an unplug
-  (the C++ app learns it from USB); nothing it sends changes the device.
+  (the C++ app learns it from USB); nothing it sends changes the device. The C++ `chymaera serve` takes `--device`
+  to attach a connected Flipper the same way (opt-in; without it, it never looks for one), so both servers run
+  against the fake in `compare-api.sh`: the same `device.status`, the same answers to `capture.pullAll` and
+  `capture.pull`, the same final log lines (`Pulled all capture folders: 26 new, …`), the same 26 rows, neither
+  reads `/ext/u2f` or an `assets` file, and both `watch` commands report the device: 43 checks in all.
 - The screen (2026-11-12): `flipper_rpc::screen` starts the stream, collects frames (broadcasts, command id 0),
   drops any frame that is not 1024 bytes, as the C++ streamer now does, and stops the stream again;
   `argus-cli screen DIR [--frames N]` writes them as PBM images (lit pixels black, the frame's own layout; the
@@ -223,9 +227,11 @@ Differences from the C++ app found so far, all on purpose or harmless:
 - **Kept on purpose, in both:** a lone UTF-16 surrogate in the `token` is dropped before the comparison (Qt's
   `toUtf8`; the token is still needed), and `capture.list` with a negative `limit` returns every row (SQLite's
   rule).
-- **`chymaera watch`** (device events) is not ported yet, and the Rust `serve`, like the C++ one, has no device:
-  `device.status` says not connected and `capture.pull`/`pullAll` are refused. The Rust selftest checks the Rust
-  pieces in process; the archive and name checks of the C++ selftest are flipper-rpc's tests.
+- **A device in `serve` and `watch`:** the Rust CLI opens only the port it is given and has no hot-plug: an unplugged
+  device is detached and `watch` ends. Its idle worker asks the protobuf version once a second. The C++ app logs
+  more about a device (status strings, RPC session changes) and, on connecting, sets the clock and starts the screen
+  stream; the Rust side logs attach, offline and detach only. The Rust selftest checks the Rust pieces in process;
+  the archive and name checks of the C++ selftest are flipper-rpc's tests.
 
 Found in the C++ app by running it against the fake, and **fixed in both versions** on 2026-11-12 (a bug the
 port finds is fixed in the C++ too). `compare-cli.sh` has a case for each, and both apps now agree on all of them:
@@ -288,9 +294,8 @@ failed, and does not read `devinfo` or start the screen.
 
 ## Resume here
 
-1. The rest of phase 3: compare the device side of the two servers. The C++ `chymaera serve` has no device (only the
-   GUI attaches one); give it one the way `watch` does (opt-in, the test hook keeps it on the fake), then run both
-   servers against the fake in `compare-api.sh` (status, async pulls, rows, the final log line). The Rust side is
-   done and tested against the fake (`tests/device.rs`). The screen stream is there
-   (`flipper_rpc::screen`) for the UI phase: buttons (`GuiSendInputRequest`) and the virtual display come with it.
-2. `restore` needs writes (phase 4); then the fake can check each app's restore of the other's backup.
+1. Phase 3 is done. Phase 4, writes behind a confirmation: `restore` first (the fake can then check each app's restore
+   of the other's backup), then write, mkdir, rename, remove, app installs, date/time set, reboot. Nothing reachable
+   from the Sarina API may change the device without my approval in the app.
+2. For the UI phase: the screen stream is there (`flipper_rpc::screen`); buttons (`GuiSendInputRequest`) and the
+   virtual display come with it.

@@ -1,4 +1,6 @@
 #include "chymaeracli.h"
+
+#include <memory>
 #include "arguscli.h"
 #include "chymaera/sync/capturesync.h"
 
@@ -156,7 +158,9 @@ void ChymaeraCli::printUsage()
           << "Usage: qFlipper-cli chymaera <command> [args]\n\n"
           << "Commands:\n"
           << "  selftest              Verify the Chymaera subsystem end-to-end (no device needed)\n"
-          << "  serve [port] [token]  Start the Sarina control API (loopback). Default port 44700\n"
+          << "  serve [port] [token] [--device]\n"
+          << "                        Start the Sarina control API (loopback). Default port 44700.\n"
+          << "                        --device attaches a connected Flipper (device.status, capture.pull)\n"
           << "  parse <file>          Parse a Flipper file (.nfc/.sub/...) and print JSON\n"
           << "  import <file>         Parse and record a capture in the datastore\n"
           << "  watch [seconds]       Stream live device events from a connected Flipper\n"
@@ -377,10 +381,15 @@ int ChymaeraCli::cmdSelfTest()
     return failures == 0 ? 0 : 1;
 }
 
-int ChymaeraCli::cmdServe(QCoreApplication &app, const QStringList &args)
+int ChymaeraCli::cmdServe(QCoreApplication &app, const QStringList &arguments)
 {
     int port = SarinaServer::DefaultPort;
     QString token;
+
+    // --device: attach a connected Flipper, as the GUI does, so device.status, capture.pull and
+    // capture.pullAll work headlessly. Opt-in: without it serve never looks for a device.
+    QStringList args = arguments;
+    const bool withDevice = args.removeAll(QStringLiteral("--device")) > 0;
 
     if(!args.isEmpty()) {
         bool ok = false;
@@ -396,6 +405,8 @@ int ChymaeraCli::cmdServe(QCoreApplication &app, const QStringList &args)
         token = args.at(1);
     }
 
+    // declared before the bridge, so the bridge (which watches the device) goes first
+    std::unique_ptr<ApplicationBackend> backend;
     Bridge bridge;
 
     // Mirror the live event stream to stdout so the operator can watch it.
@@ -432,6 +443,22 @@ int ChymaeraCli::cmdServe(QCoreApplication &app, const QStringList &args)
         sigaction(SIGTERM, &sa, nullptr);
     }
 #endif
+
+    if(withDevice) {
+        backend.reset(new ApplicationBackend);
+        auto *b = backend.get();
+        // attached once the device is ready (as `chymaera pull` waits), detached when it goes
+        QObject::connect(b, &ApplicationBackend::backendStateChanged, &app, [b, &bridge]() {
+            if(b->backendState() == ApplicationBackend::BackendState::Ready && b->device() && !bridge.isDeviceConnected()) {
+                bridge.attachDevice(b->device());
+            }
+        });
+        QObject::connect(b, &ApplicationBackend::currentDeviceChanged, &app, [b, &bridge]() {
+            if(!b->device()) {
+                bridge.detachDevice();
+            }
+        });
+    }
 
     const int rc = app.exec();
     bridge.stopServer();

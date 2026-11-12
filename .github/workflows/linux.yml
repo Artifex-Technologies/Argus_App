@@ -64,9 +64,9 @@ jobs:
       - name: Compare the Sarina API servers (C++ and Rust)
         run: |
           pacman -S --noconfirm --needed iproute2
-          (cd argus-tools && cargo build --locked -j4 -p argus-cli -p argus-tools)
+          (cd argus-tools && cargo build --locked -j4 -p argus-cli -p argus-tools -p flipper-fake)
           bash argus-tools/crates/argus-api/compare-api.sh build-release/qFlipper-cli argus-tools/target/debug/argus-cli \
-            argus-tools/target/debug/argus-tools "$RUNNER_TEMP/compare-api"
+            argus-tools/target/debug/argus-tools argus-tools/target/debug/flipper-fake "$RUNNER_TEMP/compare-api"
           sh argus-tools/crates/argus-api/tests/qt-oracle/build.sh "$RUNNER_TEMP/api-oracles"
           (cd argus-tools && ARGUS_QT_ORACLES="$RUNNER_TEMP/api-oracles" cargo test --locked -j4 -p argus-api --test qt_json --test pcap)
 

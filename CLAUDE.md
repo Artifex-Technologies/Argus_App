@@ -152,6 +152,14 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — A device in the headless Sarina server (both apps), `chymaera watch` in Rust
+- `qFlipper-cli chymaera serve [port] [token] --device` attaches a connected Flipper as the GUI does (opt-in; without
+  it, serve never looks for one). `argus-cli --port DEVICE chymaera serve` does the same with the named port, and
+  `argus-cli --port DEVICE chymaera watch [seconds]` prints device events. `compare-api.sh` runs both servers with the
+  fake attached: same status, pull answers, final log lines and rows (43 checks).
+- **@Sarina:** with `--device`, `device.status`, `capture.pull` and `capture.pullAll` now work on a box with no
+  display. Nothing else changes.
+
 ### 2026-11-12 — Screen frames in the Rust port (`argus-cli screen DIR [--frames N]`)
 - `flipper_rpc::screen`: start the stream, collect frames, drop any not 1024 bytes (the rule the C++ streamer has
   since today), stop the stream. `argus-cli screen` writes PBM images. Read-only; tested against the fake only.
