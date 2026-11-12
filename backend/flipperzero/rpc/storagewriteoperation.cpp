@@ -39,7 +39,9 @@ void StorageWriteOperation::feedResponse(QObject *response)
 {
     auto *mainResponse = qobject_cast<MainResponseInterface*>(response);
 
-    if(mainResponse->isError()) {
+    // Any status but OK fails the write. Until 2026-11-12 only the severe ones did (isError), so a
+    // write the device refused (no such folder, access denied, storage full) counted as success.
+    if(mainResponse->isError() || mainResponse->commandStatus() != MainResponseInterface::StatusOk) {
         finishWithError(BackendError::ProtocolError, QStringLiteral("Device replied with error: %1").arg(mainResponse->errorString()));
     } else if(!processResponse(response)) {
         finishWithError(BackendError::ProtocolError, QStringLiteral("Operation finished with error: %1").arg(mainResponse->errorString()));

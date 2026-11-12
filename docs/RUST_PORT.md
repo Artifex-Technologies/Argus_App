@@ -142,7 +142,8 @@ padding, and a 150 KiB file that gets a status ping per chunk), a `/int` where t
 and the same bytes on the fake, and for every hostile archive no change request at all (the Rust CLI does not even
 open the port). The write requests are byte-identical to the C++ app's nanopb encoder (12 more frames in the
 fixture: write chunks, an empty file, mkdir, delete with and without `recursive`, rename, ping, reboot, factory reset,
-update). Result on 2026-11-12: 133 checks, all passed.
+update). A storage that refuses every change (`--read-only`) must fail both restores at the same first write.
+Result on 2026-11-12: 136 checks, all passed.
 
 The C++ CLI's restore and `erase` wait for the device to come back over USB after its reboot, which a
 pseudo-terminal cannot do; with the test hook set they take the request as done once it is sent (two more guarded
@@ -229,7 +230,7 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   opened; `restore` checks the archive first either way). After a reboot or reset the CLI waits up to 5 s for the
   device to leave the port (`"gone"`). The fake keeps a changing storage; `tests/writes.rs` (6 tests) covers the
   firmware rules, writes with pings, an interrupted write, reboot and reset, every hostile archive, and restores.
-  `compare-cli.sh`: 133 checks.
+  `compare-cli.sh`: 136 checks.
 - Tests: 77 in the new crates (frames, paths, schema, nanopb fixtures, session and reads against the fake with
   every fault, hostile names, the CLI binary over a socket and a pseudo-terminal), all green; argus-tools' own
   tests unchanged; `qFlipper-cli chymaera selftest` 11/11 with the hook built in.
@@ -335,6 +336,13 @@ for each:
   requires the end of the gzip stream (zlib checks its CRC and length there) and stops at 1 GiB, a restore at 80 MiB
   of tar, 64 MiB of files, 16 MiB per file and 10 000 entries (the Rust reader has the same limits). Cases:
   `hostile-truncated-gzip`, `bomb`, `hostile-huge-file`.
+- **A write the device refused counted as success.** The C++ app treats only five statuses as errors
+  (`MainResponse::isError`: unknown, decode, not implemented, busy, interrupted) and lets the operation read the
+  others as answers, which suits a stat or MD5 of a missing file; but write, mkdir, remove and rename read every
+  storage error (no such folder, access denied, not empty, internal error, a full card) as done, so a restore or an
+  update upload onto storage that refused it reported success. They now fail on any status but OK (mkdir also
+  accepts "already exists", which its callers rely on); the plugin's responses give their status
+  (`MainResponseInterface::commandStatus`). Case: `denied` (the fake's `--read-only`).
 - **A restore replaced (and then deleted) a file next to the backup.** `TarZipArchive` unpacked `name.tgz` to
   `name.tar` in the same folder (`baseName()`, so `my.backup.tgz` became `my.tar`) and removed it afterwards; it
   now uses the app's temporary folder. A gzip error left it with no index, which `TarZipUncompressor` then used
@@ -350,7 +358,9 @@ screen stream and a status screen; the Rust CLI only reads what the command need
 opens the port (the C++ app connects first), refuses non-ASCII names before sending them (the firmware refuses them),
 sends a large file up to each status ping and waits for that ping's answer (the C++ app sends it all at once; the
 frames are the same), and after a reboot or reset waits for the device to leave instead of for it to come back
-(it has no USB hot-plug). The C++ CLI exits 255 on any error, the Rust CLI 1. For capture pull: the Rust CLI refuses a path
+(it has no USB hot-plug). The C++ mkdir takes "already exists" as success (its callers make folders that may be
+there); `flipper_rpc`'s `storage_mkdir` returns it as an error and `argus-cli mkdir` exits 1 (the restore only makes
+folders that are missing, so the two never differ there). The C++ CLI exits 255 on any error, the Rust CLI 1. For capture pull: the Rust CLI refuses a path
 outside the capture folders before it opens the port (the C++ CLI refuses once the device is ready), names the
 staging folder in UTC (the C++ app in local time), creates it 0700 and its files 0600, removes a file whose read
 failed, and does not read `devinfo` or start the screen.

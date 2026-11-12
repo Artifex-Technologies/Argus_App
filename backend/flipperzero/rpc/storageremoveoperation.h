@@ -17,6 +17,9 @@ public:
 private:
     QByteArray m_path;
     bool m_recursive;
+
+protected:
+    bool acceptsStatus(int status) const override;
 };
 
 }

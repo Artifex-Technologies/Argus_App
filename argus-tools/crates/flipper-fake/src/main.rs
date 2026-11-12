@@ -19,7 +19,8 @@
 //!
 //! Writes change the fake's storage, which lasts across the sessions of one run; `--dump FILE`
 //! writes it at the end (`d PATH` / `f PATH SIZE MD5`, sorted). `--changed-int` starts with
-//! `/int` changed since a backup (for restores), `--int-conflict` with `/int/sub` a file.
+//! `/int` changed since a backup (for restores), `--int-conflict` with `/int/sub` a file;
+//! `--read-only` refuses every change with "access denied" (a write-protected or failing card).
 //! A reboot or factory reset request ends the session, as the device leaves USB.
 //!
 //! `flipper-fake --write-archives DIR` writes the restore test archives (`good-*.tgz` that
@@ -57,7 +58,7 @@ fn parse_fault(name: &str) -> Option<Fault> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: flipper-fake (--socket PATH | --pty) [--sessions N] [--record FILE] [--requests FILE] [--dump FILE] [--fault NAME] [--legacy] [--no-sd] [--hostile] [--captures] [--changed-int] [--int-conflict] [--screen-frames N]\n       flipper-fake --write-archives DIR"
+        "usage: flipper-fake (--socket PATH | --pty) [--sessions N] [--record FILE] [--requests FILE] [--dump FILE] [--fault NAME] [--legacy] [--no-sd] [--hostile] [--captures] [--changed-int] [--int-conflict] [--read-only] [--screen-frames N]\n       flipper-fake --write-archives DIR"
     );
     ExitCode::from(2)
 }
@@ -86,6 +87,7 @@ fn main() -> ExitCode {
             "--print-dump" => print_dump = true,
             "--changed-int" => fake = fake.with_changed_int(),
             "--int-conflict" => fake = fake.with_int_conflict(),
+            "--read-only" => fake.read_only = true,
             "--write-archives" => {
                 return match args.next() {
                     Some(dir) => write_archives(&PathBuf::from(dir)),

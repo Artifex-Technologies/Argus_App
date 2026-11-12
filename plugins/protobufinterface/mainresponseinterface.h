@@ -6,6 +6,12 @@
 class MainResponseInterface
 {
 public:
+    // PB_CommandStatus values the backend tests for.
+    enum CommandStatus {
+        StatusOk = 0,
+        StatusStorageExist = 6,
+    };
+
     enum ResponseType {
         Unknown,
         Empty,
@@ -35,6 +41,9 @@ public:
 
     virtual bool hasNext() const = 0;
     virtual bool isError() const = 0;
+    // The response's command status (PB_CommandStatus): StatusOk, StatusStorageExist, ...
+    // isError() is true only for the severe ones; operations that change the device check this.
+    virtual int commandStatus() const = 0;
 
     virtual const QString errorString() const = 0;
 };

@@ -43,6 +43,11 @@ bool MainResponse::isError() const
     }
 }
 
+int MainResponse::commandStatus() const
+{
+    return (int)m_wrapper.message().command_status;
+}
+
 const QString MainResponse::errorString() const
 {
     static const QHash<PB_CommandStatus, QString> statusStrings = {

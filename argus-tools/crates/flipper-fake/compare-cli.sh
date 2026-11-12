@@ -254,6 +254,18 @@ for side in cpp rs; do
         "$(test "$(exit_of "conflict-$side")" != 0 && test -z "$(changes "conflict-$side")" && cmp -s "$out/conflict-$side/dump.txt" "$out/conflict.dump"; echo $?)"
 done
 
+echo "== restore onto storage that refuses every change (access denied): both fail at the first write"
+run_change denied cpp --read-only restore "$out/backup-rs/backup.tgz"
+run_change denied rs --read-only restore "$out/backup-cpp/backup.tgz"
+for side in cpp rs; do
+    check "denied: $side fails (exit $(exit_of "denied-$side")) and the storage is unchanged" \
+        "$(test "$(exit_of "denied-$side")" != 0 && cmp -s "$out/denied-$side/dump.txt" "$out/standard.dump"; echo $?)"
+done
+storage_requests denied-cpp > "$out/denied-cpp/storage.txt"
+storage_requests denied-rs > "$out/denied-rs/storage.txt"
+diff "$out/denied-cpp/storage.txt" "$out/denied-rs/storage.txt" > "$out/denied-requests.diff"
+check "denied: same requests, both stop after the first refused write" $?
+
 echo "== hostile archives: both apps refuse each before writing anything"
 { cut -f1 "$out/archives/hostile.txt" | sed 's/^/hostile-/'; echo bomb; } > "$out/archives/refuse.txt"
 while read -r a; do

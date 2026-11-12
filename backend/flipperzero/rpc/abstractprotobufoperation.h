@@ -34,6 +34,9 @@ public:
 private:
     virtual bool begin();
     virtual bool processResponse(QObject *response);
+    // Whether an answer with this command status is a success. Default: yes for all but the
+    // severe ones; operations that change the device accept only what really succeeded.
+    virtual bool acceptsStatus(int status) const;
     uint32_t m_id;
 };
 

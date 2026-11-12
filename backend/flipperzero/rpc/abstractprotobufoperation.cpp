@@ -56,7 +56,7 @@ void AbstractProtobufOperation::feedResponse(QObject *response)
 {
     auto *mainResponse = qobject_cast<MainResponseInterface*>(response);
 
-    if(mainResponse->isError()) {
+    if(mainResponse->isError() || !acceptsStatus(mainResponse->commandStatus())) {
         finishWithError(BackendError::ProtocolError, QStringLiteral("Device replied with error: %1").arg(mainResponse->errorString()));
     } else if(!processResponse(response)) {
         finishWithError(BackendError::ProtocolError, QStringLiteral("Operation finished with error: %1").arg(mainResponse->errorString()));
@@ -65,6 +65,14 @@ void AbstractProtobufOperation::feedResponse(QObject *response)
     } else {
         startTimeout();
     }
+}
+
+bool AbstractProtobufOperation::acceptsStatus(int status) const
+{
+    // Storage errors other than the severe ones (MainResponse::isError) reach the operation, which
+    // reads them as answers: a stat of a missing file, an MD5 of one, a missing SD card.
+    Q_UNUSED(status)
+    return true;
 }
 
 bool AbstractProtobufOperation::begin()

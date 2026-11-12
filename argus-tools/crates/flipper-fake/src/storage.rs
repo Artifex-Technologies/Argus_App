@@ -26,6 +26,8 @@ pub struct Storage {
     pub contents: BTreeMap<String, Vec<u8>>,
     /// The command id and path of a write in progress.
     writing: Option<(u32, String)>,
+    /// Every change is refused with "access denied", as a write-protected or failing card.
+    pub read_only: bool,
 }
 
 /// What a storage request did: answer this id with this status (OK answers carry no content).
@@ -104,6 +106,7 @@ impl Storage {
             match Self::resolve(path) {
                 Err(s) => s,
                 Ok(p) if self.find(&p).is_some() || p == "/int" || p == "/ext" => CommandStatus::ErrorStorageExist,
+                Ok(_) if self.read_only => CommandStatus::ErrorStorageDenied,
                 Ok(p) if !self.is_dir(parent(&p)) => CommandStatus::ErrorStorageNotExist,
                 Ok(p) => {
                     self.nodes.push(Node { path: p, dir: true, size: 0 });
@@ -120,6 +123,7 @@ impl Storage {
         let status = match Self::resolve(path) {
             Err(s) => s,
             Ok(p) if p == "/ext" => CommandStatus::ErrorStorageInvalidName,
+            Ok(p) if self.read_only && self.find(&p).is_some() => CommandStatus::ErrorStorageDenied,
             Ok(p) => match self.find(&p).cloned() {
                 None if p == "/int" => CommandStatus::Ok,
                 None => CommandStatus::Ok,
@@ -170,6 +174,8 @@ impl Storage {
                         CommandStatus::ErrorStorageExist
                     } else if !self.is_dir(parent(&n)) {
                         CommandStatus::ErrorStorageNotExist
+                    } else if self.read_only {
+                        CommandStatus::ErrorStorageDenied
                     } else if n.starts_with(&format!("{o}/")) {
                         // A folder into itself; the fake refuses it as an invalid name.
                         CommandStatus::ErrorStorageInvalidName
@@ -235,7 +241,7 @@ impl Storage {
     /// the path must not be one; an existing file is truncated.
     fn open(&mut self, path: &str) -> Result<String, CommandStatus> {
         let p = Self::resolve(path)?;
-        if p == "/int" || p == "/ext" || self.is_dir(&p) {
+        if p == "/int" || p == "/ext" || self.is_dir(&p) || self.read_only {
             return Err(CommandStatus::ErrorStorageDenied);
         }
         if !self.is_dir(parent(&p)) {

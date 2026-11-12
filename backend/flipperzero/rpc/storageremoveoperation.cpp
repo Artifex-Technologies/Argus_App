@@ -1,6 +1,7 @@
 #include "storageremoveoperation.h"
 
 #include "protobufplugininterface.h"
+#include "mainresponseinterface.h"
 
 using namespace Flipper;
 using namespace Zero;
@@ -19,4 +20,10 @@ const QString StorageRemoveOperation::description() const
 const QByteArray StorageRemoveOperation::encodeRequest(ProtobufPluginInterface *encoder)
 {
     return encoder->storageRemove(id(), m_path, m_recursive);
+}
+
+// Until 2026-11-12 a refused remove (a folder not empty, access denied) counted as success.
+bool StorageRemoveOperation::acceptsStatus(int status) const
+{
+    return status == MainResponseInterface::StatusOk;
 }

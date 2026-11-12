@@ -18,6 +18,9 @@ public:
 private:
     QByteArray m_oldPath;
     QByteArray m_newPath;
+
+protected:
+    bool acceptsStatus(int status) const override;
 };
 
 }

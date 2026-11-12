@@ -13,6 +13,9 @@ public:
     StorageMkdirOperation(uint32_t id, const QByteArray &path, QObject *parent = nullptr);
     const QString description() const override;
     const QByteArray encodeRequest(ProtobufPluginInterface *encoder) override;
+
+protected:
+    bool acceptsStatus(int status) const override;
 };
 
 }

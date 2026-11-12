@@ -20,6 +20,7 @@ public:
 
     bool hasNext() const override;
     bool isError() const override;
+    int commandStatus() const override;
 
     const QString errorString() const override;
 

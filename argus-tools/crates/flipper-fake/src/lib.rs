@@ -101,6 +101,8 @@ pub struct FakeFlipper {
     /// The storage as clients change it: made from `nodes` and `contents` on the first
     /// request, then kept across sessions (as a device keeps its files across reconnects).
     pub live: RefCell<Option<storage::Storage>>,
+    /// The storage refuses every change ("access denied").
+    pub read_only: bool,
 }
 
 /// What passed over the connection.
@@ -168,7 +170,11 @@ impl FakeFlipper {
     /// Runs `f` on the live storage, made from `nodes` and `contents` the first time.
     pub fn with_storage<R>(&self, f: impl FnOnce(&mut storage::Storage) -> R) -> R {
         let mut live = self.live.borrow_mut();
-        let s = live.get_or_insert_with(|| storage::Storage::new(&self.nodes, |n| self.data_of(n)));
+        let s = live.get_or_insert_with(|| {
+            let mut s = storage::Storage::new(&self.nodes, |n| self.data_of(n));
+            s.read_only = self.read_only;
+            s
+        });
         f(s)
     }
 
@@ -272,6 +278,7 @@ impl FakeFlipper {
             contents: Vec::new(),
             screen_frames: 1,
             live: RefCell::new(None),
+            read_only: false,
         }
     }
 

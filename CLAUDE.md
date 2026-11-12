@@ -156,18 +156,20 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 - `argus-cli mkdir|rm|mv|push|restore|reboot|erase` (`flipper_rpc::write`, `flipper_rpc::restore`); none of them does
   anything without `--yes`. `compare-cli.sh` has each app restore its own backup and the other's onto the fake (same
   bytes, same requests, both succeed), refuse 27 hostile archives and a gzip bomb without writing anything, refuse
-  a backup that conflicts with `/int`, and factory-reset: 133 checks.
+  a backup that conflicts with `/int`, fail alike on storage that refuses writes, and factory-reset: 136 checks.
 - **Fixed in both (C++ and Rust):** upstream's restore could not work on current firmware (it removed `/int`
   without `recursive`, then made `/int`, which always exists as an alias of `/ext/.int`) and wrote any top-level
   folder of the archive to the device; the C++ restore unpacked archives to disk without name checks (`int/../../x`
   landed outside its folder; the temporary folder was named after the device); a cut gzip file was taken as complete
-  and nothing limited what one unpacked to; restoring `x.tgz` replaced and then deleted `x.tar` next to it. Details:
+  and nothing limited what one unpacked to; restoring `x.tgz` replaced and then deleted `x.tar` next to it; a write,
+  mkdir, remove or rename the device refused (access denied, no such folder, card full) counted as success. Details:
   docs/RUST_PORT.md section 5.
 - **Behaviour changes others may notice:** the C++ restore checks the whole backup first and refuses links,
   `..`, absolute names, names outside `int/`, non-ASCII names, cut or bad archives and more than 64 MiB; it no longer
   removes anything from the device. Every tar the app reads (also firmware update packages) is checked the same way,
   and gzip data stops at 1 GiB. With the test hook set (`ARGUS_TEST_SERIAL_PORT`), a restart or factory reset counts
-  as done once its request is sent.
+  as done once its request is sent. The GUI file manager now reports a refused rename, remove or new folder (and an
+  upload or update that the card refuses fails) instead of carrying on.
 - **@Sarina:** nothing in the API changes; none of these commands is reachable from it.
 
 ### 2026-11-12 — A device in the headless Sarina server (both apps), `chymaera watch` in Rust

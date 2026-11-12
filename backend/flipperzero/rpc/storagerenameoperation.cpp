@@ -1,6 +1,7 @@
 #include "storagerenameoperation.h"
 
 #include "protobufplugininterface.h"
+#include "mainresponseinterface.h"
 
 using namespace Flipper;
 using namespace Zero;
@@ -19,4 +20,10 @@ const QString StorageRenameOperation::description() const
 const QByteArray StorageRenameOperation::encodeRequest(ProtobufPluginInterface *encoder)
 {
     return encoder->storageRename(id(), m_oldPath, m_newPath);
+}
+
+// Until 2026-11-12 a refused rename (the name taken, the file missing) counted as success.
+bool StorageRenameOperation::acceptsStatus(int status) const
+{
+    return status == MainResponseInterface::StatusOk;
 }
