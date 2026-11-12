@@ -54,7 +54,9 @@ fn serve(sock: &Path, guest: Guest, seen: Arc<Mutex<Seen>>) {
             let mut body = vec![0; len];
             r.read_exact(&mut body).unwrap();
             let (status, out, chunked): (u16, Value, bool) = match (method.as_str(), path.as_str()) {
-                ("GET", "/v1/profiles") => (200, json!({"profiles": ["argus-fap-build", "argus-fap-fetch"], "details": [], "skipped": []}), false),
+                ("GET", "/v1/profiles") => {
+                    (200, json!({"profiles": ["argus-fap-build", "argus-fap-fetch"], "details": [], "skipped": []}), false)
+                }
                 ("POST", "/v1/runs") => {
                     let v: Value = serde_json::from_slice(&body).unwrap();
                     let mut st = seen.lock().unwrap();
@@ -70,7 +72,11 @@ fn serve(sock: &Path, guest: Guest, seen: Arc<Mutex<Seen>>) {
                     } else {
                         let req = st.runs[n - 1].clone();
                         let (stdout, stderr, exit) = guest(&req);
-                        (200, json!({"id": &p[9..], "profile": req["profile"], "status": "done", "exit_code": exit, "stdout": stdout, "stderr": stderr}), true)
+                        (
+                            200,
+                            json!({"id": &p[9..], "profile": req["profile"], "status": "done", "exit_code": exit, "stdout": stdout, "stderr": stderr}),
+                            true,
+                        )
                     }
                 }
                 _ => (404, json!({"error": "not_found: no", "code": "not_found"}), false),
@@ -126,7 +132,15 @@ fn bundle_files(req: &Value) -> Vec<String> {
 }
 
 fn opts<'a>(sock: &'a Path, out: &'a Path) -> BuildOptions<'a> {
-    BuildOptions { socket: sock, build_profile: "argus-fap-build", fetch_profile: "argus-fap-fetch", fw: FW, out_dir: out, timeout: 60, poll: Duration::from_millis(1) }
+    BuildOptions {
+        socket: sock,
+        build_profile: "argus-fap-build",
+        fetch_profile: "argus-fap-fetch",
+        fw: FW,
+        out_dir: out,
+        timeout: 60,
+        poll: Duration::from_millis(1),
+    }
 }
 
 #[test]
@@ -186,7 +200,11 @@ fn builds_from_git_with_a_fetch_run_first() {
     let st = seen.lock().unwrap();
     assert_eq!(st.runs.len(), 2);
     let fetch = st.runs[0]["command"].as_str().unwrap();
-    assert!(fetch.contains("--branch 'v1.2'") && fetch.contains("'https://github.com/example/flipper-snake'") && fetch.contains("cd 'apps/snake'"));
+    assert!(
+        fetch.contains("--branch 'v1.2'")
+            && fetch.contains("'https://github.com/example/flipper-snake'")
+            && fetch.contains("cd 'apps/snake'")
+    );
     assert!(fetch.contains("--no-recurse-submodules"));
     assert_eq!(bundle_files(&st.runs[1]), vec!["application.fam", "images/icon.png", "snake.c"]);
 }
@@ -251,12 +269,14 @@ fn a_source_too_big_for_limbos_bundle_is_refused() {
     std::fs::write(src.join("application.fam"), "App()\n").unwrap();
     // incompressible bytes
     let mut x: u64 = 0x9E3779B97F4A7C15;
-    let noise: Vec<u8> = (0..100_000).map(|_| {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        x as u8
-    }).collect();
+    let noise: Vec<u8> = (0..100_000)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect();
     std::fs::write(src.join("blob.bin"), noise).unwrap();
     let p = limbo::pack_source(&src).unwrap();
     assert_eq!(limbo::bundle(&p.tgz).unwrap_err().code, "bundle_too_big");
@@ -264,7 +284,8 @@ fn a_source_too_big_for_limbos_bundle_is_refused() {
 
 #[test]
 fn chunked_and_errors_from_limbo() {
-    let (st, body) = limbo::parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n").unwrap();
+    let (st, body) =
+        limbo::parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n").unwrap();
     assert_eq!((st, body.as_slice()), (200, b"abcde".as_slice()));
     assert!(limbo::parse_response(b"garbage").is_err());
     assert!(limbo::parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n").is_err());

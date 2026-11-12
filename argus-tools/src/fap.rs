@@ -99,12 +99,9 @@ pub struct FapInfo {
 /// Read a FAP: its manifest and its imports. Errors are data problems (not a FAP, truncated...).
 pub fn inspect(data: &[u8]) -> Result<FapInfo> {
     let elf = Elf::parse(data)?;
-    let section = elf
-        .section(SECTION)
-        .ok_or_else(|| Error::new("manifest_missing", "the file has no .fapmeta section, so the loader rejects it"))?;
-    let bytes = elf
-        .section_data(section)
-        .ok_or_else(|| Error::new("elf_truncated", "the .fapmeta section points outside the file"))?;
+    let section =
+        elf.section(SECTION).ok_or_else(|| Error::new("manifest_missing", "the file has no .fapmeta section, so the loader rejects it"))?;
+    let bytes = elf.section_data(section).ok_or_else(|| Error::new("elf_truncated", "the .fapmeta section points outside the file"))?;
     let manifest = parse_manifest(bytes)?;
     let imports = elf.undefined_symbols()?;
     Ok(FapInfo { manifest, imports, machine: elf.machine })

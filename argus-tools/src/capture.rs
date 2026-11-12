@@ -23,13 +23,8 @@ pub const FORMAT: u32 = 1;
 
 /// Capture folders on the card and the file types they hold. `assets` sub-folders (key
 /// dictionaries, manufacturer keys) are never indexed.
-pub const FOLDERS: &[(&str, &str)] = &[
-    ("/ext/subghz", "sub"),
-    ("/ext/infrared", "ir"),
-    ("/ext/nfc", "nfc"),
-    ("/ext/lfrfid", "rfid"),
-    ("/ext/ibutton", "ibtn"),
-];
+pub const FOLDERS: &[(&str, &str)] =
+    &[("/ext/subghz", "sub"), ("/ext/infrared", "ir"), ("/ext/nfc", "nfc"), ("/ext/lfrfid", "rfid"), ("/ext/ibutton", "ibtn")];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Location {
@@ -101,7 +96,22 @@ fn preset_name(p: &str) -> String {
 }
 
 /// Rolling-code protocols in the Sub-GHz app: a replayed capture is normally refused by the receiver.
-const ROLLING: &[&str] = &["KeeLoq", "Star Line", "Faac SLH", "Somfy Telis", "Somfy Keytis", "Alutech AT-4N", "KingGates Stylo4k", "BFT Mitto", "Security+ 1.0", "Security+ 2.0", "Nice FloR-S", "Came Atomo", "Phoenix_V2", "Kinggates"];
+const ROLLING: &[&str] = &[
+    "KeeLoq",
+    "Star Line",
+    "Faac SLH",
+    "Somfy Telis",
+    "Somfy Keytis",
+    "Alutech AT-4N",
+    "KingGates Stylo4k",
+    "BFT Mitto",
+    "Security+ 1.0",
+    "Security+ 2.0",
+    "Nice FloR-S",
+    "Came Atomo",
+    "Phoenix_V2",
+    "Kinggates",
+];
 
 fn fp(parts: &[&str]) -> String {
     crate::sha256_hex(parts.join("\u{1f}").as_bytes())[..32].to_string()
@@ -161,8 +171,8 @@ pub fn describe(bytes: &[u8]) -> Option<Described> {
                 let rolling = ROLLING.iter().any(|r| proto.eq_ignore_ascii_case(r));
                 m.insert("code_type".into(), json!(if rolling { "rolling" } else { "fixed" }));
                 let key = get("Key").unwrap_or_default();
-                let fpv = (!key.is_empty())
-                    .then(|| fp(&["subghz", &hz.unwrap_or(0).to_string(), &proto, &bits.unwrap_or(0).to_string(), &key]));
+                let fpv =
+                    (!key.is_empty()).then(|| fp(&["subghz", &hz.unwrap_or(0).to_string(), &proto, &bits.unwrap_or(0).to_string(), &key]));
                 let b = bits.map(|b| format!("{b}-bit ")).unwrap_or_default();
                 (format!("Sub-GHz {proto} {b}key at {freq}"), fpv)
             }
@@ -237,7 +247,12 @@ pub fn describe(bytes: &[u8]) -> Option<Described> {
                 m.insert("uid".into(), json!(uid));
                 m.insert("uid_bytes".into(), json!(uid.split_whitespace().count()));
             }
-            for (k, name) in [("ATQA", "atqa"), ("SAK", "sak"), ("Mifare Classic type", "mifare_classic_type"), ("NTAG/Ultralight type", "ultralight_type")] {
+            for (k, name) in [
+                ("ATQA", "atqa"),
+                ("SAK", "sak"),
+                ("Mifare Classic type", "mifare_classic_type"),
+                ("NTAG/Ultralight type", "ultralight_type"),
+            ] {
                 if let Some(v) = get(k) {
                     m.insert(name.into(), json!(v));
                 }
@@ -453,7 +468,10 @@ impl Library {
         for t in add {
             let t = t.trim().to_ascii_lowercase();
             if !valid_tag(&t) {
-                return Err(Error::new("bad_tag", format!("'{}' is not a tag: up to 32 of a-z 0-9 space _ - .", crate::display_text(t.as_bytes(), 40))));
+                return Err(Error::new(
+                    "bad_tag",
+                    format!("'{}' is not a tag: up to 32 of a-z 0-9 space _ - .", crate::display_text(t.as_bytes(), 40)),
+                ));
             }
             set.insert(t);
         }
@@ -503,12 +521,19 @@ pub fn search<'a>(idx: &'a Index, query: &str, limit: usize) -> Vec<&'a Capture>
             terms.iter().all(|t| match t.split_once(':') {
                 Some(("kind", v)) => c.kind.starts_with(v),
                 Some(("tag", v)) => c.tags.iter().any(|x| x == v),
-                Some(("proto", v)) => c.fields.get("protocol").and_then(Value::as_str).is_some_and(|p| p.to_ascii_lowercase().contains(v))
-                    || c.fields.get("protocols").and_then(Value::as_object).is_some_and(|o| o.keys().any(|k| k.to_ascii_lowercase().contains(v))),
+                Some(("proto", v)) => {
+                    c.fields.get("protocol").and_then(Value::as_str).is_some_and(|p| p.to_ascii_lowercase().contains(v))
+                        || c.fields
+                            .get("protocols")
+                            .and_then(Value::as_object)
+                            .is_some_and(|o| o.keys().any(|k| k.to_ascii_lowercase().contains(v)))
+                }
                 Some(("freq", v)) => c.fields.get("frequency_mhz").and_then(Value::as_str).is_some_and(|f| f.starts_with(v)),
-                Some(("uid", v)) => c.fields.get("uid").and_then(Value::as_str).is_some_and(|u| {
-                    u.replace(' ', "").to_ascii_lowercase().contains(&v.replace(' ', ""))
-                }),
+                Some(("uid", v)) => c
+                    .fields
+                    .get("uid")
+                    .and_then(Value::as_str)
+                    .is_some_and(|u| u.replace(' ', "").to_ascii_lowercase().contains(&v.replace(' ', ""))),
                 _ => hay.contains(t.as_str()),
             })
         })
@@ -542,7 +567,11 @@ pub fn duplicates(idx: &Index) -> Vec<DupeGroup> {
     for (_, group) in by_fp {
         if group.len() > 1 {
             let paths: BTreeSet<String> = group.iter().flat_map(|c| c.locations.iter().map(|l| l.path.clone())).collect();
-            out.push(DupeGroup { kind: "same_signal", captures: group.iter().map(|c| c.id.clone()).collect(), paths: paths.into_iter().collect() });
+            out.push(DupeGroup {
+                kind: "same_signal",
+                captures: group.iter().map(|c| c.id.clone()).collect(),
+                paths: paths.into_iter().collect(),
+            });
         }
     }
     out
@@ -564,7 +593,10 @@ pub fn explain(c: &Capture) -> String {
                 if s("preset").is_empty() { String::new() } else { format!(", {} modulation preset", s("preset")) }
             ));
             if s("code_type") == "rolling" {
-                out.push("It is a rolling-code protocol: the code changes on every press, so a receiver normally rejects a replayed copy.".into());
+                out.push(
+                    "It is a rolling-code protocol: the code changes on every press, so a receiver normally rejects a replayed copy."
+                        .into(),
+                );
             } else {
                 out.push("It is a fixed-code protocol: every press sends the same code, so the file is the whole signal.".into());
             }
@@ -579,10 +611,14 @@ pub fn explain(c: &Capture) -> String {
             ));
         }
         "infrared" => {
-            let protos = f("protocols").and_then(Value::as_object).map(|o| {
-                o.iter().map(|(k, v)| format!("{k} ({v})")).collect::<Vec<_>>().join(", ")
-            });
-            out.push(format!("An infrared remote file with {} signal(s); protocols: {}.", n("signal_count").unwrap_or(0), protos.unwrap_or_default()));
+            let protos = f("protocols")
+                .and_then(Value::as_object)
+                .map(|o| o.iter().map(|(k, v)| format!("{k} ({v})")).collect::<Vec<_>>().join(", "));
+            out.push(format!(
+                "An infrared remote file with {} signal(s); protocols: {}.",
+                n("signal_count").unwrap_or(0),
+                protos.unwrap_or_default()
+            ));
             if let Some(names) = f("signals").and_then(Value::as_array) {
                 let list: Vec<&str> = names.iter().filter_map(|x| x.get("name").and_then(Value::as_str)).take(12).collect();
                 if !list.is_empty() {

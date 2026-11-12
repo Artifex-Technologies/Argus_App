@@ -71,7 +71,9 @@ mod tests {
 
     #[test]
     fn reads_fields_and_raw_counts() {
-        let f = parse(b"Filetype: Flipper SubGhz RAW File\nVersion: 1\n# comment\nFrequency: 433920000\nRAW_Data: 100 -200 300\nRAW_Data: -50\n");
+        let f = parse(
+            b"Filetype: Flipper SubGhz RAW File\nVersion: 1\n# comment\nFrequency: 433920000\nRAW_Data: 100 -200 300\nRAW_Data: -50\n",
+        );
         assert_eq!(f.filetype(), Some("Flipper SubGhz RAW File"));
         assert_eq!(f.get("frequency"), Some("433920000"));
         assert_eq!(f.raw_totals("RAW_Data"), (4, 650));

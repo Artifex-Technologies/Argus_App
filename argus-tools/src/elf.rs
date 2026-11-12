@@ -126,11 +126,7 @@ impl<'a> Elf<'a> {
             return Err(Error::new("elf_bad_symtab", "the symbol table has an unexpected entry size"));
         }
         let syms = self.section_data(symtab).ok_or_else(trunc)?;
-        let strtab = self
-            .sections
-            .get(symtab.link as usize)
-            .and_then(|s| self.section_data(s))
-            .ok_or_else(trunc)?;
+        let strtab = self.sections.get(symtab.link as usize).and_then(|s| self.section_data(s)).ok_or_else(trunc)?;
         let count = syms.len() / 16;
         if count > MAX_SYMBOLS {
             return Err(Error::new("elf_bad_symtab", "the symbol table is implausibly large"));

@@ -89,10 +89,7 @@ const TABLES: &[(&str, u16, &str)] = &[("88.2", 7, include_str!("../data/api_sym
 
 /// The exported table for exactly this API version and target, if Argus carries one.
 pub fn builtin_table(api: &FirmwareApi) -> Option<SymbolTable> {
-    TABLES
-        .iter()
-        .find(|(v, t, _)| *v == api.text() && *t == api.target)
-        .and_then(|(_, t, text)| SymbolTable::from_text(text, *t))
+    TABLES.iter().find(|(v, t, _)| *v == api.text() && *t == api.target).and_then(|(_, t, text)| SymbolTable::from_text(text, *t))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -161,14 +158,26 @@ pub fn check(info: &FapInfo, fw: &FirmwareApi, table: Option<&SymbolTable>) -> C
         return mk(
             Status::Incompatible,
             "api_too_old",
-            format!("built for API {} (major {}); the firmware is API {} and needs major {}", m.api_text(), m.api_major, fw.text(), fw.major),
+            format!(
+                "built for API {} (major {}); the firmware is API {} and needs major {}",
+                m.api_text(),
+                m.api_major,
+                fw.text(),
+                fw.major
+            ),
         );
     }
     if m.api_major > fw.major {
         return mk(
             Status::Incompatible,
             "api_too_new",
-            format!("built for API {} (major {}); the firmware is API {} and needs major {}", m.api_text(), m.api_major, fw.text(), fw.major),
+            format!(
+                "built for API {} (major {}); the firmware is API {} and needs major {}",
+                m.api_text(),
+                m.api_major,
+                fw.text(),
+                fw.major
+            ),
         );
     }
 
@@ -178,7 +187,12 @@ pub fn check(info: &FapInfo, fw: &FirmwareApi, table: Option<&SymbolTable>) -> C
             let mut c = mk(
                 Status::Compatible,
                 "ok",
-                format!("API major {} matches and all {} imported symbols are exported by API {}", m.api_major, info.imports.len(), fw.text()),
+                format!(
+                    "API major {} matches and all {} imported symbols are exported by API {}",
+                    m.api_major,
+                    info.imports.len(),
+                    fw.text()
+                ),
             );
             c.symbols_checked = true;
             return c;
@@ -189,10 +203,7 @@ pub fn check(info: &FapInfo, fw: &FirmwareApi, table: Option<&SymbolTable>) -> C
             let mut c = mk(
                 Status::Unknown,
                 "plugin_host_symbols",
-                format!(
-                    "a plugin: {} of its imported symbols are not firmware exports and must come from its host app",
-                    missing.len()
-                ),
+                format!("a plugin: {} of its imported symbols are not firmware exports and must come from its host app", missing.len()),
             );
             c.missing_count = missing.len();
             c.missing_symbols = missing.into_iter().take(20).cloned().collect();

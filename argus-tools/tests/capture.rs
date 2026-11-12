@@ -92,7 +92,11 @@ fn indexes_snapshots_too() {
     let snaps = Snapshots::open(&d.path().join("store")).unwrap();
     let staging = d.path().join("staging");
     let mut l = Listing { root: "/ext".into(), ..Default::default() };
-    for (path, src) in [("/ext/subghz/garage.sub", "captures/ext/subghz/garage.sub"), ("/ext/nfc/assets/mf_classic_dict.nfc", "captures/ext/nfc/badge.nfc"), ("/ext/apps/Games/snake_game.fap", "snake_game.fap")] {
+    for (path, src) in [
+        ("/ext/subghz/garage.sub", "captures/ext/subghz/garage.sub"),
+        ("/ext/nfc/assets/mf_classic_dict.nfc", "captures/ext/nfc/badge.nfc"),
+        ("/ext/apps/Games/snake_game.fap", "snake_game.fap"),
+    ] {
         let p = staging.join(&path[1..]);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::copy(fixture(src), &p).unwrap();

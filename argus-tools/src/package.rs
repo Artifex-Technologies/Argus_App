@@ -46,14 +46,7 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits {
-            total_bytes: 2 << 30,
-            nested_bytes: 512 << 20,
-            app_bytes: 8 << 20,
-            entries: 200_000,
-            depth: 6,
-            apps: 10_000,
-        }
+        Limits { total_bytes: 2 << 30, nested_bytes: 512 << 20, app_bytes: 8 << 20, entries: 200_000, depth: 6, apps: 10_000 }
     }
 }
 
@@ -266,7 +259,11 @@ impl Ctx<'_> {
 }
 
 fn join_display(outer: &str, inner: &str) -> String {
-    if outer.is_empty() { inner.to_string() } else { format!("{outer} > {inner}") }
+    if outer.is_empty() {
+        inner.to_string()
+    } else {
+        format!("{outer} > {inner}")
+    }
 }
 
 /// Create `path` with `data`, never following or replacing anything already there (an existing
@@ -299,7 +296,11 @@ fn write_new(path: &Path, data: &[u8]) -> Result<()> {
 #[cfg(unix)]
 fn libc_nofollow() -> i32 {
     // O_NOFOLLOW: Linux 0o400000; macOS and the BSDs 0x100.
-    if cfg!(target_os = "linux") { 0o400000 } else { 0x100 }
+    if cfg!(target_os = "linux") {
+        0o400000
+    } else {
+        0x100
+    }
 }
 
 /// Fill `head` from `r` as far as it goes (up to its length).
@@ -362,10 +363,9 @@ fn stream(ctx: &mut Ctx, r: &mut dyn Read, depth: u32, outer: &str, top_name: &E
             ctx.take_app(top_name, "", &mut (&head[..n]).chain(r));
             Ok(())
         }
-        Kind::Unknown if depth == 0 => Err(Error::new(
-            "unknown_format",
-            "not a firmware package Argus knows (expected .tgz, .zip, .tar, resources.ths or a .fap)",
-        )),
+        Kind::Unknown if depth == 0 => {
+            Err(Error::new("unknown_format", "not a firmware package Argus knows (expected .tgz, .zip, .tar, resources.ths or a .fap)"))
+        }
         Kind::Unknown => {
             ctx.skip(outer, "not an archive Argus knows; skipped");
             Ok(())
@@ -513,10 +513,7 @@ pub fn scan(package: &Path, out_dir: &Path, limits: Limits, fw: Option<FirmwareA
         hex::encode(h.finalize())
     };
     let table = fw.as_ref().and_then(api::builtin_table);
-    let display = crate::display_text(
-        package.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default().as_bytes(),
-        200,
-    );
+    let display = crate::display_text(package.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default().as_bytes(), 200);
     let mut ctx = Ctx {
         limits,
         budget: Budget(Rc::new(Cell::new(limits.total_bytes))),

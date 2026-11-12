@@ -239,8 +239,7 @@ fn base_snapshot(snaps: &Snapshots, base: Option<&str>) -> Result<Option<Snapsho
 
 pub fn plan(snaps: &Snapshots, listing: &Listing, base: Option<&str>) -> Result<Plan> {
     let base = base_snapshot(snaps, base)?;
-    let known: BTreeMap<&str, &FileRec> =
-        base.as_ref().map(|b| b.files.iter().map(|f| (f.path.as_str(), f)).collect()).unwrap_or_default();
+    let known: BTreeMap<&str, &FileRec> = base.as_ref().map(|b| b.files.iter().map(|f| (f.path.as_str(), f)).collect()).unwrap_or_default();
     let mut p = Plan { base: base.as_ref().map(|b| b.id.clone()), verify_md5: vec![], download: vec![], refused: vec![] };
     for f in &listing.files {
         if !paths::valid_device_path(&f.path) || !under_root(&listing.root, &f.path) {
@@ -272,8 +271,7 @@ pub fn create(
         return Err(Error::new("bad_root", "the listing's root is not a device path"));
     }
     let base = base_snapshot(snaps, base)?;
-    let known: BTreeMap<&str, &FileRec> =
-        base.as_ref().map(|b| b.files.iter().map(|f| (f.path.as_str(), f)).collect()).unwrap_or_default();
+    let known: BTreeMap<&str, &FileRec> = base.as_ref().map(|b| b.files.iter().map(|f| (f.path.as_str(), f)).collect()).unwrap_or_default();
     let mut files = Vec::new();
     let mut skipped = Vec::new();
     let mut seen = BTreeSet::new();
@@ -347,11 +345,7 @@ fn side_of_snapshot(s: &Snapshot) -> BTreeMap<String, (u64, Option<String>)> {
 }
 
 fn side_of_listing(l: &Listing) -> BTreeMap<String, (u64, Option<String>)> {
-    l.files
-        .iter()
-        .filter(|f| paths::valid_device_path(&f.path))
-        .map(|f| (f.path.clone(), (f.size, f.md5.clone())))
-        .collect()
+    l.files.iter().filter(|f| paths::valid_device_path(&f.path)).map(|f| (f.path.clone(), (f.size, f.md5.clone()))).collect()
 }
 
 fn compare(from: &str, to: &str, a: BTreeMap<String, (u64, Option<String>)>, b: BTreeMap<String, (u64, Option<String>)>) -> Diff {

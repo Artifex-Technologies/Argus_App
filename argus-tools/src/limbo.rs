@@ -45,7 +45,8 @@ const MAX_FAP: usize = 4 << 20;
 const MAX_RESPONSE: usize = 32 << 20;
 
 /// Folders and files that never matter for a build and only make the bundle bigger.
-const SKIP_NAMES: &[&str] = &[".git", ".github", ".vscode", ".idea", "dist", "build", "screenshots", ".catalog", "docs", "node_modules", "__pycache__", ".ufbt"];
+const SKIP_NAMES: &[&str] =
+    &[".git", ".github", ".vscode", ".idea", "dist", "build", "screenshots", ".catalog", "docs", "node_modules", "__pycache__", ".ufbt"];
 const SKIP_EXT: &[&str] = &["gif", "jpg", "jpeg", "mp4", "webm", "mov", "pdf", "zip", "fap", "elf", "o"];
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,7 +163,11 @@ pub fn valid_git_url(u: &str) -> bool {
 }
 
 pub fn valid_ref(r: &str) -> bool {
-    !r.is_empty() && r.len() <= 100 && !r.starts_with('-') && !r.contains("..") && r.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c))
+    !r.is_empty()
+        && r.len() <= 100
+        && !r.starts_with('-')
+        && !r.contains("..")
+        && r.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c))
 }
 
 pub fn valid_subdir(s: &str) -> bool {
@@ -194,11 +199,8 @@ pub fn fetch_command(url: &str, git_ref: Option<&str>, subdir: &str) -> Result<S
     }
     let branch = git_ref.map(|r| format!("--branch '{r}' ")).unwrap_or_default();
     let dir = if subdir.is_empty() { ".".to_string() } else { format!("'{subdir}'") };
-    let excludes: String = SKIP_NAMES
-        .iter()
-        .map(|n| format!("--exclude='{n}' "))
-        .chain(SKIP_EXT.iter().map(|e| format!("--exclude='*.{e}' ")))
-        .collect();
+    let excludes: String =
+        SKIP_NAMES.iter().map(|n| format!("--exclude='{n}' ")).chain(SKIP_EXT.iter().map(|e| format!("--exclude='*.{e}' "))).collect();
     Ok(format!(
         "set -eu; export GIT_TERMINAL_PROMPT=0; \
          cd \"$HOME\" && rm -rf repo && git clone --quiet --depth 1 --no-recurse-submodules --single-branch {branch}-- '{url}' repo >&2; \
@@ -318,7 +320,8 @@ pub fn parse_build_output(stdout: &str, fw: &FirmwareApi, out_dir: &Path) -> Res
             Ok(info) => (Some(info.manifest.clone()), api::check(&info, fw, table.as_ref())),
             Err(e) => (None, api::not_a_fap(fw, &e.message)),
         };
-        let file_name = if name.ends_with(".fap") && name.len() <= 64 && !name.starts_with('.') { name } else { format!("{}.fap", &sha[..8]) };
+        let file_name =
+            if name.ends_with(".fap") && name.len() <= 64 && !name.starts_with('.') { name } else { format!("{}.fap", &sha[..8]) };
         out.push(BuiltFap { file_name, sha256: sha, size: data.len(), stored, manifest, compat });
     }
     if out.is_empty() {
@@ -394,7 +397,10 @@ impl Client {
         let mut s = UnixStream::connect(&self.socket).map_err(|e| {
             Error::new(
                 "limbo_unreachable",
-                format!("cannot reach Limbo at {} ({e}); is limbo serve running and are you in the limbo-agent group?", self.socket.display()),
+                format!(
+                    "cannot reach Limbo at {} ({e}); is limbo serve running and are you in the limbo-agent group?",
+                    self.socket.display()
+                ),
             )
         })?;
         s.set_read_timeout(Some(Duration::from_secs(60)))?;

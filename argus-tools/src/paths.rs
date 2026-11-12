@@ -33,10 +33,7 @@ pub fn entry_name(raw: &[u8]) -> EntryName {
 /// A folder name that may be used on the SD card under /ext/apps/: short, printable, no
 /// separators, not hidden, not "." or "..".
 pub fn valid_category(c: &str) -> bool {
-    !c.is_empty()
-        && c.len() <= 40
-        && !c.starts_with('.')
-        && c.chars().all(|ch| ch.is_ascii_alphanumeric() || " _-+().,&'".contains(ch))
+    !c.is_empty() && c.len() <= 40 && !c.starts_with('.') && c.chars().all(|ch| ch.is_ascii_alphanumeric() || " _-+().,&'".contains(ch))
 }
 
 /// The category (folder under /ext/apps) for an app found at `name` inside a package: the folder
@@ -51,7 +48,11 @@ pub fn category_for(name: &EntryName) -> String {
         Some(_) => return "Misc".into(),
         None => &dirs[dirs.len() - 1],
     };
-    if valid_category(pick) { pick.clone() } else { "Misc".into() }
+    if valid_category(pick) {
+        pick.clone()
+    } else {
+        "Misc".into()
+    }
 }
 
 /// A FAP file name for the device: the entry's basename if it is plain, else "<sha8>.fap".
@@ -61,7 +62,11 @@ pub fn device_file_name(name: &EntryName, sha256: &str) -> String {
         && base.to_ascii_lowercase().ends_with(".fap")
         && !base.starts_with('.')
         && base.chars().all(|c| c.is_ascii_alphanumeric() || "_-+.".contains(c));
-    if ok { base.to_string() } else { format!("{}.fap", &sha256[..8.min(sha256.len())]) }
+    if ok {
+        base.to_string()
+    } else {
+        format!("{}.fap", &sha256[..8.min(sha256.len())])
+    }
 }
 
 /// A device path Argus accepts from a listing: absolute, under /ext or /int, no "." / "..",

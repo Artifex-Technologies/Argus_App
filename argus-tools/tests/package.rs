@@ -41,7 +41,11 @@ fn heatshrink_decodes_the_c_encoder_output() {
 fn heatshrink_round_trips() {
     use std::io::Read;
     let data: Vec<u8> = (0..20_000u32).map(|i| ((i * 7) % 251) as u8 ^ if i % 97 < 40 { 0 } else { 0x55 }).collect();
-    for p in [Params { window_bits: 8, lookahead_bits: 4 }, Params { window_bits: 10, lookahead_bits: 5 }, Params { window_bits: 4, lookahead_bits: 3 }] {
+    for p in [
+        Params { window_bits: 8, lookahead_bits: 4 },
+        Params { window_bits: 10, lookahead_bits: 5 },
+        Params { window_bits: 4, lookahead_bits: 3 },
+    ] {
         let enc = heatshrink::encode(&data, p);
         let mut dec = Vec::new();
         heatshrink::Decoder::new(enc.as_slice(), p).read_to_end(&mut dec).unwrap();
