@@ -55,8 +55,14 @@ class DfuseDevice : public USBDevice
         Status bStatus = ERR_UNDEFINED;
         State bState = STATE_UNDEFINED;
 
-        uint32_t bwPollTimeout;
-        uint8_t iString;
+        uint32_t bwPollTimeout = 0;
+        uint8_t iString = 0;
+
+        // False when DFU_GETSTATUS failed or did not answer 6 bytes
+        bool isValid = false;
+
+        // The wait the device asked for, at most MaxPollTimeout
+        unsigned long waitTime() const;
     };
 
     enum Request {
@@ -70,6 +76,12 @@ class DfuseDevice : public USBDevice
     };
 
 public:
+    // Every wait is bounded, the same as in the Rust port (argus-tools/crates/flipper-dfu, src/device.rs):
+    // a poll timeout over MaxPollTimeout ms is clamped, and one step gives up after MaxPolls status reads.
+    static const uint32_t MaxPollTimeout = 10000;
+    static const int MaxPolls = 1000;
+    static const size_t MaxUpload = 16 * 1024 * 1024;
+
     enum Operation {
         Erase,
         Download,
@@ -100,6 +112,8 @@ private:
     StatusType getStatus();
 
     bool prepare();
+    bool pollWhileBusy(const char *failMsg);
+    bool pollUntil(StatusType::State state, const char *failMsg);
     bool setAddressPointer(uint32_t addr);
     bool erasePage(uint32_t addr);
 };

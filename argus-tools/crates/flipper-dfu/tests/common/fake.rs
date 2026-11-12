@@ -1,0 +1,334 @@
+//! A fake STM32WB55 ROM bootloader (DfuSe over DFU 1.1), for tests only: interface 0 with three
+//! alternate settings (flash, option bytes, OTP), each described by its interface string, a 1 MiB
+//! flash that must be erased (0xFF) before it is written, and the DFU state machine as the device
+//! runs it. Every request is recorded in `log`, in a form both the Rust code and the C++ app (over
+//! the oracle's line protocol) produce, so the two can be compared request for request.
+//!
+//! It misbehaves on purpose when told to (`Faults`).
+
+use flipper_dfu::device::{command, request, state, Transport, TransportError};
+
+pub const FLASH: u32 = 0x0800_0000;
+pub const FLASH_SIZE: usize = 1 << 20;
+pub const PAGE: usize = 4096;
+pub const OPTION_BYTES: u32 = 0x1FFF_8000;
+pub const OTP: u32 = 0x1FFF_7000;
+pub const SRAM2A: u32 = 0x2003_0000;
+
+/// DFU status codes used here.
+pub const ERR_TARGET: u8 = 0x01;
+pub const ERR_WRITE: u8 = 0x03;
+pub const ERR_PROG: u8 = 0x06;
+pub const ERR_ADDRESS: u8 = 0x08;
+pub const ERR_STALLEDPKT: u8 = 0x0F;
+
+#[derive(Clone, Default)]
+pub struct Faults {
+    /// `bwPollTimeout` while busy (24 bits; values with a byte of 0x80 or more catch sign mistakes).
+    pub busy_poll_ms: u32,
+    /// Extra `dfuDNBUSY` answers before a step completes.
+    pub extra_busy: usize,
+    /// Never leaves `dfuDNBUSY`.
+    pub stuck_busy: bool,
+    /// After a data block, reports `dfuIDLE` with OK instead of `dfuDNLOAD-IDLE`.
+    pub idle_instead_of_dnload_idle: bool,
+    /// The nth (from 1) DNLOAD operation fails with this status.
+    pub fail_op: Option<(usize, u8)>,
+    /// `DFU_GETSTATUS` answers this many bytes instead of 6.
+    pub status_len: Option<usize>,
+    /// The functional descriptor as given (default: 9 bytes, transfer size 1024).
+    pub descriptor: Option<Vec<u8>>,
+    /// Interface strings instead of the real ones (by alternate setting).
+    pub strings: Option<Vec<Vec<u8>>>,
+    /// The device answers uploads with nothing.
+    pub empty_upload: bool,
+    /// The device starts in an error state (status errTARGET, dfuERROR).
+    pub start_in_error: bool,
+    /// The device starts in dfuDNLOAD-IDLE.
+    pub start_dnload_idle: bool,
+}
+
+pub struct FakeDfu {
+    pub log: Vec<String>,
+    pub flash: Vec<u8>,
+    pub option_bytes: Vec<u8>,
+    pub otp: Vec<u8>,
+    pub sram: Vec<u8>,
+    pub erased_pages: Vec<u32>,
+    pub fus_commands: Vec<u8>,
+    pub left: bool,
+    alt: u8,
+    state: u8,
+    status: u8,
+    pointer: u32,
+    pending: Option<(u16, Vec<u8>)>,
+    busy_left: usize,
+    ops: usize,
+    pub faults: Faults,
+}
+
+pub fn hex(b: &[u8]) -> String {
+    if b.is_empty() {
+        return "-".into();
+    }
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+impl FakeDfu {
+    pub fn new(faults: Faults) -> FakeDfu {
+        let mut option_bytes = vec![0; 128];
+        // nBOOT0 and nSWBOOT0 set, as on a device that boots its firmware
+        option_bytes[3] = 0x0C;
+        let mut sram = vec![0; 0x400];
+        // the device information table's address, at the start of SRAM2A
+        sram[..4].copy_from_slice(&(SRAM2A + 0x100).to_le_bytes());
+        let (state, status) = if faults.start_in_error {
+            (state::ERROR, ERR_TARGET)
+        } else if faults.start_dnload_idle {
+            (state::DNLOAD_IDLE, 0)
+        } else {
+            (state::DFU_IDLE, 0)
+        };
+        FakeDfu {
+            log: Vec::new(),
+            flash: vec![0xFF; FLASH_SIZE],
+            option_bytes,
+            otp: (0..1024).map(|i| i as u8).collect(),
+            sram,
+            erased_pages: Vec::new(),
+            fus_commands: Vec::new(),
+            left: false,
+            alt: 0,
+            state,
+            status,
+            pointer: 0,
+            pending: None,
+            busy_left: 0,
+            ops: 0,
+            faults,
+        }
+    }
+
+    fn strings(&self) -> Vec<Vec<u8>> {
+        self.faults.strings.clone().unwrap_or_else(|| {
+            vec![
+                b"@Internal Flash   /0x08000000/256*04Kg".to_vec(),
+                b"@Option Bytes   /0x1FFF8000/01*128 e".to_vec(),
+                b"@OTP Memory   /0x1FFF7000/01*1Ke".to_vec(),
+            ]
+        })
+    }
+
+    fn stall(&mut self) -> TransportError {
+        self.state = state::ERROR;
+        self.status = ERR_STALLEDPKT;
+        TransportError("stall".into())
+    }
+
+    /// The memory an address range of the current alternate setting falls in: (region, offset).
+    fn region(&mut self, address: u32, len: usize) -> Option<(&mut Vec<u8>, usize)> {
+        let (base, mem) = match self.alt {
+            0 if address >= SRAM2A => (SRAM2A, &mut self.sram),
+            0 => (FLASH, &mut self.flash),
+            1 => (OPTION_BYTES, &mut self.option_bytes),
+            2 => (OTP, &mut self.otp),
+            _ => return None,
+        };
+        let off = address.checked_sub(base)? as usize;
+        if off + len > mem.len() {
+            return None;
+        }
+        Some((mem, off))
+    }
+
+    fn transfer_size(&self) -> usize {
+        let d = self.faults.descriptor.clone().unwrap_or_else(descriptor);
+        if d.len() >= 7 {
+            usize::from(u16::from_le_bytes([d[5], d[6]])).max(1)
+        } else {
+            1024
+        }
+    }
+
+    /// Runs a block-0 command or writes a data block; returns the status.
+    fn execute(&mut self, block: u16, data: &[u8]) -> u8 {
+        self.ops += 1;
+        if let Some((n, status)) = self.faults.fail_op {
+            if n == self.ops {
+                return status;
+            }
+        }
+        match block {
+            0 => match data {
+                [command::SET_ADDRESS, a @ ..] if a.len() == 4 => {
+                    let address = u32::from_le_bytes([a[0], a[1], a[2], a[3]]);
+                    if self.region(address, 0).is_none() {
+                        return ERR_ADDRESS;
+                    }
+                    self.pointer = address;
+                    0
+                }
+                [command::ERASE, a @ ..] if a.len() == 4 => {
+                    let address = u32::from_le_bytes([a[0], a[1], a[2], a[3]]);
+                    if self.alt != 0 || !(FLASH..FLASH + FLASH_SIZE as u32).contains(&address) {
+                        return ERR_ADDRESS;
+                    }
+                    let page = (address - FLASH) as usize / PAGE;
+                    self.flash[page * PAGE..(page + 1) * PAGE].fill(0xFF);
+                    self.erased_pages.push(FLASH + (page * PAGE) as u32);
+                    0
+                }
+                [c @ (command::FUS_FW_DELETE | command::FUS_FW_UPGRADE | command::FUS_START_WS)] => {
+                    self.fus_commands.push(*c);
+                    0
+                }
+                _ => ERR_TARGET,
+            },
+            1 => ERR_TARGET,
+            n => {
+                let address = u64::from(self.pointer) + (u64::from(n) - 2) * self.transfer_size() as u64;
+                let Ok(address) = u32::try_from(address) else { return ERR_ADDRESS };
+                let flash = self.alt == 0 && address < SRAM2A;
+                let Some((mem, off)) = self.region(address, data.len()) else { return ERR_ADDRESS };
+                if flash && mem[off..off + data.len()].iter().any(|&b| b != 0xFF) {
+                    return ERR_PROG;
+                }
+                mem[off..off + data.len()].copy_from_slice(data);
+                0
+            }
+        }
+    }
+}
+
+/// A DFU functional descriptor: will-detach, manifestation tolerant, upload, download; transfer size 1024.
+pub fn descriptor() -> Vec<u8> {
+    vec![9, 0x21, 0x0B, 0xFF, 0x00, 0x00, 0x04, 0x1A, 0x01]
+}
+
+impl Transport for FakeDfu {
+    fn set_alt(&mut self, alt: u8) -> Result<(), TransportError> {
+        self.log.push(format!("ALT {alt}"));
+        if self.left || usize::from(alt) >= self.strings().len().max(3) {
+            return Err(TransportError("no such alternate setting".into()));
+        }
+        self.alt = alt;
+        Ok(())
+    }
+
+    fn control_out(&mut self, req: u8, value: u16, data: &[u8]) -> Result<usize, TransportError> {
+        self.log.push(format!("OUT {req} {value} {}", hex(data)));
+        if self.left {
+            return Err(TransportError("device gone".into()));
+        }
+        match req {
+            request::DNLOAD => {
+                if self.state != state::DFU_IDLE && self.state != state::DNLOAD_IDLE {
+                    return Err(self.stall());
+                }
+                if data.is_empty() {
+                    self.state = state::MANIFEST_SYNC;
+                    return Ok(0);
+                }
+                self.pending = Some((value, data.to_vec()));
+                self.busy_left = 1 + self.faults.extra_busy;
+                self.state = state::DNLOAD_SYNC;
+                Ok(data.len())
+            }
+            request::CLRSTATUS => {
+                if self.state != state::ERROR {
+                    return Err(self.stall());
+                }
+                self.state = state::DFU_IDLE;
+                self.status = 0;
+                Ok(0)
+            }
+            request::ABORT => {
+                if self.state == state::ERROR {
+                    return Err(self.stall());
+                }
+                self.pending = None;
+                self.state = state::DFU_IDLE;
+                Ok(0)
+            }
+            _ => Err(self.stall()),
+        }
+    }
+
+    fn control_in(&mut self, req: u8, value: u16, length: u16) -> Result<Vec<u8>, TransportError> {
+        self.log.push(format!("IN {req} {value} {length}"));
+        if self.left {
+            return Err(TransportError("device gone".into()));
+        }
+        match req {
+            request::GETSTATUS => {
+                let mut poll = 0;
+                match self.state {
+                    state::DNLOAD_SYNC | state::DNBUSY => {
+                        if self.busy_left > 0 || self.faults.stuck_busy {
+                            self.busy_left = self.busy_left.saturating_sub(1);
+                            self.state = state::DNBUSY;
+                            poll = self.faults.busy_poll_ms;
+                        } else {
+                            let (block, data) = self.pending.take().unwrap_or_default();
+                            let status = self.execute(block, &data);
+                            if status != 0 {
+                                self.state = state::ERROR;
+                                self.status = status;
+                            } else if self.faults.idle_instead_of_dnload_idle && block >= 2 {
+                                self.state = state::DFU_IDLE;
+                            } else {
+                                self.state = state::DNLOAD_IDLE;
+                            }
+                        }
+                    }
+                    state::MANIFEST_SYNC => {
+                        // the bootloader resets into the firmware: the device is gone
+                        self.left = true;
+                        return Err(TransportError("device gone".into()));
+                    }
+                    _ => {}
+                }
+                let p = poll.to_le_bytes();
+                let mut out = vec![self.status, p[0], p[1], p[2], self.state, 0];
+                out.truncate(self.faults.status_len.unwrap_or(6).min(usize::from(length)));
+                Ok(out)
+            }
+            request::UPLOAD => {
+                if self.state != state::DFU_IDLE && self.state != state::UPLOAD_IDLE {
+                    return Err(self.stall());
+                }
+                if self.faults.empty_upload {
+                    return Ok(Vec::new());
+                }
+                if value < 2 {
+                    self.state = state::UPLOAD_IDLE;
+                    return Ok(vec![0x00, command::SET_ADDRESS, command::ERASE, 0x92]);
+                }
+                // ST's bootloader: pointer + (block - 2) * its transfer size, whatever this request's length
+                let address = u64::from(self.pointer) + (u64::from(value) - 2) * self.transfer_size() as u64;
+                let Ok(address) = u32::try_from(address) else { return Err(self.stall()) };
+                // short at the end of the region
+                let Some((mem, off)) = self.region(address, 0) else { return Err(self.stall()) };
+                let n = usize::from(length).min(mem.len() - off);
+                let out = mem[off..off + n].to_vec();
+                self.state = if n < usize::from(length) { state::DFU_IDLE } else { state::UPLOAD_IDLE };
+                Ok(out)
+            }
+            _ => Err(self.stall()),
+        }
+    }
+
+    fn functional_descriptor(&mut self) -> Result<Vec<u8>, TransportError> {
+        self.log.push("DESC".into());
+        Ok(self.faults.descriptor.clone().unwrap_or_else(descriptor))
+    }
+
+    fn interface_string(&mut self, alt: u8) -> Result<Vec<u8>, TransportError> {
+        self.log.push(format!("STRING {alt}"));
+        self.strings().get(usize::from(alt)).cloned().ok_or_else(|| TransportError("no such string".into()))
+    }
+
+    fn sleep_ms(&mut self, ms: u32) {
+        self.log.push(format!("SLEEP {ms}"));
+    }
+}

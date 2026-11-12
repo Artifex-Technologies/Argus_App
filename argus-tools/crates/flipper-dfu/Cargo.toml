@@ -3,8 +3,15 @@ name = "flipper-dfu"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
-description = "Flipper Zero recovery for Argus: DfuSe files and the DFU memory layout, pure code that opens no device"
+description = "Flipper Zero recovery for Argus: DfuSe files, the DFU memory layout and ST's DfuSe protocol over a transport trait; the nusb transport only behind the usb feature"
 publish = false
+
+[features]
+# The real USB transport (src/usb.rs, nusb). Off by default: no test and no default build can reach a USB device.
+usb = ["dep:nusb"]
+
+[dependencies]
+nusb = { version = "0.2.9", optional = true }
 
 [dev-dependencies]
 md-5 = "0.10"

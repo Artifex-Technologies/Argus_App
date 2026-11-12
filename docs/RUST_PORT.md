@@ -81,7 +81,9 @@ Protocol and device logic first, with the CLI as the proof surface; the UI last.
 6. **DFU and recovery** with nusb: DfuSe parsing first (pure, fuzzed), then option bytes, FUS and radio stack. No
    flashing in tests, and none on my device until I say so.
    *Started 2026-11-12: the DfuSe file parser and the memory layout reader (`crates/flipper-dfu`), checked against
-   the C++ parsers themselves; both fixed.*
+   the C++ parsers themselves, then ST's DfuSe protocol (`flipper_dfu::device`), checked request for request against
+   the C++ `DfuseDevice` on one fake bootloader; both fixed. nusb is a thin adapter behind the `usb` feature that no
+   test uses. Option bytes, FUS and the radio stack next.*
 7. **Update registry and region provisioning** (HTTPS with rustls, SHA-256 checked before anything is used).
 8. **The UI** in egui/eframe, window by window. When it covers what the QML does, the C++ goes (no dead code left).
 
@@ -131,6 +133,23 @@ both must accept the same inputs and read the same values and bytes. Every refus
 real files, it compares those too: my own firmware builds (firmware, updater and full `.dfu`) read the same in both,
 and the C++ parser before the fixes accepted them too. The parser also has
 property tests (any bytes, any damage to a good file) and a cargo-fuzz target (`dfuse_file`).
+
+**The DfuSe protocol against the C++ app's, on one fake bootloader.** `tests/common/fake.rs` is a fake STM32WB55 ROM
+bootloader: interface 0 with flash, option bytes and OTP as alternate settings described by their interface strings,
+a 1 MiB flash that must be erased before it is written, and the DFU state machine (dnload-sync, busy, dnload-idle,
+upload-idle, error, manifestation, which ends the device), with addresses as ST's bootloader computes them
+(pointer + (block - 2) x transfer size). It records every request and every wait asked for. The oracle is built with
+the C++ app's own `dfusedevice.cpp` and a stand-in for its libusb `USBDevice` (`tests/qt-oracle/fakeusbdevice.cpp`,
+same header) that opens nothing: each request is a line on a pipe, which `tests/qt_device.rs` serves from a fresh
+copy of the same fake, and `QThread::msleep` is replaced so a wait is recorded, not waited. The C++ and Rust code
+must send the same requests in the same order, ask for the same waits, succeed or fail alike, read the same bytes and
+leave the fake's memory the same, in 51 scenarios: a firmware file (also with busy polls, from an error state, with a
+step or a data block refused), erase, download, upload (option bytes, OTP, the info-table pointer, past the end), FUS
+commands, leaving, and devices that ask for waits of 0x808080 or 0xFFFFFF ms, stay busy for ever, never reach
+dnload-idle, send short or no statuses, report a transfer size of 0 or 1, answer uploads with nothing, or describe a
+hostile memory layout. Before the fixes below, 12 of them differed; now all 51 agree. The Linux workflow runs it.
+`tests/device.rs` (9 tests) checks the Rust side alone: a firmware written and read back, the exact pages erased,
+writes onto unerased flash refused, every fault bounded and nothing written after one.
 
 **The C++ CLI against the same fake.** The C++ app finds a Flipper by USB VID/PID. A test-only hook
 (`backend/testhooks.h`) changes that only when `ARGUS_TEST_SERIAL_PORT` names a port: the registry then does not
@@ -270,6 +289,12 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
 - Phase 6 start (2026-11-12): `crates/flipper-dfu` with `dfuse` (DfuSe files: the whole file at most 16 MiB, every
   length checked before it is read) and `layout` (the interface string's memory layout and the pages to erase for a
   range). Pure code, no USB. 11 tests with property tests, and the C++ comparison above.
+- The DfuSe protocol (2026-11-12): `flipper_dfu::device` (`Dfu` over a `Transport` trait: status, clear, abort,
+  prepare, set address, erase page and range, download, a whole DfuSe file, block-0 commands, upload, leave), every
+  wait bounded (at most 1000 status reads per step, each wait at most 10 s). `flipper_dfu::usb` (feature `usb`) is the
+  nusb transport: it opens only a device it is handed and only ST's DFU bootloader (0483:DF11), claims interface 0,
+  and does not retry transfers (a retried download could erase or write twice). No test enables it; CI lints it.
+  Nothing calls it yet: a CLI command for recovery comes with option bytes and FUS, behind `--yes`.
 
 Differences from the C++ app found so far, all on purpose or harmless:
 
@@ -405,6 +430,25 @@ cases for each, and both parsers now accept exactly the same files:
   `B`, `K` or `M` and a type `a` to `g`, inside 4 GiB, ASCII), and a range must lie inside the layout; page
   addresses are computed per bank.
 
+Found while porting the DfuSe protocol (phase 6), and **fixed in both versions** on 2026-11-12. `tests/qt_device.rs`
+has a scenario for each, and the two now send the same requests:
+
+- **A poll timeout byte of 0x80 or more meant a 49-day sleep.** `getStatus` read the status bytes as signed `char`, so
+  `bwPollTimeout` 0x808080 became 4 294 967 168 ms. The bytes are unsigned now, and both clamp a wait to 10 s.
+- **A busy device hung the app for ever.** Every status loop (set address, erase, raw command, download) ran until the
+  device changed its state; a device that stayed busy, or reported OK in a state other than dnload-idle after a
+  block, was polled without end. Both give up after 1000 status reads.
+- **A transfer size of 0 told the device the download was over.** `read(0)` gave an empty block, and an empty
+  `DFU_DNLOAD` is the DFU signal that the download is complete (manifestation), sent in the middle of a flash; the
+  upload loop with size 0 never ended. A size of 0 is refused before any data moves.
+- **Block numbers wrapped into DfuSe commands.** Data needing more than 65 534 blocks wrapped `wBlockNum` to 0 and 1,
+  where the device reads commands: a data byte 0x41 at the start of a block would have been an erase. Refused
+  before any data moves.
+- **A status that could not be read was taken as an error state to clear** (`prepare` sent `DFU_CLRSTATUS` and went
+  on). It now stops the step.
+- **An upload answered with nothing counted as success** (as the end of memory). It is a failure now; a short but
+  non-empty answer is still the end.
+
 A regression of my own, caught by porting the capture sync: once `GetFileTreeOperation` left unsafe names out,
 the C++ capture pull stopped counting them as failed (as `stagedPath` used to). `CaptureSync` now counts every
 refused name as failed again, and the Rust pull does the same.
@@ -432,9 +476,11 @@ failed, and does not read `devinfo` or start the screen.
    device without my approval in the app.
 2. Phase 5 is done at the protocol level (update over the updater, factory reset), proven against the fake only.
    Before either is used on my Flipper: run `argus-cli update` and `erase` against it once with me watching.
-3. Phase 6 (DFU and recovery): the DfuSe parser and the memory layout are done and match the C++ ones. Next: the DFU
-   protocol (`DFU_GETSTATUS`, `DNLOAD`, `UPLOAD`, erase and set-address commands as in `dfu/dfusedevice.cpp`) as pure
-   code over a transport trait, driven by a fake DFU device in tests; nusb only as a thin adapter behind a feature,
-   never used by a test. No flashing in tests, and none on my device until I say so.
+3. Phase 6 (DFU and recovery): the DfuSe parser, the memory layout and the DfuSe protocol are done and match the C++
+   ones (`crates/flipper-dfu`; the nusb transport behind the `usb` feature, unused by tests and by any command).
+   Next: the STM32WB55 layer (`dfu/device/stm32wb55/`: option bytes read, compare and write, FUS state, the device
+   information table, OTP) as pure code over `Dfu`, compared with the C++ `STM32WB55` on the same fake (the fake
+   already has the option bytes, OTP and the info-table pointer in SRAM2A); then `recovery.cpp`'s flows. A recovery
+   command in `argus-cli` only after that, behind `--yes`. No flashing in tests, and none on my device until I say so.
 4. For the UI phase: the screen stream is there (`flipper_rpc::screen`); buttons (`GuiSendInputRequest`) and the
    virtual display come with it.

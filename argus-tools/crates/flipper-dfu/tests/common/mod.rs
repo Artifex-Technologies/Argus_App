@@ -2,6 +2,8 @@
 //! and a small seeded generator.
 #![allow(dead_code)]
 
+pub mod fake;
+
 use flipper_dfu::dfuse::crc32;
 
 pub struct Rng(pub u64);

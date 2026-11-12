@@ -4,6 +4,11 @@
 //   dfu_oracle file PATH...   one line per file: "bad", or "ok" and every field DfuseFile read
 //   dfu_oracle layout         stdin lines "DESC_HEX\tSTART_HEX\tEND_HEX": the layout DFUMemoryLayout read
 //                             from DESC and the page addresses it gives for START..END
+//   dfu_oracle device OP ...  one DfuseDevice operation over fakeusbdevice.cpp (every USB request is a line
+//                             on stdout, answered on stdin), then "RESULT ok|fail DATA_HEX":
+//                             flash FILE | erase ADDR SIZE | download ADDR ALT FILE | upload ADDR SIZE ALT |
+//                             command HEX | leave | origin ALT   (ADDR in hex, SIZE in decimal)
+#include <QBuffer>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QFile>
@@ -16,6 +21,7 @@
 
 #include "dfusefile.h"
 #include "dfumemorylayout.h"
+#include "dfusedevice.h"
 
 static QByteArray hex(const QByteArray &b)
 {
@@ -85,6 +91,51 @@ static int layoutMode()
     return 0;
 }
 
+static int deviceMode(int argc, char *argv[])
+{
+    const QByteArray op = argc > 2 ? argv[2] : "";
+    auto arg = [&](int i) { return i < argc ? QByteArray(argv[i]) : QByteArray(); };
+
+    DfuseDevice dev((USBDeviceInfo()));
+    bool ok = dev.beginTransaction();
+    QByteArray out;
+
+    if(!ok) {
+    } else if(op == "flash") {
+        QFile f(QString::fromLocal8Bit(arg(3)));
+        ok = f.open(QIODevice::ReadOnly);
+        if(ok) {
+            DfuseFile fw(&f);
+            ok = dev.download(&fw);
+        }
+    } else if(op == "erase") {
+        ok = dev.erase(arg(3).toUInt(nullptr, 16), arg(4).toULongLong());
+    } else if(op == "download") {
+        QFile f(QString::fromLocal8Bit(arg(5)));
+        ok = f.open(QIODevice::ReadOnly);
+        if(ok) {
+            ok = dev.download(&f, arg(3).toUInt(nullptr, 16), (uint8_t)arg(4).toUInt());
+        }
+    } else if(op == "upload") {
+        QBuffer buf;
+        buf.open(QIODevice::WriteOnly);
+        ok = dev.upload(&buf, arg(3).toUInt(nullptr, 16), arg(4).toULongLong(), (uint8_t)arg(5).toUInt());
+        out = buf.data();
+    } else if(op == "command") {
+        ok = dev.download(QByteArray::fromHex(arg(3)));
+    } else if(op == "leave") {
+        ok = dev.leave();
+    } else if(op == "origin") {
+        out = QByteArray::number(dev.partitionOrigin((uint8_t)arg(3).toUInt()), 16);
+    } else {
+        return 2;
+    }
+
+    dev.endTransaction();
+    std::cout << "RESULT " << (ok ? "ok " : "fail ") << hex(out).toStdString() << std::endl;
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
@@ -95,7 +146,9 @@ int main(int argc, char *argv[])
         return fileMode(argc, argv);
     } else if(mode == "layout") {
         return layoutMode();
+    } else if(mode == "device") {
+        return deviceMode(argc, argv);
     }
-    std::fprintf(stderr, "usage: dfu_oracle file PATH... | layout\n");
+    std::fprintf(stderr, "usage: dfu_oracle file PATH... | layout | device OP ...\n");
     return 2;
 }

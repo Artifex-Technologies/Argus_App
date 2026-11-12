@@ -5,6 +5,7 @@
 #include <QThread>
 #include <QBuffer>
 #include <QByteArray>
+#include <QtEndian>
 
 #include "debug.h"
 #include "dfumemorylayout.h"
@@ -14,6 +15,9 @@
 
 #define DFU_DESCRIPTOR_LENGTH 9
 #define DFU_DESCRIPTOR_TYPE 0x21
+
+// DfuSe commands are block 0, block 1 is reserved; data starts at block 2
+#define FIRST_DATA_BLOCK 2
 
 DfuseDevice::DfuseDevice(const USBDeviceInfo &info, QObject *parent):
     USBDevice(info, parent)
@@ -96,16 +100,7 @@ bool DfuseDevice::download(const QByteArray &data)
 
     check_return_bool(controlTransfer(REQUEST_OUT, DFU_DNLOAD, 0, 0, data), "Failed to perform raw download request");
 
-    StatusType status;
-
-    do {
-        status = getStatus();
-        check_return_bool(status.bStatus == StatusType::OK, "Failed to raw download a buffer");
-        QThread::msleep(status.bwPollTimeout);
-
-    } while(status.bState == StatusType::DFU_DNBUSY);
-
-    return true;
+    return pollWhileBusy("Failed to raw download a buffer");
 }
 
 bool DfuseDevice::download(QIODevice *file, uint32_t addr, uint8_t alt)
@@ -117,22 +112,19 @@ bool DfuseDevice::download(QIODevice *file, uint32_t addr, uint8_t alt)
     const auto extra = extraInterfaceDescriptor(0, DFU_DESCRIPTOR_TYPE, DFU_DESCRIPTOR_LENGTH);
     check_return_bool(extra.size() >= DFU_DESCRIPTOR_LENGTH, "No functional DFU descriptor");
 
-    const auto maxTransferSize = *((uint16_t*)(extra.data() + 5));
+    const auto maxTransferSize = qFromLittleEndian<uint16_t>(extra.constData() + 5);
     debug_msg(QString("Device reported transfer size: %1").arg(maxTransferSize));
 
-    StatusType status;
+    // A transfer size of 0 never reached the end of the file, and its empty DFU_DNLOAD told the device the
+    // download was complete. Block numbers past 0xFFFF wrapped to 0 and 1, where the device reads DfuSe commands.
+    check_return_bool(maxTransferSize > 0, "Device reports a transfer size of 0");
+    check_return_bool((quint64)(file->size() - file->pos() + maxTransferSize - 1) / maxTransferSize <= 0x10000 - FIRST_DATA_BLOCK,
+                      "Too much data for the block numbers");
 
-    for(size_t totalSize = 0, transaction = 2, prevProgress = std::numeric_limits<size_t>::max(); !file->atEnd(); ++transaction) {
+    for(size_t totalSize = 0, transaction = FIRST_DATA_BLOCK, prevProgress = std::numeric_limits<size_t>::max(); !file->atEnd(); ++transaction) {
         const auto buf = file->read(maxTransferSize);
         check_return_bool(controlTransfer(REQUEST_OUT, DFU_DNLOAD, (uint16_t)transaction, 0, buf), "Failed to perform DFU_DNLOAD transfer");
-
-        do {
-            status = getStatus();
-
-            check_return_bool(status.bStatus == StatusType::OK, "An error has occurred during download phase");
-            QThread::msleep(status.bwPollTimeout);
-
-        } while(status.bState != StatusType::DFU_DNLOAD_IDLE);
+        check_return_bool(pollUntil(StatusType::DFU_DNLOAD_IDLE, "An error has occurred during download phase"), "Download step failed");
 
         totalSize += buf.size();
 
@@ -152,6 +144,7 @@ bool DfuseDevice::download(QIODevice *file, uint32_t addr, uint8_t alt)
 
 bool DfuseDevice::upload(QIODevice *file, uint32_t addr, size_t maxSize, uint8_t alt)
 {
+    check_return_bool(maxSize <= MaxUpload, "Upload too large");
     check_return_bool(setInterfaceAltSetting(0, alt), "Failed to set interface alternate setting");
     check_return_bool(prepare() && abort(), "Failed to prepare the device");
     check_return_bool(setAddressPointer(addr), "Failed to set address pointer");
@@ -160,14 +153,20 @@ bool DfuseDevice::upload(QIODevice *file, uint32_t addr, size_t maxSize, uint8_t
     const auto extra = extraInterfaceDescriptor(0, DFU_DESCRIPTOR_TYPE, DFU_DESCRIPTOR_LENGTH);
     check_return_bool(extra.size() >= DFU_DESCRIPTOR_LENGTH, "No functional DFU descriptor");
 
-    const auto maxTransferSize = *((uint16_t*)(extra.data() + 5));
+    const auto maxTransferSize = qFromLittleEndian<uint16_t>(extra.constData() + 5);
 
     debug_msg(QString("Device reported transfer size: %1").arg(maxTransferSize));
 
-    for(size_t totalSize = 0, transaction = 2, prevProgress = std::numeric_limits<size_t>::max(); totalSize < maxSize; ++transaction) {
+    check_return_bool(maxTransferSize > 0, "Device reports a transfer size of 0");
+    check_return_bool((maxSize + maxTransferSize - 1) / maxTransferSize <= 0x10000 - FIRST_DATA_BLOCK, "Too much data for the block numbers");
+
+    for(size_t totalSize = 0, transaction = FIRST_DATA_BLOCK, prevProgress = std::numeric_limits<size_t>::max(); totalSize < maxSize; ++transaction) {
 
         const auto transferSize = qMin<size_t>(maxTransferSize, maxSize - totalSize);
         const auto buf = controlTransfer(REQUEST_IN, DFU_UPLOAD, (uint16_t)transaction, 0, (uint16_t)transferSize);
+
+        // nothing at all is a failed transfer (it used to count as the end of memory, and the upload as done)
+        check_return_bool(!buf.isEmpty(), "The device answered the upload with nothing");
 
         const auto bytesWritten = file->write(buf);
 
@@ -216,16 +215,7 @@ bool DfuseDevice::setAddressPointer(uint32_t addr)
     const auto requestData = QByteArray(1, 0x21) + QByteArray::fromRawData((char*)&addr, sizeof(uint32_t));
     check_return_bool(controlTransfer(REQUEST_OUT, DFU_DNLOAD, 0, 0, requestData), "Failed to perform set address request");
 
-    StatusType status;
-
-    do {
-        status = getStatus();
-        check_return_bool(status.bStatus == StatusType::OK, "Failed to set address pointer");
-        QThread::msleep(status.bwPollTimeout);
-
-    } while(status.bState == StatusType::DFU_DNBUSY);
-
-    return true;
+    return pollWhileBusy("Failed to set address pointer");
 }
 
 bool DfuseDevice::erasePage(uint32_t addr)
@@ -233,16 +223,39 @@ bool DfuseDevice::erasePage(uint32_t addr)
     const auto buf = QByteArray(1, 0x41) + QByteArray((const char*)&addr, sizeof(uint32_t));
     check_return_bool(controlTransfer(REQUEST_OUT, DFU_DNLOAD, 0, 0, buf), "Failed to perform DFU_DNLOAD transfer");
 
-    StatusType status;
+    return pollWhileBusy("An error has occurred during erase phase");
+}
 
-    do {
-        status = getStatus();
-        check_return_bool(status.bStatus == StatusType::OK, "An error has occurred during erase phase");
-        QThread::msleep(status.bwPollTimeout);
+bool DfuseDevice::pollWhileBusy(const char *failMsg)
+{
+    for(auto i = 0; i < MaxPolls; ++i) {
+        const auto status = getStatus();
+        check_return_bool(status.bStatus == StatusType::OK, failMsg);
+        QThread::msleep(status.waitTime());
 
-    } while(status.bState == StatusType::DFU_DNBUSY);
+        if(status.bState != StatusType::DFU_DNBUSY) {
+            return true;
+        }
+    }
 
-    return true;
+    error_msg("The device stays busy");
+    return false;
+}
+
+bool DfuseDevice::pollUntil(StatusType::State state, const char *failMsg)
+{
+    for(auto i = 0; i < MaxPolls; ++i) {
+        const auto status = getStatus();
+        check_return_bool(status.bStatus == StatusType::OK, failMsg);
+        QThread::msleep(status.waitTime());
+
+        if(status.bState == state) {
+            return true;
+        }
+    }
+
+    error_msg("The device never reaches the expected state");
+    return false;
 }
 
 bool DfuseDevice::abort()
@@ -253,7 +266,7 @@ bool DfuseDevice::abort()
     const auto res = (status.bStatus == StatusType::OK) && (status.bState == StatusType::DFU_IDLE);
 
     check_return_bool(res, "Unable to reset device to idle state");
-    QThread::msleep(status.bwPollTimeout);
+    QThread::msleep(status.waitTime());
 
     return res;
 }
@@ -272,21 +285,33 @@ DfuseDevice::StatusType DfuseDevice::getStatus()
 
     check_return_val(buf.size() == STATUS_LENGTH, "Unable to get device status", ret);
 
-    ret.bStatus = (StatusType::Status)buf[0];
-    ret.bState = (StatusType::State)buf[4];
+    // Unsigned: as signed chars, a byte of 0x80 or more made the timeout about 4 billion ms (49 days)
+    const auto *bytes = (const uint8_t*)buf.constData();
 
-    ret.bwPollTimeout = ((uint32_t)buf[3] << 16) |
-                        ((uint32_t)buf[2] << 8)  |
-                        ((uint32_t)buf[1]);
+    ret.bStatus = (StatusType::Status)bytes[0];
+    ret.bState = (StatusType::State)bytes[4];
 
-    ret.iString = buf[5];
+    ret.bwPollTimeout = ((uint32_t)bytes[3] << 16) |
+                        ((uint32_t)bytes[2] << 8)  |
+                        ((uint32_t)bytes[1]);
+
+    ret.iString = bytes[5];
+    ret.isValid = true;
 
     return ret;
+}
+
+unsigned long DfuseDevice::StatusType::waitTime() const
+{
+    return qMin(bwPollTimeout, (uint32_t)DfuseDevice::MaxPollTimeout);
 }
 
 bool DfuseDevice::prepare()
 {
     const auto status = getStatus();
+
+    // a status that could not be read is not an error state to clear
+    check_return_bool(status.isValid, "Failed to get device status");
 
     if(status.bStatus != StatusType::OK) {
         debug_msg("Device is in error state, resetting...");

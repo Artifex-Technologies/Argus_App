@@ -152,6 +152,18 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — Rust port phase 6: the DfuSe protocol (both apps fixed)
+- `flipper_dfu::device`: ST's DfuSe protocol (status polling, set address, erase, download, upload, FUS commands,
+  leave) over a transport trait; a fake STM32WB55 bootloader in the tests. The C++ `DfuseDevice` is built into the
+  oracle with its USB replaced by a pipe and run against the same fake: same requests, waits, results and memory in
+  51 scenarios (`linux.yml`). The nusb transport is `flipper_dfu::usb` behind the `usb` feature; no test or command
+  uses it yet.
+- **Fixed in both (C++ and Rust):** a poll-timeout byte of 0x80+ was read as signed (a 49-day sleep); a device that
+  stayed busy hung recovery for ever; a transfer size of 0 sent an empty download mid-flash (the DFU "done" signal);
+  block numbers past 0xFFFF wrapped into DfuSe commands; an unreadable status was "cleared" and ignored; an upload
+  answered with nothing counted as success. Every wait is now bounded (1000 status reads, 10 s each).
+- Nothing flashed; no device opened. Details: docs/RUST_PORT.md.
+
 ### 2026-11-12 — Rust port phase 6 started: DfuSe files and the DFU memory layout (both apps fixed)
 - New `argus-tools/crates/flipper-dfu`: the DfuSe (`.dfu`) parser and the memory layout from a DFU interface string,
   pure code that opens no device. A Qt oracle built from the C++ app's own `dfu/` parsers compares both on 3000
