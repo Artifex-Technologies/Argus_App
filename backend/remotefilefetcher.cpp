@@ -15,8 +15,15 @@ using namespace Flipper;
 
 RemoteFileFetcher::RemoteFileFetcher(QObject *parent):
     QObject(parent),
-    m_manager(new QNetworkAccessManager(this))
+    m_manager(new QNetworkAccessManager(this)),
+    m_maxSize(MAX_FILE),
+    m_received(0)
 {}
+
+void RemoteFileFetcher::setMaxSize(qint64 maxSize)
+{
+    m_maxSize = maxSize;
+}
 
 RemoteFileFetcher::RemoteFileFetcher(const QString &remoteUrl, QIODevice *outputFile, QObject *parent):
     RemoteFileFetcher(parent)
@@ -41,7 +48,21 @@ bool RemoteFileFetcher::fetch(const QString &remoteUrl, QIODevice *outputFile)
         return fetchTestFile(remoteUrl, outputFile);
     }
 
-    auto *reply = m_manager->get(QNetworkRequest(remoteUrl));
+    // HTTPS only (Qt also opens file:, data: and qrc: URLs), a bounded time and at most 3 redirects (Qt's
+    // default policy already refuses one from https to http).
+    const QUrl url(remoteUrl);
+    if(url.scheme() != QStringLiteral("https")) {
+        outputFile->close();
+        setError(BackendError::InternetError, QStringLiteral("Not an https URL: %1").arg(remoteUrl));
+        return false;
+    }
+
+    QNetworkRequest request(url);
+    request.setTransferTimeout(10 * 60 * 1000);
+    request.setMaximumRedirectsAllowed(3);
+
+    m_received = 0;
+    auto *reply = m_manager->get(request);
 
     if(reply->error() != QNetworkReply::NoError) {
         setError(BackendError::InternetError, QStringLiteral("Network error: %1").arg(reply->errorString()));
@@ -50,9 +71,37 @@ bool RemoteFileFetcher::fetch(const QString &remoteUrl, QIODevice *outputFile)
         return false;
     }
 
-    const auto onReplyReadyRead = [=]() {
-        outputFile->write(reply->readAll());
+    // Every reply is bounded: past m_maxSize the transfer stops and the fetch fails (it used to take
+    // whatever came, into memory for the update directory).
+    const auto tooLarge = [=]() {
+        if(!isError()) {
+            setError(BackendError::InternetError, QStringLiteral("The reply from %1 is larger than %2 bytes").arg(remoteUrl).arg(m_maxSize));
+        }
+        reply->abort();
     };
+
+    const auto onReplyReadyRead = [=]() {
+        if(isError()) {
+            reply->readAll();
+            return;
+        }
+
+        const auto data = reply->readAll();
+        m_received += data.size();
+
+        if(m_received > m_maxSize) {
+            tooLarge();
+        } else {
+            outputFile->write(data);
+        }
+    };
+
+    connect(reply, &QNetworkReply::metaDataChanged, this, [=]() {
+        const auto length = reply->header(QNetworkRequest::ContentLengthHeader);
+        if(length.isValid() && length.toLongLong() > m_maxSize) {
+            tooLarge();
+        }
+    });
 
     connect(reply, &QNetworkReply::finished, this, [=]() {
         // In case there was any leftover data
@@ -61,7 +110,9 @@ bool RemoteFileFetcher::fetch(const QString &remoteUrl, QIODevice *outputFile)
         outputFile->close();
         reply->deleteLater();
 
-        if(reply->error() != QNetworkReply::NoError) {
+        if(isError()) {
+            // too large: already said
+        } else if(reply->error() != QNetworkReply::NoError) {
             setError(BackendError::InternetError, QStringLiteral("Network error: %1").arg(reply->errorString()));
         } else {
             checkFile(outputFile);
@@ -101,8 +152,6 @@ void RemoteFileFetcher::checkFile(QIODevice *outputFile)
 // network; without that folder every fetch fails. Finishes from the event loop, as a reply would.
 bool RemoteFileFetcher::fetchTestFile(const QString &remoteUrl, QIODevice *outputFile)
 {
-    static constexpr qint64 MAX_TEST_FILE = 64 * 1024 * 1024;
-
     const auto dir = Argus::testFirmwareDir();
     const auto name = QUrl(remoteUrl).fileName();
 
@@ -117,8 +166,8 @@ bool RemoteFileFetcher::fetchTestFile(const QString &remoteUrl, QIODevice *outpu
 
         if(!file.open(QIODevice::ReadOnly)) {
             error = QStringLiteral("%1: %2").arg(file.fileName(), file.errorString());
-        } else if(file.size() > MAX_TEST_FILE) {
-            error = QStringLiteral("%1 is too large").arg(file.fileName());
+        } else if(file.size() > m_maxSize) {
+            error = QStringLiteral("The reply from %1 is larger than %2 bytes").arg(remoteUrl).arg(m_maxSize);
         } else if(outputFile->write(file.readAll()) != file.size()) {
             error = QStringLiteral("Failed to write the file: %1").arg(outputFile->errorString());
         } else {}
@@ -147,5 +196,8 @@ bool RemoteFileFetcher::fetch(const Flipper::Updates::FileInfo &fileInfo, QIODev
 
 void RemoteFileFetcher::onDownloadProgress(qint64 received, qint64 total)
 {
-    emit progressChanged(((double)received / (double)total) * 100.0);
+    // total is -1 when the server sends no length
+    if(total > 0) {
+        emit progressChanged(((double)received / (double)total) * 100.0);
+    }
 }

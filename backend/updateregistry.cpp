@@ -75,6 +75,11 @@ void UpdateRegistry::fillFromJson(const QByteArray &text)
 
     } catch(std::runtime_error &e) {
         qCCritical(CATEGORY_UPDATES) << "Failed to parse update information:" << e.what();
+
+        // One malformed entry makes the whole directory invalid (the channels before it used to stay).
+        beginResetModel();
+        m_channels.clear();
+        endResetModel();
     }
 }
 
@@ -83,7 +88,7 @@ const QStringList UpdateRegistry::channelNames() const
     auto names = m_channels.keys();
 
     // Move Development channel to the bottom of the list
-    if(names.first().startsWith(QStringLiteral("dev"))) {
+    if(!names.isEmpty() && names.first().startsWith(QStringLiteral("dev"))) {
         names.move(0, names.size() - 1);
     }
 
@@ -155,6 +160,9 @@ void UpdateRegistry::check()
 
     auto *fetcher = new RemoteFileFetcher(this);
     auto *buf = new QBuffer(this);
+
+    // The directory is read into memory: at most 16 MiB (Flipper's is well under 1 MiB).
+    fetcher->setMaxSize(16 * 1024 * 1024);
 
     fetcher->connect(fetcher, &RemoteFileFetcher::finished, this, [=]() {
         if(fetcher->isError()) {

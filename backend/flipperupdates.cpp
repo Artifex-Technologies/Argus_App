@@ -2,9 +2,13 @@
 
 #include <stdexcept>
 
+#include <algorithm>
+#include <limits>
+
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QRegularExpression>
 
 using namespace Flipper::Updates;
 
@@ -30,7 +34,18 @@ FileInfo::FileInfo(const QJsonValue &val):
     m_target = json["target"].toString();
     m_type = json["type"].toString();
     m_url = json["url"].toString();
-    m_sha256 = json["sha256"].toString().toLocal8Bit();
+    m_sha256 = json["sha256"].toString().toLocal8Bit().toLower();
+
+    // A file must be checkable and come from an HTTPS server: RemoteFileFetcher skipped the check for an
+    // empty hash, and Qt opens file:, data: and qrc: URLs as well (docs/RUST_PORT.md; flipper_updates::directory).
+    static const QRegularExpression sha256Pattern(QStringLiteral("^[0-9a-f]{64}$"));
+    if(!sha256Pattern.match(QString::fromLatin1(m_sha256)).hasMatch()) {
+        m_isValid = false;
+        throw std::runtime_error("FileInfo: sha256 is not 64 hex digits");
+    } else if(!m_url.startsWith(QStringLiteral("https://"))) {
+        m_isValid = false;
+        throw std::runtime_error("FileInfo: url is not https");
+    }
 }
 
 const QString &FileInfo::target() const
@@ -121,26 +136,41 @@ qint64 VersionInfo::compare(const VersionInfo &other) const
 
 qint64 VersionInfo::toNumericValue(const QString &version)
 {
-    int ret = 0;
+    // Each part is 1 to 9 ASCII digits, read as base-1000 digits into 64 bits. Anything else (a git hash on
+    // the dev channel), or a number that does not fit, is the lowest value. (The parts used to be read with
+    // toInt into an int, which overflowed for versions like 100.0.0.0.)
+    static constexpr auto invalid = std::numeric_limits<qint64>::min();
+    qint64 ret = 0;
 
     // Get rid of the possible -rcxx suffix
     const auto tokens = version.split('-').first().split('.');
     for(const auto &token : tokens) {
-        bool ok; const auto val = token.toInt(&ok);
+        const auto isDigits = std::all_of(token.cbegin(), token.cend(), [](QChar c) {
+            return c >= QLatin1Char('0') && c <= QLatin1Char('9');
+        });
 
-        if(!ok) return std::numeric_limits<qint64>::min();
+        if(token.isEmpty() || token.size() > 9 || !isDigits) {
+            return invalid;
+        }
 
-        ret *= 1000;
-        ret += val;
+        const auto val = token.toLongLong();
+
+        if(ret > (std::numeric_limits<qint64>::max() - val) / 1000) {
+            return invalid;
+        }
+
+        ret = ret * 1000 + val;
     }
 
     return ret;
 }
 
 // TODO: Handle -rcxx suffixes correctly
+// The sign only: subtracting overflowed when one version was not a number, which also broke the sort below.
 qint64 VersionInfo::compare(const QString &v1, const QString &v2)
 {
-    return toNumericValue(v1) - toNumericValue(v2);
+    const auto a = toNumericValue(v1), b = toNumericValue(v2);
+    return (a > b) - (a < b);
 }
 
 ChannelInfo::ChannelInfo(const QJsonValue &val)
@@ -168,8 +198,8 @@ ChannelInfo::ChannelInfo(const QJsonValue &val)
         m_versions.append(VersionInfo(version));
     }
 
-    // Json data is not guaranteed to be sorted?
-    std::sort(m_versions.begin(), m_versions.end(), [](const VersionInfo &a, const VersionInfo &b) {
+    // Json data is not guaranteed to be sorted? Equal versions keep the directory's order.
+    std::stable_sort(m_versions.begin(), m_versions.end(), [](const VersionInfo &a, const VersionInfo &b) {
         return a.compare(b) > 0;
     });
 }
@@ -196,5 +226,8 @@ const QVector<VersionInfo> &ChannelInfo::versions() const
 
 const VersionInfo &ChannelInfo::latestVersion() const
 {
-    return m_versions.first();
+    // A channel without versions, or one the directory does not have (UpdateRegistry::channel), has no
+    // latest version: first() on the empty list read past it.
+    static const VersionInfo none;
+    return m_versions.isEmpty() ? none : m_versions.first();
 }

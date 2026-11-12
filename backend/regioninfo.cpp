@@ -1,5 +1,8 @@
 #include "regioninfo.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include <QLoggingCategory>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -8,11 +11,20 @@
 
 Q_DECLARE_LOGGING_CATEGORY(CATEGORY_DEBUG)
 
+// The bundle's values are checked as the Rust port checks them (flipper_updates::region, docs/RUST_PORT.md): a
+// band's values are whole numbers that fit the firmware's fields (start and end 32 bits with start <= end,
+// max_power -128..127 dBm, duty_cycle 0..100 %), every band name in a list is a string naming a band. The
+// values used to be read with toInt (anything else became 0) and cut to 8 bits by RegionData, and an unknown
+// name became an all-zero band. Both flags start false: they were left uninitialised when the text did not
+// parse, so a broken reply could read as valid.
 RegionInfo::RegionInfo():
-    m_isValid(false)
+    m_isValid(false),
+    m_isError(false),
+    m_errorCode(0)
 {}
 
-RegionInfo::RegionInfo(const QByteArray &text)
+RegionInfo::RegionInfo(const QByteArray &text):
+    RegionInfo()
 {
     const auto doc = QJsonDocument::fromJson(text);
 
@@ -65,6 +77,11 @@ int RegionInfo::errorCode() const
 const RegionInfo::CountryKey &RegionInfo::detectedCountry() const
 {
     return m_country;
+}
+
+const RegionInfo::CountryKey RegionInfo::countryOr(const CountryKey &fallback) const
+{
+    return hasCountryCode() ? m_country : fallback;
 }
 
 const RegionInfo::BandKeyList &RegionInfo::defaultBandKeys() const
@@ -139,7 +156,49 @@ void RegionInfo::parseSuccess(const QJsonValue &val)
 
     m_isError = false;
     m_isValid = parseBands(obj[bandsKey]) && parseCountries(obj[countriesKey]) &&
-            parseCountry(obj[countryKey]) && parseDefault(obj[defaultKey]);
+            parseCountry(obj[countryKey]) && parseDefault(obj[defaultKey]) && checkBandKeys();
+}
+
+bool RegionInfo::parseBandKeys(const QJsonValue &val, BandKeyList &keys, const char *what)
+{
+    if(!val.isArray()) {
+        qCCritical(CATEGORY_DEBUG) << what << "is not an array";
+        return false;
+    }
+
+    const QJsonArray arr = val.toArray();
+
+    if(arr.isEmpty()) {
+        qCCritical(CATEGORY_DEBUG) << what << "is an empty array";
+        return false;
+    }
+
+    for(const auto &el : arr) {
+        if(!el.isString()) {
+            qCCritical(CATEGORY_DEBUG) << what << "holds a name that is not a string";
+            return false;
+        }
+
+        keys.append(el.toString().toLocal8Bit());
+    }
+
+    return true;
+}
+
+bool RegionInfo::checkBandKeys() const
+{
+    auto allKnown = [this](const BandKeyList &keys) {
+        return std::all_of(keys.cbegin(), keys.cend(), [this](const BandKey &key) { return m_bands.contains(key); });
+    };
+
+    const auto ok = allKnown(m_defaultBandKeys) &&
+            std::all_of(m_countries.cbegin(), m_countries.cend(), allKnown);
+
+    if(!ok) {
+        qCCritical(CATEGORY_DEBUG) << "A bands list names a band that is not in bands";
+    }
+
+    return ok;
 }
 
 bool RegionInfo::parseBands(const QJsonValue &val)
@@ -204,23 +263,7 @@ bool RegionInfo::parseCountry(const QJsonValue &val)
 
 bool RegionInfo::parseDefault(const QJsonValue &val)
 {
-    if(!val.isArray()) {
-        qCCritical(CATEGORY_DEBUG) << "Default bands list is not an array";
-        return false;
-    }
-
-    const QJsonArray arr = val.toArray();
-
-    if(arr.isEmpty()) {
-        qCCritical(CATEGORY_DEBUG) << "Default bands is an empty array";
-        return false;
-    }
-
-    for(const auto &el : arr) {
-        m_defaultBandKeys.append(el.toString().toLocal8Bit());
-    }
-
-    return true;
+    return parseBandKeys(val, m_defaultBandKeys, "Default bands list");
 }
 
 bool RegionInfo::insertBand(const BandKey &key, const QJsonValue &val)
@@ -245,11 +288,37 @@ bool RegionInfo::insertBand(const BandKey &key, const QJsonValue &val)
         return false;
     }
 
+    // A whole number within [min, max].
+    const auto integer = [](const QJsonValue &v, double min, double max, qint64 *out) {
+        if(!v.isDouble()) {
+            return false;
+        }
+
+        const auto d = v.toDouble();
+
+        if(d != std::floor(d) || d < min || d > max) {
+            return false;
+        }
+
+        *out = (qint64)d;
+        return true;
+    };
+
+    qint64 start, end, power, duty;
+
+    const auto inRange = integer(obj[startKey], 0, 4294967295.0, &start) && integer(obj[endKey], 0, 4294967295.0, &end) &&
+            integer(obj[maxPowerKey], -128, 127, &power) && integer(obj[dutyCycleKey], 0, 100, &duty) && start <= end;
+
+    if(!inRange) {
+        qCCritical(CATEGORY_DEBUG) << "Band value out of range";
+        return false;
+    }
+
     const Band band = {
-        (unsigned)obj[startKey].toInt(),
-        (unsigned)obj[endKey].toInt(),
-        obj[maxPowerKey].toInt(),
-        (unsigned)obj[dutyCycleKey].toInt(),
+        (uint32_t)start,
+        (uint32_t)end,
+        (int32_t)power,
+        (uint32_t)duty,
     };
 
     m_bands.insert(key, band);
@@ -259,22 +328,10 @@ bool RegionInfo::insertBand(const BandKey &key, const QJsonValue &val)
 
 bool RegionInfo::insertCountry(const CountryKey &key, const QJsonValue &val)
 {
-    if(!val.isArray()) {
-        qCCritical(CATEGORY_DEBUG) << "Country bands list is not an array";
-        return false;
-    }
-
-    const QJsonArray arr = val.toArray();
-
-    if(arr.isEmpty()) {
-        qCCritical(CATEGORY_DEBUG) << "Country bands is an empty array";
-        return false;
-    }
-
     BandKeyList bandKeys;
 
-    for(const auto &el : arr) {
-        bandKeys.append(el.toString().toLocal8Bit());
+    if(!parseBandKeys(val, bandKeys, "Country bands list")) {
+        return false;
     }
 
     m_countries.insert(key, bandKeys);

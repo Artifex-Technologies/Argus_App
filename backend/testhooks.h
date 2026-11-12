@@ -13,7 +13,8 @@
 //   - does not fetch the firmware update directory (no network),
 //   - takes a restart, factory reset or the start of the updater as done once its request is
 //     sent (a pseudo-terminal has no USB to come back on; the fake ends the session as the
-//     device would), and never fetches region data for a firmware update.
+//     device would), and never fetches region data from the network (with ARGUS_TEST_FIRMWARE_DIR
+//     set it reads the region bundle from there, as the file "bundle"; without it, it skips the step).
 //
 // ARGUS_TEST_DEVICE_STATE names a file the test harness writes. The registry does not watch USB;
 // it reads that file every 50 ms instead: "dfu N" is the bootloader on ARGUS_TEST_DFU_SOCKET,

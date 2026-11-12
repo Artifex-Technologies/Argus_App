@@ -33,6 +33,8 @@ public:
     int errorCode() const;
 
     const CountryKey &detectedCountry() const;
+    // The country the server saw, or fallback when it named none.
+    const CountryKey countryOr(const CountryKey &fallback) const;
     const BandKeyList &defaultBandKeys() const;
     const BandKeyList countryBandKeys(const CountryKey &key) const;
 
@@ -50,6 +52,8 @@ private:
 
     bool insertBand(const BandKey &key, const QJsonValue &val);
     bool insertCountry(const CountryKey &key, const QJsonValue &val);
+    bool parseBandKeys(const QJsonValue &val, BandKeyList &keys, const char *what);
+    bool checkBandKeys() const;
 
     CountryKey m_country;
     BandKeyList m_defaultBandKeys;

@@ -23,9 +23,6 @@ use flipper_rpc::proto::pb;
 /// The largest bundle read (Flipper's is a few KiB).
 pub const MAX_BUNDLE: u64 = 1 << 20;
 
-/// Where the firmware reads the region data.
-pub const REGION_DATA_PATH: &str = "/int/.region_data";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Band {
     pub start: u32,
@@ -206,7 +203,7 @@ pub fn encode(country: &[u8], bands: &[Band]) -> Vec<u8> {
 }
 
 /// What `generateRegionData` makes of a bundle: the country used, its bands and the bytes for
-/// [`REGION_DATA_PATH`]. `fallback_country` stands in when the server named none (the C++ app takes the
+/// `/int/.region_data` (`flipper_rpc::assets::REGION_DATA_PATH`). `fallback_country` stands in when the server named none (the C++ app takes the
 /// system locale's territory there; argus-cli takes `--country`, or none: the default bands).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegionData {

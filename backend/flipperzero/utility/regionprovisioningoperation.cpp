@@ -69,8 +69,9 @@ void RegionProvisioningOperation::checkHardwareRegion()
 {
     const auto &hardwareInfo = deviceState()->deviceInfo().hardware;
 
-    // Test hook (testhooks.h): never fetch the region bundle from the network.
-    if(hardwareInfo.region == Region::Dev || Argus::isTestSerialPort()) {
+    // Test hook (testhooks.h): never fetch the region bundle from the network; with ARGUS_TEST_FIRMWARE_DIR the
+    // fetcher reads it from that folder (its file name is "bundle"), else it is skipped.
+    if(hardwareInfo.region == Region::Dev || (Argus::isTestSerialPort() && Argus::testFirmwareDir().isEmpty())) {
         qCDebug(CATEGORY_DEBUG) << "Development hardware region detected, skipping region provisioning...";
         setOperationState(UploadingRegionData);
     }
@@ -81,9 +82,12 @@ void RegionProvisioningOperation::checkHardwareRegion()
 void RegionProvisioningOperation::fetchRegionInfo()
 {
     static const auto apiUrl = QStringLiteral("https://update.flipperzero.one/regions/api/v0/bundle");
-    auto *fetcher = new RemoteFileFetcher(apiUrl, m_regionInfoFile, this);
+    auto *fetcher = new RemoteFileFetcher(this);
 
-    if(fetcher->isError()) {
+    // a few KiB in practice
+    fetcher->setMaxSize(1024 * 1024);
+
+    if(!fetcher->fetch(apiUrl, m_regionInfoFile)) {
         finishWithError(fetcher->error(), QStringLiteral("Failed to fetch region info file: %1").arg(fetcher->errorString()));
         return;
     }
@@ -116,7 +120,7 @@ void RegionProvisioningOperation::generateRegionData()
         return;
     }
 
-    const auto countryCode = regionInfo.hasCountryCode() ? regionInfo.detectedCountry() : localeCountry();
+    const auto countryCode = regionInfo.countryOr(localeCountry());
     const auto bandKeys = regionInfo.countryBandKeys(countryCode);
 
     qCDebug(CATEGORY_DEBUG) << "Detected region:" << (countryCode.isEmpty() ? QByteArrayLiteral("Unknown") : countryCode);

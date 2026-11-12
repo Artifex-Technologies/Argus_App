@@ -19,6 +19,11 @@ public:
     bool fetch(const QString &remoteUrl, QIODevice *outputFile);
     bool fetch(const Flipper::Updates::FileInfo &fileInfo, QIODevice *outputFile);
 
+    // The largest reply taken (a larger one is an error, never a cut file). Set before fetch().
+    void setMaxSize(qint64 maxSize);
+
+    static constexpr qint64 MAX_FILE = 64 * 1024 * 1024;
+
 signals:
     void progressChanged(double);
     void finished();
@@ -32,4 +37,6 @@ private:
 
     QNetworkAccessManager *m_manager;
     QByteArray m_expectedChecksum;
+    qint64 m_maxSize;
+    qint64 m_received;
 };

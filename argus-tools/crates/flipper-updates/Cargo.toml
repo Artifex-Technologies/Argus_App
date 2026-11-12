@@ -19,3 +19,5 @@ rustls-native-certs = "0.8"
 [dev-dependencies]
 flipper-fake = { path = "../flipper-fake" }
 tempfile = "3"
+sha2 = "0.10"
+hex = "0.4"
