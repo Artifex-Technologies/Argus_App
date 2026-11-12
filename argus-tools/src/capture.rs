@@ -356,7 +356,8 @@ impl Builder {
     }
 
     /// Every capture file in a local folder that mirrors the card (a pull: `<dir>/.../ext/nfc/x.nfc`).
-    /// Symlinks are not followed.
+    /// Symlinks are not followed. Each folder is read in name order (its files, then its folders one by one), so of
+    /// identical files the first by name names the capture on every file system (read_dir's own order is the file system's).
     pub fn add_tree(&mut self, dir: &Path, origin: &str) -> Result<()> {
         let mut stack = vec![(dir.to_path_buf(), 0usize)];
         let mut seen = 0usize;
@@ -365,15 +366,23 @@ impl Builder {
                 continue;
             }
             let Ok(rd) = fs::read_dir(&d) else { continue };
+            let mut entries = Vec::new();
+            let mut capped = false;
             for e in rd.flatten() {
                 seen += 1;
                 if seen > 200_000 {
-                    return Ok(());
+                    capped = true;
+                    break;
                 }
+                entries.push(e);
+            }
+            entries.sort_by_key(|e| e.file_name());
+            let mut dirs = Vec::new();
+            for e in entries {
                 let Ok(ft) = e.file_type() else { continue };
                 let p = e.path();
                 if ft.is_dir() {
-                    stack.push((p, depth + 1));
+                    dirs.push((p, depth + 1));
                 } else if ft.is_file() {
                     let rel = p.strip_prefix(dir).unwrap_or(&p).to_string_lossy().replace('\\', "/");
                     let card = match rel.find("ext/") {
@@ -394,6 +403,11 @@ impl Builder {
                     self.add(&bytes, Location { origin: origin.into(), source, path: card });
                 }
             }
+            if capped {
+                return Ok(());
+            }
+            // last pushed is read first: the folders in name order
+            stack.extend(dirs.into_iter().rev());
         }
         Ok(())
     }

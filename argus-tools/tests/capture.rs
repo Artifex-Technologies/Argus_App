@@ -20,6 +20,9 @@ fn parses_headers_not_payloads() {
     let kinds: Vec<&str> = idx.captures.iter().map(|c| c.kind.as_str()).collect();
     assert_eq!(idx.captures.len(), 8, "{kinds:?}"); // garage and garage_backup are one file; assets/ is skipped
     let garage = idx.captures.iter().find(|c| c.name == "garage").unwrap();
+    // the walk is in name order, so the first of the two by name (garage.sub) names it on every file system
+    let paths: Vec<&str> = garage.locations.iter().map(|l| l.path.as_str()).collect();
+    assert_eq!(paths, ["/ext/subghz/garage.sub", "/ext/subghz/garage_backup.sub"]);
     assert_eq!(garage.fields["frequency_hz"], 433_920_000);
     assert_eq!(garage.fields["frequency_mhz"], "433.92");
     assert_eq!(garage.fields["protocol"], "Princeton");
@@ -54,6 +57,7 @@ fn search_tags_dupes_explain() {
         v.sort();
         v
     };
+    // garage_backup.sub is the same file as garage.sub, which comes first by name and names it
     assert_eq!(names("freq:433.92 proto:princeton"), vec!["garage", "garage_again"]);
     assert_eq!(names("kind:nfc"), vec!["badge", "badge_full"]);
     assert_eq!(names("uid:4a1b2c3d"), vec!["badge", "badge_full"]);
