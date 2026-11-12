@@ -43,7 +43,7 @@ bool DfuseDevice::erase(uint32_t addr, size_t maxSize)
     check_return_bool(prepare(), "Failed to prepare the device");
 
     const auto layout = DFUMemoryLayout::fromStringDescriptor(stringInterfaceDescriptor(0));
-    const auto pageAddresses = layout.pageAddresses(addr, addr + (uint32_t)maxSize);
+    const auto pageAddresses = layout.pageAddresses(addr, (quint64)addr + maxSize);
 
     check_return_bool(!pageAddresses.isEmpty(), "Address list is empty");
 

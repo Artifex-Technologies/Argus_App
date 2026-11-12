@@ -1,0 +1,11 @@
+[package]
+name = "flipper-dfu"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Flipper Zero recovery for Argus: DfuSe files and the DFU memory layout, pure code that opens no device"
+publish = false
+
+[dev-dependencies]
+md-5 = "0.10"
+proptest = "1"

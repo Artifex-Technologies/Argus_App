@@ -29,7 +29,7 @@ public:
         struct TargetPrefix {
             QByteArray szSignature;
             uint8_t bAlternateSetting;
-            bool bTargetNamed;
+            uint32_t bTargetNamed; // a 32-bit field in the file (was a bool, and 4 bytes were read into it)
             QByteArray szTargetName;
             uint32_t dwtargetSize;
             uint32_t dwNbElements;
@@ -45,6 +45,9 @@ public:
         QList<Element> elements;
     };
 
+    // The largest file read (the Flipper's flash is 1 MiB). Same as the Rust port's flipper_dfu::dfuse::MAX_FILE.
+    static const qint64 MaxFileSize = 16 * 1024 * 1024;
+
     DfuseFile(QIODevice *file);
 
     bool isValid() const;
@@ -54,13 +57,11 @@ public:
     QList<Image> &images();
 
 private:
-    bool readPrefix(QIODevice *file);
-    bool readSuffix(QIODevice *file);
-    bool readImage(QIODevice *file);
-    void readElement(QIODevice *file);
-    bool checkCRC(QIODevice *file);
+    bool parse(const QByteArray &data);
+    bool readImage(const QByteArray &data, qint64 &pos, qint64 imageEnd);
+    bool checkOverlaps() const;
 
-    static uint32_t generateCRC(QIODevice *file);
+    static uint32_t generateCRC(const char *data, qint64 size);
 
     bool m_isValid;
     Prefix m_prefix;

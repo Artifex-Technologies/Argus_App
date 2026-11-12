@@ -152,6 +152,18 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — Rust port phase 6 started: DfuSe files and the DFU memory layout (both apps fixed)
+- New `argus-tools/crates/flipper-dfu`: the DfuSe (`.dfu`) parser and the memory layout from a DFU interface string,
+  pure code that opens no device. A Qt oracle built from the C++ app's own `dfu/` parsers compares both on 3000
+  generated and damaged files and 4000 interface strings (also in `linux.yml`); a cargo-fuzz target `dfuse_file`.
+- **Fixed in both (C++ and Rust):** a tiny file claiming millions of elements made the C++ parser eat memory; four
+  bytes were read into a `bool`; files with no target, an empty element (whose page was still erased), overlapping
+  elements, elements past 4 GiB, a wrong target size, junk before the suffix or an unknown version were accepted;
+  the layout reader read before its string, took unreadable numbers as 0, ignored `M`, could loop for ever on a bank
+  of empty pages, and erased a page for an empty or out-of-layout range. Details: docs/RUST_PORT.md section 5.
+- **Behaviour change:** recovery refuses such `.dfu` files and such device descriptors before touching the device.
+  Real Flipper firmware files and the STM32WB55's descriptors read as before. Nothing flashed; no device used.
+
 ### 2026-11-12 — Rust port phase 5 at the protocol level: the update through the device's updater
 - `argus-cli update PACKAGE.tgz --yes` uploads an update package to `/ext/update/<folder>`, arms the device's updater
   (`SystemUpdateRequest`) and reboots into it; no DFU. `qFlipper-cli firmware` now also takes a `.tgz` (what the GUI's

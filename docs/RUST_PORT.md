@@ -49,7 +49,7 @@ What talks to the device, by channel:
 | QtSingleApplication (`application/qtsingleapplication`) | BSD (Digia) | Not ported; a lock file or socket in Rust replaces it |
 | libwdi (`driver-tool/libwdi`) | LGPL-3.0 (`COPYING-LGPL`) | Windows only, not ported |
 | Fonts in `application/assets/fonts` (Born2bSporty, HaxrCorp 4089, ProggySquare, Share Tech, Share Tech Mono) | Check each when the UI is ported | Decided at the UI phase |
-| Rust crates added now | prost, prost-build (Apache-2.0); serialport (MPL-2.0); proptest (MIT/Apache-2.0); serde_json (MIT/Apache-2.0); rusqlite (MIT); libc (MIT/Apache-2.0) | All compatible with GPL-3.0 |
+| Rust crates added now | prost, prost-build (Apache-2.0); serialport (MPL-2.0); proptest (MIT/Apache-2.0); serde_json (MIT/Apache-2.0); rusqlite (MIT); libc (MIT/Apache-2.0); md-5 for tests (MIT/Apache-2.0) | All compatible with GPL-3.0 |
 | Qt's JSON rules (`qjsonparser.cpp`, `qjsonwriter.cpp`, `qlocale_tools.cpp`, Qt 6.12) | LGPL-3.0/GPL | Not copied: `argus-api::qjson` is written from scratch to behave the same, and checked against Qt itself |
 
 ## 3. The order
@@ -80,6 +80,8 @@ Protocol and device logic first, with the CLI as the proof surface; the UI last.
    Neither has been run against a real Flipper.*
 6. **DFU and recovery** with nusb: DfuSe parsing first (pure, fuzzed), then option bytes, FUS and radio stack. No
    flashing in tests, and none on my device until I say so.
+   *Started 2026-11-12: the DfuSe file parser and the memory layout reader (`crates/flipper-dfu`), checked against
+   the C++ parsers themselves; both fixed.*
 7. **Update registry and region provisioning** (HTTPS with rustls, SHA-256 checked before anything is used).
 8. **The UI** in egui/eframe, window by window. When it covers what the QML does, the C++ goes (no dead code left).
 
@@ -117,6 +119,18 @@ requires identical output. The Linux workflow runs it; 13 seeds (39 000 files) a
 rules the port now follows: the file is read in `Text` mode, which drops **every** `\r` byte, not only in `\r\n`;
 each byte of an invalid UTF-8 sequence becomes its own U+FFFD; and `toInt` reads only up to a NUL and trims ASCII
 whitespace (with `\v`) but no other kind.
+
+**The DfuSe parsers against the C++ app's own.** `crates/flipper-dfu/tests/qt-oracle` builds a small program from
+the app's `dfu/dfusefile.cpp` and `dfu/dfumemorylayout.cpp` (QtCore only) that prints every field the C++ parser read
+from a `.dfu` file, or the layout and erase addresses it takes from an interface string. `tests/qt_oracle.rs` feeds it
+and the Rust port 3000 generated files per seed (one to three targets, elements touching, overlapping or near 4 GiB,
+then cut anywhere, counts and sizes off by one or huge, junk after the targets, a wrong version, suffix or CRC,
+usually with the CRC rewritten so the damage is reached) and 4000 interface strings with ranges around their pages;
+both must accept the same inputs and read the same values and bytes. Every refusal the Rust parser has is reached
+(about 1100 of each 3000 files are valid); five seeds agreed here. The Linux workflow runs it. With `ARGUS_DFU_REAL` naming
+real files, it compares those too: my own firmware builds (firmware, updater and full `.dfu`) read the same in both,
+and the C++ parser before the fixes accepted them too. The parser also has
+property tests (any bytes, any damage to a good file) and a cargo-fuzz target (`dfuse_file`).
 
 **The C++ CLI against the same fake.** The C++ app finds a Flipper by USB VID/PID. A test-only hook
 (`backend/testhooks.h`) changes that only when `ARGUS_TEST_SERIAL_PORT` names a port: the registry then does not
@@ -253,6 +267,10 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   every fault, hostile names, the CLI binary over a socket and a pseudo-terminal), all green; argus-tools' own
   tests unchanged; `qFlipper-cli chymaera selftest` 11/11 with the hook built in.
 
+- Phase 6 start (2026-11-12): `crates/flipper-dfu` with `dfuse` (DfuSe files: the whole file at most 16 MiB, every
+  length checked before it is read) and `layout` (the interface string's memory layout and the pages to erase for a
+  range). Pure code, no USB. 11 tests with property tests, and the C++ comparison above.
+
 Differences from the C++ app found so far, all on purpose or harmless:
 
 - **A corrupt stream stalls the C++ app.** It appends to its buffer until nanopb manages to decode, so a broken
@@ -366,6 +384,27 @@ for each:
   now uses the app's temporary folder. A gzip error left it with no index, which `TarZipUncompressor` then used
   (a null pointer); it now stops.
 
+Found while porting the DfuSe parser (phase 6), and **fixed in both versions** on 2026-11-12. The oracle test has
+cases for each, and both parsers now accept exactly the same files:
+
+- **A tiny file could take all memory.** `dwNbElements` was trusted: a 373-byte file claiming 200 million elements ran
+  the C++ parser for over a minute (stopped) while it appended empty elements. Counts and sizes are now checked
+  against the bytes that are there first; the C++ parser reads the file whole (at most 16 MiB) and parses it from
+  memory.
+- **`bTargetNamed` was read as four bytes into a one-byte `bool`** (writing past it). It is a 32-bit field now.
+- **Files that would flash nothing, or the wrong thing, were valid:** no target at all (the recovery "succeeded"
+  without writing), an empty element (the erase step still erased the page at its address and nothing was written
+  back), an element running past 4 GiB, two elements for the same alternate setting that overlap (the later write
+  wins), a target whose size is not its elements', bytes between the last target and the suffix, and an unknown
+  version. All refused now.
+- **The memory layout came from the device unchecked.** `1*K` read one character before the page size, a number it
+  could not read became 0 (address 0, zero pages), `M` was taken as bytes, the banks read before an error were kept,
+  and a bank of billions of empty pages made `pageAddresses` loop for ever, walking every page from the start. It
+  also returned one page to erase for an empty range and for a range outside the layout, and stopped erasing silently
+  where the layout ended. Now the descriptor must follow ST's grammar exactly (`0x` address, `count*size` with ` `,
+  `B`, `K` or `M` and a type `a` to `g`, inside 4 GiB, ASCII), and a range must lie inside the layout; page
+  addresses are computed per bank.
+
 A regression of my own, caught by porting the capture sync: once `GetFileTreeOperation` left unsafe names out,
 the C++ capture pull stopped counting them as failed (as `stagedPath` used to). `CaptureSync` now counts every
 refused name as failed again, and the Rust pull does the same.
@@ -393,6 +432,9 @@ failed, and does not read `devinfo` or start the screen.
    device without my approval in the app.
 2. Phase 5 is done at the protocol level (update over the updater, factory reset), proven against the fake only.
    Before either is used on my Flipper: run `argus-cli update` and `erase` against it once with me watching.
-3. Phase 6 (DFU and recovery with nusb): the DfuSe parser first, pure and fuzzed; no flashing in tests.
+3. Phase 6 (DFU and recovery): the DfuSe parser and the memory layout are done and match the C++ ones. Next: the DFU
+   protocol (`DFU_GETSTATUS`, `DNLOAD`, `UPLOAD`, erase and set-address commands as in `dfu/dfusedevice.cpp`) as pure
+   code over a transport trait, driven by a fake DFU device in tests; nusb only as a thin adapter behind a feature,
+   never used by a test. No flashing in tests, and none on my device until I say so.
 4. For the UI phase: the screen stream is there (`flipper_rpc::screen`); buttons (`GuiSendInputRequest`) and the
    virtual display come with it.

@@ -70,6 +70,13 @@ jobs:
           sh argus-tools/crates/argus-api/tests/qt-oracle/build.sh "$RUNNER_TEMP/api-oracles"
           (cd argus-tools && ARGUS_QT_ORACLES="$RUNNER_TEMP/api-oracles" cargo test --locked -j4 -p argus-api --test qt_json --test pcap)
 
+      # Recovery (DFU): the C++ app's own DfuSe file parser and memory layout reader (dfu/) against the Rust port's
+      # (argus-tools/crates/flipper-dfu) on 3000 generated and damaged files and 4000 interface strings.
+      - name: Compare the DfuSe parsers (C++ and Rust)
+        run: |
+          sh argus-tools/crates/flipper-dfu/tests/qt-oracle/build.sh "$RUNNER_TEMP/dfu-oracle"
+          (cd argus-tools && ARGUS_DFU_ORACLE="$RUNNER_TEMP/dfu-oracle" cargo test --locked -j4 -p flipper-dfu --test qt_oracle)
+
       - name: Upload the package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2, pinned by commit
         with:

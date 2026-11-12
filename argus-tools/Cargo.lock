@@ -370,6 +370,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "flipper-dfu"
+version = "0.1.0"
+dependencies = [
+ "md-5",
+ "proptest",
+]
+
+[[package]]
 name = "flipper-fake"
 version = "0.1.0"
 dependencies = [
