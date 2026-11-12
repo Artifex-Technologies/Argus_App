@@ -180,3 +180,37 @@ fn rust_metadata_equals_the_cpp_apps() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(mismatches.is_empty(), "{} of {CASES} differ; first:\n{}", mismatches.len(), mismatches[..mismatches.len().min(3)].join("\n"));
 }
+
+/// Both apps stop parsing at the same number of lines (argus_tools::flipperfile::MAX_LINES): a file of
+/// millions of tiny lines used to take gigabytes in either. Files of about 1 MiB.
+#[test]
+fn line_limit_matches_the_cpp_app() {
+    let Some(oracle) = std::env::var_os("ARGUS_QT_ORACLE") else {
+        eprintln!("ARGUS_QT_ORACLE not set: build tests/qt-oracle (sh build.sh OUT) to run this comparison");
+        return;
+    };
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("oracle-lines{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let max = argus_tools::flipperfile::MAX_LINES;
+    let mut cases = Vec::new();
+    for (n, ending, tail) in [(max, "\n", ""), (max + 1, "\n", ""), (max, "\r\n", ""), (max - 1, "\n", "a: last"), (max, "\n", "a: last")] {
+        let mut data = format!("Filetype: Flipper SubGhz RAW File{ending}").into_bytes();
+        data.extend(format!("a: b{ending}").repeat(n - 1).into_bytes());
+        data.extend(tail.as_bytes());
+        let name = format!("lines{}.sub", cases.len());
+        std::fs::write(dir.join(&name), &data).unwrap();
+        cases.push((name, data));
+    }
+    let out = Command::new(&oracle).args(cases.iter().map(|(n, _)| dir.join(n))).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let kinds: Vec<&str> = text.lines().map(|l| l.split('\t').next().unwrap_or_default()).collect();
+    for ((name, data), line) in cases.iter().zip(text.lines()) {
+        let (kind, meta) = meta::describe(name, data);
+        assert_eq!(line, format!("{kind}\t{meta}"), "{name}");
+    }
+    // the limit counts newlines: a last line without one is not counted
+    assert_eq!(kinds, ["subghz", "file", "subghz", "subghz", "subghz"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

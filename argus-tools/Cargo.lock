@@ -49,6 +49,7 @@ dependencies = [
 name = "argus-capture"
 version = "0.1.0"
 dependencies = [
+ "argus-tools",
  "flipper-fake",
  "flipper-rpc",
  "hex",

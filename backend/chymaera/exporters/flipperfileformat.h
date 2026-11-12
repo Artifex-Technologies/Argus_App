@@ -24,6 +24,8 @@ class FlipperFileFormat
 public:
     // Larger files are not parsed (the Rust port's meta::MAX_PARSE).
     static constexpr qint64 MaxFileSize = 64 << 20;
+    // Files with more lines are not parsed either (argus-tools' flipperfile::MAX_LINES).
+    static constexpr qsizetype MaxLines = 200000;
 
     FlipperFileFormat();
 

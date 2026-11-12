@@ -172,6 +172,14 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   (`argus-capture::store`) gained sessions, events within a session, `capture.list` rows with their NULLs
   and the event count. `compare-api.sh` 36/36; `chymaera selftest` 13/13 (Rust, no port opened) and 17/17
   (C++).
+- One Flipper-format reader (2026-11-12): argus-tools' `flipperfile` now holds the Qt-faithful reader that was
+  `argus-capture::meta`'s (`FlipperFormat`, exact pairs for the capture `meta`) and builds the capture library's
+  bounded view (`parse`: 4 MiB, keys up to 64 bytes, values cut at 512 characters, RAW_Data counted) from the same
+  pairs. `argus-capture` depends on the argus-tools library for it (not the other way round, so the Qt build's
+  `cargo build` of argus-tools still needs no protoc). The library now reads the way the app does: a capture that
+  starts with a BOM is recognised (it was skipped), every `\r` is dropped (a lone one mid-line used to show as a
+  space), invalid UTF-8 becomes one U+FFFD per byte, and an indented `#` line is a comment. The Qt oracle still
+  agrees on every generated file.
 - Tests: 77 in the new crates (frames, paths, schema, nanopb fixtures, session and reads against the fake with
   every fault, hostile names, the CLI binary over a socket and a pseudo-terminal), all green; argus-tools' own
   tests unchanged; `qFlipper-cli chymaera selftest` 11/11 with the hook built in.
@@ -247,6 +255,10 @@ each:
   refused.
 - **"no token"** was logged and printed while a token was required (the one written to the file). It now says
   where the token was written.
+- **A file of millions of tiny lines took gigabytes.** Both readers made one string pair per line of a file up to
+  64 MiB (about 21 million `a:` lines), on any capture pulled off a card. A file with more than 200 000 lines is
+  now kept unparsed by both (`FlipperFileFormat::MaxLines`, `flipperfile::MAX_LINES`); the Qt oracle test has the
+  cases at the limit.
 
 A regression of my own, caught by porting the capture sync: once `GetFileTreeOperation` left unsafe names out,
 the C++ capture pull stopped counting them as failed (as `stagedPath` used to). `CaptureSync` now counts every
@@ -265,6 +277,4 @@ failed, and does not read `devinfo` or start the screen.
    `device.status` and asynchronous `capture.pull`/`pullAll` as the GUI's server has them; the fake can stand in
    for the device, and `compare-api.sh` can then run both against it), and the screen streamer (drop frames that
    are not 1024 bytes, as the C++ now does).
-2. One Flipper-format parser: argus-tools' `flipperfile.rs` (values cut at 512 characters, for the capture
-   library) and `argus-capture::meta` (exact C++ parity) should become one module with both views.
-3. `restore` needs writes (phase 4); then the fake can check each app's restore of the other's backup.
+2. `restore` needs writes (phase 4); then the fake can check each app's restore of the other's backup.

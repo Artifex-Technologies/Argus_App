@@ -152,6 +152,14 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — One Flipper-format reader in argus-tools; a line limit in both apps
+- argus-tools' `flipperfile` now holds the Qt-faithful reader (from `argus-capture::meta`) and builds the capture
+  library's bounded view from it; `argus-capture` uses it through the argus-tools library. The library now
+  recognises a capture file that starts with a BOM and drops `\r` the way the app does.
+- **Fixed in both:** a capture file of millions of tiny lines (up to 64 MiB) took gigabytes to parse in either app;
+  files over 200 000 lines are kept unparsed (kind from the suffix, as any non-Flipper file). Checked against the
+  C++ parser by the Qt oracle test.
+
 ### 2026-11-12 — The Sarina control API in Rust (`argus-cli chymaera serve`), and six fixes in both versions
 - New `argus-tools/crates/argus-api`: the server (loopback, token, NDJSON), every command, the event log, pcap export,
   and `qjson`, JSON exactly as Qt reads and writes it. `argus-cli chymaera serve|parse|import|selftest` print what

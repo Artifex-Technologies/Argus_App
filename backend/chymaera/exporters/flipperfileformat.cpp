@@ -33,6 +33,12 @@ bool FlipperFileFormat::loadFromData(const QByteArray &data)
     m_version = 0;
     m_lastError.clear();
 
+    // A file of millions of tiny lines would take gigabytes as a list of strings.
+    if(data.count('\n') > MaxLines) {
+        m_lastError = QStringLiteral("Too many lines for a Flipper file");
+        return false;
+    }
+
     const QString text = QString::fromUtf8(data);
     const QStringList lines = text.split(QRegularExpression(QStringLiteral("\r\n|\n|\r")));
 
