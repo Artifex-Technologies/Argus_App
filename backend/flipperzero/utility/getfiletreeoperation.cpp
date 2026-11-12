@@ -23,6 +23,31 @@ const FileInfoList &GetFileTreeOperation::files() const
     return m_result;
 }
 
+const QByteArrayList &GetFileTreeOperation::refused() const
+{
+    return m_refused;
+}
+
+bool GetFileTreeOperation::isSafeName(const QByteArray &name)
+{
+    if(name.isEmpty() || name.size() > 255 || name == "." || name == "..") {
+        return false;
+    }
+
+    const auto text = QString::fromUtf8(name);
+    if(text.toUtf8() != name) {
+        return false;
+    }
+
+    for(const auto &c : text) {
+        if(c == QLatin1Char('/') || c == QLatin1Char('\\') || c.category() == QChar::Other_Control) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void GetFileTreeOperation::nextStateLogic()
 {
     if(operationState() == BasicOperationState::Ready) {
@@ -39,6 +64,12 @@ void GetFileTreeOperation::nextStateLogic()
         }
 
         for(const auto &fileInfo : qAsConst(op->files())) {
+            // A name from the device that could lead outside a local folder is left out.
+            if(!isSafeName(fileInfo.name) || fileInfo.absolutePath.size() > 255) {
+                m_refused.append(fileInfo.absolutePath);
+                continue;
+            }
+
             if(fileInfo.type == FileType::Directory) {
                 listDirectory(fileInfo.absolutePath);
             }

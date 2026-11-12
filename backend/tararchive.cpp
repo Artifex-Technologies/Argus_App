@@ -149,12 +149,16 @@ void TarArchive::readTarFile()
             return;
 
         } else if(isMemZeros((char*)&header, sizeof(TarHeader))) {
+            // The end is two zero blocks in a row. Archives from older Argus/qFlipper builds have a
+            // single stray zero block after every file whose size is a multiple of 512; skip those.
             if(++emptyCounter == 2) {
                break;
             } else {
                 continue;
             }
         }
+
+        emptyCounter = 0;
 
         const auto fileSize = strtol(header.size, nullptr, 8);
         const auto fileName = QString(header.name);
@@ -190,6 +194,15 @@ void TarArchive::assembleTarFile(const QDir &inputDir)
     while(it.hasNext()) {
         const QFileInfo fileInfo(it.next());
         const auto relativeFilePath = inputDir.relativeFilePath(fileInfo.absoluteFilePath()).toLocal8Bit();
+
+        // The name field holds 99 bytes and a NUL (a folder's name ends in '/'); refuse a longer
+        // name rather than store a truncated one.
+        if(relativeFilePath.size() + (fileInfo.isDir() ? 1 : 0) > (int)sizeof(header.name) - 1) {
+            setError(BackendError::DataError, QStringLiteral("Name too long for the archive: %1").arg(QString::fromLocal8Bit(relativeFilePath)));
+            break;
+        }
+
+        header = {};
 
         if(fileInfo.isFile()) {
             snprintf(header.name, sizeof(header.name), "%s", relativeFilePath.data());
@@ -244,12 +257,18 @@ void TarArchive::assembleTarFile(const QDir &inputDir)
                 break;
             }
 
-            // Blocks are always padded to BLOCK_SIZE
-            const auto padding = BLOCK_SIZE - (fileInfo.size() % BLOCK_SIZE);
+            // Data is padded to a whole block; a file that already fills its blocks gets no padding
+            // (older builds wrote a whole zero block there, which standard tar reads as the end).
+            const auto padding = (BLOCK_SIZE - (fileInfo.size() % BLOCK_SIZE)) % BLOCK_SIZE;
             if(padding) {
                 m_tarFile->write(QByteArray(padding, 0));
             }
         }
+    }
+
+    // End of archive: two zero blocks.
+    if(!isError() && m_tarFile->write(QByteArray(2 * BLOCK_SIZE, 0)) != 2 * BLOCK_SIZE) {
+        setError(BackendError::DiskError, m_tarFile->errorString());
     }
 
     m_tarFile->close();

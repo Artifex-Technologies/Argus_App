@@ -124,7 +124,9 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
 - Phase 2 (2026-11-12): MD5, file read (stat and read under one id, as the C++ app), date/time, file tree, pull,
   backup; `argus-cli stat|df|md5|date|pull|backup`; the fake's pseudo-terminal mode; the C++ test hook and
   `compare-cli.sh`.
-- Tests: 62 in the new crates (frames, paths, schema, nanopb fixtures, session and reads against the fake with
+- The C++ fixes above (2026-11-12): `chymaera selftest` 17/17 (six new checks: old and new archives, end blocks, long
+  names, device names); `compare-cli.sh` 26/26 over six scenarios.
+- Tests: 64 in the new crates (frames, paths, schema, nanopb fixtures, session and reads against the fake with
   every fault, hostile names, the CLI binary over a socket and a pseudo-terminal), all green; argus-tools' own
   tests unchanged; `qFlipper-cli chymaera selftest` 11/11 with the hook built in.
 
@@ -144,22 +146,33 @@ Differences from the C++ app found so far, all on purpose or harmless:
 - **Control characters** (including DEL and the C1 range) in anything printed are escaped, so a file name on the
   device cannot drive the terminal.
 
-Found in the C++ app by running it against the fake (phase 2). Not fixed there: the C++ goes when the port is
-complete, and each needs my decision before then.
+Found in the C++ app by running it against the fake, and **fixed in both versions** on 2026-11-12 (a bug the
+port finds is fixed in the C++ too). `compare-cli.sh` has a case for each, and both apps now agree on all of them:
 
-- **A missing `data` field crashes it.** `plugins/flipperproto0/storageresponse.cpp:63` and `guiresponse.cpp:10`
-  dereference nanopb's `data` pointer without checking it. The firmware always sends an empty `data` for an empty
-  file, but any device or encoder that leaves the empty field out (valid proto3) makes the app segfault. The Rust
-  side treats both the same.
-- **A short read goes unnoticed.** When a file arrives with fewer bytes than its stat said, the C++ backup still
-  exits 0 and archives the truncated file. The Rust read fails and writes no archive.
-- **Its backups confuse standard tar.** The C++ writer adds a zero block after any file whose size is a multiple of
-  512 (`.bt.settings` is often 1024 bytes); GNU tar takes it as the end and silently lists only the entries before
-  it. The C++ restore reads past it. The Rust writer pads correctly and ends with two zero blocks.
-- **No name checks in backup and directory download.** `UserBackupOperation` and `DirectoryDownloadOperation` join
-  device names onto local paths unchecked (only capture pull got `stagedPath` on 2026-10-27), and the directory
-  download deletes an existing local folder of the same name. The Rust pull and backup refuse bad names, never
-  overwrite, and create files 0600 and folders 0700; the backup holds the device's keys.
+- **A missing `data` field crashed it.** `storageresponse.cpp`, `guiresponse.cpp` and `statusresponse.cpp`
+  dereferenced nanopb's `data` pointer unchecked; a device that leaves an empty `bytes` field out (valid proto3;
+  the firmware never does) made the app segfault. Now a missing field is empty. Cases: `omit-empty-data`,
+  `frame-without-data`.
+- **Screen frames of the wrong length** were drawn anyway: the canvas reads 1024 bytes for the 128x64 screen, so a
+  shorter frame read past the end. The streamer now drops any frame that is not exactly 1024 bytes. (The Rust port
+  must do the same when it gets the screen streamer, phase 3.)
+- **A short or long read went unnoticed.** `StorageReadOperation` now fails when the bytes received differ from the
+  stat, which covers backup, directory download, capture pull and snapshots. The backup exits non-zero and leaves
+  no archive. Cases: `short-read`, `long-read`.
+- **Its backups confused standard tar, and its restore lost files from them.** The writer added a zero block after
+  any 512-aligned file (GNU tar stopped there), truncated names over 99 bytes and wrote no end blocks; it now pads
+  correctly, refuses long names and ends with two zero blocks. The reader ended at the second zero block anywhere
+  in the archive, so an old archive with two 512-aligned files lost everything after the second; it now ends only at
+  two zero blocks in a row, so old and new archives both restore whole (`chymaera selftest` checks both).
+- **No name checks in backup and directory download, and a delete.** `GetFileTreeOperation` now leaves out (and
+  lists as refused) any name that is empty, `.`, `..`, not UTF-8, over 255 bytes, or holds `/`, `\`, NUL or a
+  control character, the same rule as the Rust `safe_name`; nothing under such a name is read. The directory
+  download refuses an existing local folder instead of deleting it. Case: `hostile`.
+- **An empty tree hung backup and directory download** (they waited for a last file that never came); they now go on.
+
+What still differs, on purpose: the C++ app probes the device before a backup (and **sets its clock**) and starts the
+screen stream and a status screen; the Rust CLI only reads what the command needs. The C++ restore of an archive and
+the Rust backup agree; a restore from Rust waits for writes (phase 4).
 
 ## Resume here
 
@@ -168,4 +181,3 @@ complete, and each needs my decision before then.
    `argus-cli` parity with `qFlipper-cli chymaera pull|pull-all`; `compare-cli.sh` gets a pull scenario.
 2. `restore` needs writes (phase 4); until then the fake answers write requests "not implemented". The fake can
    then check the C++ restore of a Rust backup and the other way round.
-3. Decide whether to fix the four C++ findings above in the C++ now or leave them until it goes.

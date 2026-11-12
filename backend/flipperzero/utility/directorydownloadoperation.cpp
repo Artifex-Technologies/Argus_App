@@ -50,12 +50,13 @@ void DirectoryDownloadOperation::createLocalDirectory()
 {
     const auto subdir = QUrl(m_remotePath).fileName();
 
-    if(m_targetDir.exists(subdir)) {
-        const auto success = m_targetDir.cd(subdir) && m_targetDir.removeRecursively() && m_targetDir.cdUp();
-        if(!success) {
-            finishWithError(BackendError::DiskError, QStringLiteral("Target directory exists, but cannot be removed"));
-            return;
-        }
+    // Never delete or merge into an existing local folder: refuse instead.
+    if(subdir.isEmpty() || !GetFileTreeOperation::isSafeName(subdir.toUtf8())) {
+        finishWithError(BackendError::DiskError, QStringLiteral("Refusing to download a folder named \"%1\"").arg(subdir));
+        return;
+    } else if(m_targetDir.exists(subdir)) {
+        finishWithError(BackendError::DiskError, QStringLiteral("Target directory %1 already exists; nothing is overwritten").arg(m_targetDir.filePath(subdir)));
+        return;
     }
 
     if(!(m_targetDir.mkdir(subdir) && m_targetDir.cd(subdir))) {
@@ -74,6 +75,10 @@ void DirectoryDownloadOperation::getFileTree()
             finishWithError(BackendError::BackupError, operation->errorString());
         } else {
             m_fileList = operation->files();
+            for(const auto &path : operation->refused()) {
+                qWarning().noquote() << "Download: refused a name that could lead outside the target folder:" << path.toPercentEncoding("/");
+            }
+
             m_totalSize = std::accumulate(m_fileList.cbegin(), m_fileList.cend(), 0, [](qint64 total, const FileInfo &arg) {
                 return arg.type == FileType::RegularFile ? total + arg.size : total;
             });
@@ -92,6 +97,10 @@ void DirectoryDownloadOperation::readFiles()
     auto filesRemaining = std::count_if(m_fileList.cbegin(), m_fileList.cend(), [](const FileInfo &arg) {
         return arg.type == FileType::RegularFile;
     });
+
+    // Nothing to read (an empty folder, or only refused names): go on, instead of waiting for a
+    // last read that never comes.
+    const auto hasFiles = filesRemaining > 0;
 
     auto baseProgress = 0.0;
 
@@ -124,5 +133,9 @@ void DirectoryDownloadOperation::readFiles()
 
             baseProgress += fileInfo.size * 100.0 / m_totalSize;
         }
+    }
+
+    if(!hasFiles) {
+        advanceOperationState();
     }
 }

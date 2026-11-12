@@ -43,6 +43,11 @@ pub enum Fault {
     ShortRead,
     /// Every file read sends one byte more than its stat said.
     LongRead,
+    /// An empty file's read answer leaves the empty `data` field out (valid protobuf; the
+    /// firmware sends it empty instead). Crashed the C++ app before 2026-11-12.
+    OmitEmptyData,
+    /// The broadcast screen frame after a stream start has no `data` field.
+    FrameWithoutData,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +102,20 @@ fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
     list.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
 }
 
+/// Names a hostile device could list in `/int`: each would lead outside a local folder or
+/// carry control characters. Both apps must refuse them and read nothing under them.
+pub const HOSTILE_NAMES: &[&str] = &["..", "../../escape", "a\\b", "line\nfeed", "esc\u{1b}[2J", "del\u{7f}"];
+
 impl FakeFlipper {
+    /// [`FakeFlipper::standard`] plus [`HOSTILE_NAMES`] as files in `/int`, and `..` as a folder.
+    pub fn with_hostile_names(mut self) -> FakeFlipper {
+        for name in HOSTILE_NAMES {
+            self.hostile.push(("/int".into(), (*name).into(), false));
+        }
+        self.hostile.push(("/int".into(), "..".into(), true));
+        self
+    }
+
     /// A made-up device on Argus firmware with a few folders. No real device's names or
     /// serial numbers.
     pub fn standard() -> FakeFlipper {
@@ -224,7 +242,7 @@ impl FakeFlipper {
     fn answer(&self, io: &mut impl Write, req: &Main, fault: &Fault) -> io::Result<bool> {
         let id = req.command_id;
         match fault {
-            Fault::None | Fault::NoPrompt | Fault::ShortRead | Fault::LongRead => {}
+            Fault::None | Fault::NoPrompt | Fault::ShortRead | Fault::LongRead | Fault::OmitEmptyData | Fault::FrameWithoutData => {}
             Fault::Silent => return Ok(true),
             Fault::GarbageFrame => {
                 io.write_all(&[0x02, 0x0f, 0x00])?;
@@ -332,7 +350,9 @@ impl FakeFlipper {
                         let file = pb_storage::File { data: chunk.to_vec(), ..Default::default() };
                         ok(Content::StorageReadResponse(pb_storage::ReadResponse { file: Some(file) }), has_next)
                     };
-                    if data.is_empty() {
+                    if data.is_empty() && self.fault == Fault::OmitEmptyData {
+                        send(io, read(&[], false))?;
+                    } else if data.is_empty() {
                         send_raw(io, &empty_file_read_response(id))?;
                     }
                     let mut chunks = data.chunks(512).peekable();
@@ -361,7 +381,8 @@ impl FakeFlipper {
             // and then sends frames as broadcasts (command id 0); the fake sends one blank frame.
             Some(Content::GuiStartScreenStreamRequest(_)) => {
                 send(io, ok(Content::Empty(Empty {}), false))?;
-                let frame = pb_gui::ScreenFrame { data: vec![0; 1024], ..Default::default() };
+                let data = if self.fault == Fault::FrameWithoutData { Vec::new() } else { vec![0; 1024] };
+                let frame = pb_gui::ScreenFrame { data, ..Default::default() };
                 send(io, Main { command_id: 0, content: Some(Content::GuiScreenFrame(frame)), ..Default::default() })?;
             }
             Some(Content::GuiStopScreenStreamRequest(_)) => send(io, ok(Content::Empty(Empty {}), false))?,

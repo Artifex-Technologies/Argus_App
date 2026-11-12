@@ -59,8 +59,11 @@ bool StorageReadResponse::hasFile() const
 
 const StorageFile StorageReadResponse::file() const
 {
+    // An empty file's data may be left out of the message (valid protobuf; the firmware sends it
+    // empty instead): treat a missing field as empty, never dereference it.
     const auto &f = message().content.storage_read_response.file;
-    return {(StorageFile::FileType)f.type, {f.name}, {(const char*)f.data->bytes, f.data->size}, f.size};
+    const auto data = f.data ? QByteArray((const char*)f.data->bytes, f.data->size) : QByteArray();
+    return {(StorageFile::FileType)f.type, {f.name}, data, f.size};
 }
 
 StorageMd5SumResponse::StorageMd5SumResponse(MessageWrapper &wrapper, QObject *parent):

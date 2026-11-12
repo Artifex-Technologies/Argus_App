@@ -1,6 +1,6 @@
 #!/bin/sh
 # Runs the C++ qFlipper-cli and the Rust argus-cli against the same fake Flipper on a
-# pseudo-terminal and compares them: exit status, the files they produce, and the RPC requests
+# pseudo-terminal and compares them: exit status, the archives they produce, and the RPC requests
 # they send (decoded by the fake). docs/RUST_PORT.md, section 4.
 #
 #   sh compare-cli.sh QFLIPPER_CLI ARGUS_CLI FLIPPER_FAKE OUTDIR
@@ -18,11 +18,12 @@ grep -aq ARGUS_TEST_SERIAL_PORT "$cpp" || { echo "refusing: $cpp has no ARGUS_TE
 mkdir -p "$out" && chmod 700 "$out"
 
 failures=0
-check() { # check NAME CONDITION-RESULT(0 = ok)
+check() { # check NAME RESULT (0 = ok)
     if [ "$2" -eq 0 ]; then echo "  ok    $1"; else echo "  FAIL  $1"; failures=$((failures + 1)); fi
 }
+note() { echo "  note  $1"; }
 
-# start_fake DIR SESSIONS [fake args...] -> sets $port, fake runs in the background
+# start_fake DIR SESSIONS [fake args...] -> sets $port; the fake runs in the background
 start_fake() {
     dir=$1 sessions=$2; shift 2
     mkdir -p "$dir"
@@ -37,76 +38,81 @@ start_fake() {
     done
     case "$port" in /dev/pts/*) ;; *) echo "fake did not start: $(cat "$dir/fake.err")" >&2; exit 1 ;; esac
 }
-
 stop_fake() { wait "$fake_pid" 2>/dev/null; }
 
-run_cpp() { # run_cpp DIR ARGS... ; the C++ CLI sees only the fake's pty
-    dir=$1; shift
-    ARGUS_TEST_SERIAL_PORT=$port timeout 90 "$cpp" "$@" > "$dir/stdout.txt" 2> "$dir/stderr.txt"
-    echo $? > "$dir/exit.txt"
+# backup_both NAME [fake args...]: both CLIs back up /int from their own fake with the same args.
+# The C++ app opens the port twice (device information, then the backup).
+backup_both() {
+    name=$1; shift
+    start_fake "$out/$name-cpp" 2 "$@"
+    ARGUS_TEST_SERIAL_PORT=$port timeout 90 "$cpp" backup "$out/$name-cpp/backup.tgz" > "$out/$name-cpp/stdout.txt" 2> "$out/$name-cpp/stderr.txt"
+    echo $? > "$out/$name-cpp/exit.txt"
+    stop_fake
+    start_fake "$out/$name-rs" 1 "$@"
+    timeout 90 "$rs" --port "$port" backup "$out/$name-rs/backup.tgz" > "$out/$name-rs/stdout.txt" 2> "$out/$name-rs/stderr.txt"
+    echo $? > "$out/$name-rs/exit.txt"
+    stop_fake
 }
 
-run_rs() {
-    dir=$1; shift
-    timeout 90 "$rs" --port "$port" "$@" > "$dir/stdout.txt" 2> "$dir/stderr.txt"
-    echo $? > "$dir/exit.txt"
+exit_of() { cat "$out/$1/exit.txt"; }
+
+# requests of the backup itself, without session and command id, and without the C++ app's
+# screen requests (Gui*: the Rust CLI has no screen to drive)
+storage_requests() {
+    if [ -n "$(grep '^2 ' "$out/$1/requests.txt")" ]; then grep '^2 ' "$out/$1/requests.txt"; else cat "$out/$1/requests.txt"; fi \
+        | cut -d' ' -f3- | grep -v '^Gui'
 }
 
-# requests without session and command id: "Type arg"
-strip() { cut -d' ' -f3- "$1"; }
+# The C++ restore reads past single zero blocks; plain tar must now read every entry too.
+extract() { mkdir -p "$2" && tar -xzf "$1" -C "$2" 2> "$2.err"; }
 
-# The C++ restore reads past single zero blocks (backend/tararchive.cpp), so extract the same way.
-extract() { # extract TGZ DIR
-    mkdir -p "$2" && tar --ignore-zeros -xzf "$1" -C "$2" 2> "$2.err"
+same_backup() { # same_backup NAME: exit 0 on both, same files and bytes, same storage requests, plain tar reads all
+    name=$1
+    check "$name: C++ exit 0" "$(test "$(exit_of "$name-cpp")" = 0; echo $?)"
+    check "$name: Rust exit 0" "$(test "$(exit_of "$name-rs")" = 0; echo $?)"
+    extract "$out/$name-cpp/backup.tgz" "$out/$name-cpp/tree"
+    extract "$out/$name-rs/backup.tgz" "$out/$name-rs/tree"
+    diff -r "$out/$name-cpp/tree" "$out/$name-rs/tree" > "$out/$name-tree.diff" 2>&1
+    check "$name: same files and bytes in both archives" $?
+    all=$(tar --ignore-zeros -tzf "$out/$name-cpp/backup.tgz" 2>/dev/null | wc -l)
+    plain=$(tar -tzf "$out/$name-cpp/backup.tgz" 2>/dev/null | wc -l)
+    check "$name: plain tar lists every entry of the C++ archive ($plain of $all)" "$(test "$plain" -eq "$all" && test "$all" -gt 0; echo $?)"
+    storage_requests "$name-cpp" > "$out/$name-cpp/storage.txt"
+    storage_requests "$name-rs" > "$out/$name-rs/storage.txt"
+    diff "$out/$name-cpp/storage.txt" "$out/$name-rs/storage.txt" > "$out/$name-requests.diff"
+    check "$name: same storage requests in the same order" $?
 }
-
-note() { echo "  note  $1"; }
 
 echo "== backup (/int to .tar.gz)"
-start_fake "$out/backup-cpp" 2
-run_cpp "$out/backup-cpp" backup "$out/backup-cpp/backup.tgz"
-stop_fake
-start_fake "$out/backup-rs" 1
-run_rs "$out/backup-rs" backup "$out/backup-rs/backup.tgz"
-stop_fake
-check "C++ exit 0" "$(test "$(cat "$out/backup-cpp/exit.txt")" = 0; echo $?)"
-check "Rust exit 0" "$(test "$(cat "$out/backup-rs/exit.txt")" = 0; echo $?)"
-extract "$out/backup-cpp/backup.tgz" "$out/backup-cpp/tree"
-extract "$out/backup-rs/backup.tgz" "$out/backup-rs/tree"
-diff -r "$out/backup-cpp/tree" "$out/backup-rs/tree" > "$out/backup-tree.diff" 2>&1
-check "same files and bytes in both archives (read as the C++ restore reads)" $?
-plain_cpp=$(tar -tzf "$out/backup-cpp/backup.tgz" 2>/dev/null | wc -l)
-all_cpp=$(tar --ignore-zeros -tzf "$out/backup-cpp/backup.tgz" 2>/dev/null | wc -l)
-plain_rs=$(tar -tzf "$out/backup-rs/backup.tgz" 2>/dev/null | wc -l)
-check "plain tar reads every entry of the Rust archive ($plain_rs)" "$(test "$plain_rs" -eq "$all_cpp"; echo $?)"
-[ "$plain_cpp" -lt "$all_cpp" ] && note "plain tar stops after $plain_cpp of $all_cpp entries in the C++ archive (its zero block after a 512-aligned file)"
-# The C++ app's first session is its device-information probe; its second session is the backup.
-grep '^1 ' "$out/backup-cpp/requests.txt" > "$out/backup-cpp/probe.txt"
-grep '^2 ' "$out/backup-cpp/requests.txt" > "$out/backup-cpp/work.txt"
-# The C++ session also starts the screen stream and shows a status screen on the Flipper (Gui*
-# requests); the Rust CLI has no screen to drive. Everything else must match.
-strip "$out/backup-cpp/work.txt" | grep -v '^Gui' > "$out/backup-cpp/work.stripped"
-strip "$out/backup-rs/requests.txt" > "$out/backup-rs/work.stripped"
-diff "$out/backup-cpp/work.stripped" "$out/backup-rs/work.stripped" > "$out/backup-requests.diff"
-check "same storage requests in the same order (ids aside)" $?
-note "C++ only, before the backup: $(strip "$out/backup-cpp/work.txt" | grep '^Gui' | tr '\n' ' ')"
-echo "  C++ probe before the backup (Rust does not send it):"
-sed 's/^/    /' "$out/backup-cpp/probe.txt"
+backup_both backup
+same_backup backup
+note "C++ only: the device probe before the backup ($(grep '^1 ' "$out/backup-cpp/requests.txt" | cut -d' ' -f3 | tr '\n' ' '))"
+note "C++ only: $(grep '^2 ' "$out/backup-cpp/requests.txt" | cut -d' ' -f3 | grep '^Gui' | tr '\n' ' ')"
 
-echo "== backup when the device sends one byte less than its stat said"
-start_fake "$out/short-cpp" 2 --fault short-read
-run_cpp "$out/short-cpp" backup "$out/short-cpp/backup.tgz"
-stop_fake
-start_fake "$out/short-rs" 1 --fault short-read
-run_rs "$out/short-rs" backup "$out/short-rs/backup.tgz"
-stop_fake
-echo "  C++ exit $(cat "$out/short-cpp/exit.txt"), archive: $(test -f "$out/short-cpp/backup.tgz" && echo yes || echo no)"
-echo "  Rust exit $(cat "$out/short-rs/exit.txt"), archive: $(test -f "$out/short-rs/backup.tgz" && echo yes || echo no)"
-check "Rust refuses (exit 1, no archive)" "$(test "$(cat "$out/short-rs/exit.txt")" = 1 && test ! -e "$out/short-rs/backup.tgz"; echo $?)"
-if [ -f "$out/short-cpp/backup.tgz" ]; then
-    extract "$out/short-cpp/backup.tgz" "$out/short-cpp/tree"
-    note "C++ archive anyway, favorites.txt is $(wc -c < "$out/short-cpp/tree/int/favorites.txt") bytes (the device's stat said 37)"
-fi
+echo "== an empty file's read answer without its data field (valid protobuf)"
+backup_both omit-empty-data --fault omit-empty-data
+same_backup omit-empty-data
+
+echo "== a broadcast screen frame without its data field"
+backup_both frame-without-data --fault frame-without-data
+same_backup frame-without-data
+
+echo "== names in /int that would lead outside the backup folder"
+backup_both hostile --hostile
+same_backup hostile
+for side in cpp rs; do
+    grep -q 'StorageReadRequest .*\(\.\.\|\\\\\|\\n\|\\u\)' "$out/hostile-$side/requests.txt"
+    check "hostile: $side read none of them" "$(test $? -ne 0; echo $?)"
+done
+
+for fault in short-read long-read; do
+    echo "== a file arrives with a size other than its stat said ($fault)"
+    backup_both "$fault" --fault "$fault"
+    for side in cpp rs; do
+        check "$fault: $side fails (exit $(exit_of "$fault-$side")) and leaves no archive" \
+            "$(test "$(exit_of "$fault-$side")" != 0 && test ! -e "$out/$fault-$side/backup.tgz"; echo $?)"
+    done
+done
 
 echo "== results in $out"
 [ $failures -eq 0 ] && echo "all checks passed" || echo "$failures check(s) failed"

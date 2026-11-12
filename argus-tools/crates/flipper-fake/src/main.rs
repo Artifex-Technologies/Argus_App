@@ -12,7 +12,8 @@
 //!   pseudo-terminal has no DTR line, so neither client raises it there.
 //!
 //! Faults: none, no-prompt, silent, garbage, oversize, busy, flood, wrong-type,
-//! close-mid-frame, short-read, long-read.
+//! close-mid-frame, short-read, long-read, omit-empty-data, frame-without-data. `--hostile` adds
+//! names to `/int` that would lead outside a local folder (both apps must refuse them).
 
 use std::io::{self, Write};
 use std::os::unix::net::UnixListener;
@@ -34,13 +35,15 @@ fn parse_fault(name: &str) -> Option<Fault> {
         "close-mid-frame" => Fault::CloseMidFrame,
         "short-read" => Fault::ShortRead,
         "long-read" => Fault::LongRead,
+        "omit-empty-data" => Fault::OmitEmptyData,
+        "frame-without-data" => Fault::FrameWithoutData,
         _ => return None,
     })
 }
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: flipper-fake (--socket PATH | --pty) [--sessions N] [--record FILE] [--requests FILE] [--fault NAME] [--legacy] [--no-sd]"
+        "usage: flipper-fake (--socket PATH | --pty) [--sessions N] [--record FILE] [--requests FILE] [--fault NAME] [--legacy] [--no-sd] [--hostile]"
     );
     ExitCode::from(2)
 }
@@ -69,6 +72,7 @@ fn main() -> ExitCode {
             },
             "--legacy" => fake.protobuf_version = (0, 13),
             "--no-sd" => fake.sd_card = false,
+            "--hostile" => fake = fake.with_hostile_names(),
             _ => return usage(),
         }
     }

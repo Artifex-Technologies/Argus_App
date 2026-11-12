@@ -42,7 +42,12 @@ void StorageReadOperation::feedResponse(QObject *response)
     } else if(!processResponse(response)) {
         finishWithError(BackendError::ProtocolError, QStringLiteral("Operation finished with error: %1").arg(mainResponse->errorString()));
     } else if(qobject_cast<StorageReadResponseInterface*>(response) && !mainResponse->hasNext()) {
-        finish();
+        // A file that arrives shorter than its stat said must not pass as complete.
+        if(m_fileSizeReceived != m_fileSizeTotal) {
+            finishWithError(BackendError::ProtocolError, QStringLiteral("Received %1 bytes, the device's stat said %2").arg(m_fileSizeReceived).arg(m_fileSizeTotal));
+        } else {
+            finish();
+        }
     } else {
         startTimeout();
     }
@@ -81,6 +86,12 @@ bool StorageReadOperation::processResponse(QObject *response)
             const auto &data = storageReadResponse->file().data;
 
             m_fileSizeReceived += data.size();
+
+            // More bytes than the stat said: the stream cannot be trusted.
+            if(m_fileSizeReceived > m_fileSizeTotal) {
+                return false;
+            }
+
             setProgress(m_fileSizeReceived * 100.0 / m_fileSizeTotal);
 
             return m_file->write(data) == data.size();

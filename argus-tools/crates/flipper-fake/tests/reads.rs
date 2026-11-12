@@ -332,3 +332,28 @@ fn the_empty_file_answer_is_the_firmwares_bytes() {
     let want: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
     assert_eq!(flipper_fake::empty_file_read_response(9), want);
 }
+
+#[test]
+fn an_empty_file_without_its_data_field_reads_as_empty() {
+    let (r, _) = run(FakeFlipper { fault: Fault::OmitEmptyData, ..FakeFlipper::standard() }, |mut s| {
+        let mut buf = Vec::new();
+        (s.storage_read("/int/empty.txt", &mut buf, 1 << 20), buf)
+    });
+    assert_eq!(r.0.unwrap(), 0);
+    assert!(r.1.is_empty());
+}
+
+#[test]
+fn the_hostile_preset_is_refused_by_pull() {
+    let dir = tempdir();
+    let dest = dir.join("int");
+    let d2 = dest.clone();
+    let (report, t) = run(FakeFlipper::standard().with_hostile_names(), move |mut s| s.pull("/int", &d2, &Limits::default()).unwrap());
+    assert_eq!(report.refused.len(), flipper_fake::HOSTILE_NAMES.len() + 1);
+    assert_eq!(report.files, 4);
+    assert!(t
+        .requests
+        .iter()
+        .all(|m| !matches!(&m.content, Some(Content::StorageReadRequest(r)) if !r.path.starts_with("/int/") || r.path.contains(".."))));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -175,7 +175,9 @@ void ScreenStreamer::onBroadcastResponseReceived(QObject *response)
 
     auto *screenFrameResponse = qobject_cast<GuiScreenFrameResponseInterface*>(response);
 
-    if(screenFrameResponse) {
+    // The canvas reads one bit per pixel of a 128x64 screen; a frame of any other length (a broken
+    // or hostile device) would make it read past the end, so it is dropped.
+    if(screenFrameResponse && screenFrameResponse->screenFrame().size() == SCREEN_FRAME_WIDTH * SCREEN_FRAME_HEIGHT / 8) {
         setScreenFrame({
             screenFrameResponse->screenFrame(),
             QSize(SCREEN_FRAME_WIDTH, SCREEN_FRAME_HEIGHT),

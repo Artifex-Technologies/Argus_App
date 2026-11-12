@@ -75,6 +75,9 @@ void UserBackupOperation::getFileTree()
             finishWithError(BackendError::BackupError, operation->errorString());
         } else {
             m_fileList = operation->files();
+            for(const auto &path : operation->refused()) {
+                qWarning().noquote() << "Backup: refused a name that could lead outside the backup folder:" << path.toPercentEncoding("/");
+            }
             advanceOperationState();
         }
 
@@ -89,6 +92,10 @@ void UserBackupOperation::readFiles()
     auto numFiles = std::count_if(m_fileList.cbegin(), m_fileList.cend(), [](const FileInfo &arg) {
         return arg.type == FileType::RegularFile;
     });
+
+    // Nothing to read (an empty folder, or only refused names): go on, instead of waiting for a
+    // last read that never comes.
+    const auto hasFiles = numFiles > 0;
 
     for(const auto &fileInfo: qAsConst(m_fileList)) {
         const auto filePath = fileInfo.absolutePath.mid(1);
@@ -113,6 +120,10 @@ void UserBackupOperation::readFiles()
                 }
             });
         }
+    }
+
+    if(!hasFiles) {
+        advanceOperationState();
     }
 }
 

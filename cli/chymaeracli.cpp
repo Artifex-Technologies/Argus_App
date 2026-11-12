@@ -25,6 +25,11 @@
 
 #include "applicationbackend.h"
 #include "flipperzero/flipperzero.h"
+#include "flipperzero/utility/getfiletreeoperation.h"
+#include "tararchive.h"
+
+#include <QBuffer>
+#include <QTemporaryDir>
 
 using namespace Chymaera;
 
@@ -49,6 +54,36 @@ bool writeTextFile(const QString &path, const QByteArray &content)
     }
     f.write(content);
     return true;
+}
+
+// A tar archive as builds before 2026-11-12 wrote it: the C++ app's own header layout, a whole
+// zero block after every file whose size is a multiple of 512, and no end blocks. A name ending
+// in '/' is a folder.
+QByteArray oldStyleTar(const QList<QPair<QByteArray, QByteArray>> &files)
+{
+    QByteArray out;
+    for(const auto &f : files) {
+        QByteArray h(512, 0);
+        memcpy(h.data(), f.first.constData(), f.first.size());
+        const auto isDir = f.first.endsWith('/');
+        memcpy(h.data() + 100, isDir ? "0000755" : "0000664", 7);
+        const auto size = QByteArray::number((qlonglong)f.second.size(), 8).rightJustified(11, '0');
+        memcpy(h.data() + 124, size.constData(), 11);
+        h[156] = isDir ? '5' : '0';
+        unsigned sum = 256;
+        for(int i = 0; i < 512; ++i) {
+            if(i < 148 || i >= 156) {
+                sum += (unsigned char)h[i];
+            }
+        }
+        const auto cs = QByteArray::number(sum, 8).rightJustified(6, '0');
+        memcpy(h.data() + 148, cs.constData(), 6);
+        out += h;
+        if(!isDir) {
+            out += f.second + QByteArray(512 - f.second.size() % 512, 0);
+        }
+    }
+    return out;
 }
 
 // One self-test check. Prints a PASS/FAIL line and accumulates failures.
@@ -244,6 +279,79 @@ int ChymaeraCli::cmdSelfTest()
 
             bridge.stopServer();
         }
+    }
+
+    // 6. Backup archives (backend/tararchive.cpp) and device names (GetFileTreeOperation).
+    {
+        // An archive from an older build: stray zero blocks after the two 512-aligned files.
+        const QList<QPair<QByteArray, QByteArray>> files = {
+            {"int/", {}}, {"int/a.bin", QByteArray(1024, 'a')}, {"int/b.txt", "hello"}, {"int/c.bin", QByteArray(512, 'c')}, {"int/d.txt", "end"}};
+        QBuffer old;
+        old.setData(oldStyleTar(files));
+        TarArchive oldIndex(&old);
+        bool allFound = !oldIndex.isError();
+        for(const auto &f : files) {
+            if(!f.first.endsWith('/')) {
+                allFound = allFound && oldIndex.fileData(QString::fromUtf8(f.first)) == f.second;
+            }
+        }
+        check(QStringLiteral("restore reads an old archive with stray zero blocks"), allFound, oldIndex.errorString(), failures);
+
+        // A new archive: standard padding and two end blocks, read back by the same index.
+        QTemporaryDir work;
+        QDir(work.path()).mkpath(QStringLiteral("in/int/sub"));
+        writeTextFile(work.filePath(QStringLiteral("in/int/a.bin")), QByteArray(1024, 'a'));
+        writeTextFile(work.filePath(QStringLiteral("in/int/b.txt")), "hello");
+        writeTextFile(work.filePath(QStringLiteral("in/int/sub/c.bin")), QByteArray(512, 'c'));
+        QFile tarFile(work.filePath(QStringLiteral("new.tar")));
+        {
+            QEventLoop loop;
+            // the filter UserBackupOperation sets on its work folder
+            QDir input(work.filePath(QStringLiteral("in")), QString(), QDir::Name | QDir::DirsFirst,
+                       QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden);
+            TarArchive writer(input, &tarFile);
+            QObject::connect(&writer, &TarArchive::ready, &loop, &QEventLoop::quit);
+            QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+            loop.exec();
+            check(QStringLiteral("backup archive written"), !writer.isError(), writer.errorString(), failures);
+        }
+        QFile readBack(tarFile.fileName());
+        TarArchive newIndex(&readBack);
+        const auto ok = !newIndex.isError() && newIndex.fileData(QStringLiteral("int/a.bin")) == QByteArray(1024, 'a')
+                        && newIndex.fileData(QStringLiteral("int/b.txt")) == "hello"
+                        && newIndex.fileData(QStringLiteral("int/sub/c.bin")) == QByteArray(512, 'c');
+        check(QStringLiteral("restore reads a new archive"), ok, newIndex.errorString(), failures);
+        QFile raw(tarFile.fileName());
+        raw.open(QIODevice::ReadOnly);
+        const auto bytes = raw.readAll();
+        // headers + data, no stray blocks: 5 entries (int, int/sub, 3 files) + 1024 + 512 + 512 data + 2 end blocks
+        check(QStringLiteral("archive has standard padding and two end blocks"),
+              bytes.size() == (5 + 2 + 1 + 1 + 2) * 512 && bytes.endsWith(QByteArray(1024, 0)), QString::number(bytes.size()), failures);
+
+        QDir(work.path()).mkpath(QStringLiteral("long/") + QString(120, QLatin1Char('n')));
+        QFile longFile(work.filePath(QStringLiteral("long.tar")));
+        {
+            QEventLoop loop;
+            // the filter UserBackupOperation sets on its work folder
+            QDir input(work.filePath(QStringLiteral("long")), QString(), QDir::Name | QDir::DirsFirst,
+                       QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden);
+            TarArchive writer(input, &longFile);
+            QObject::connect(&writer, &TarArchive::ready, &loop, &QEventLoop::quit);
+            QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+            loop.exec();
+            check(QStringLiteral("a name too long for the archive is refused, not truncated"), writer.isError(), QString(), failures);
+        }
+
+        bool names = true;
+        for(const QByteArray good : {QByteArray("a"), QByteArray(".bt.settings"), QByteArray("snake game.fap"), QByteArray("caf\xc3\xa9")}) {
+            names = names && Flipper::Zero::GetFileTreeOperation::isSafeName(good);
+        }
+        for(const QByteArray bad : {QByteArray(), QByteArray("."), QByteArray(".."), QByteArray("a/b"), QByteArray("a\\b"),
+                                    QByteArray("a\0b", 3), QByteArray("a\nb"), QByteArray("x\x1b[2J"), QByteArray("x\x7f"),
+                                    QByteArray("x\xc2\x9b"), QByteArray("\xff"), QByteArray(256, 'a')}) {
+            names = names && !Flipper::Zero::GetFileTreeOperation::isSafeName(bad);
+        }
+        check(QStringLiteral("device names that could leave a folder are refused"), names, QString(), failures);
     }
 
     out() << "\n" << (failures == 0 ? "SELF-TEST PASSED" : QStringLiteral("SELF-TEST FAILED (%1)").arg(failures)) << "\n";

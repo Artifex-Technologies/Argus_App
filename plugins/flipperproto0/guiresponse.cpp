@@ -6,8 +6,9 @@ GuiScreenFrameResponse::GuiScreenFrameResponse(MessageWrapper &wrapper, QObject 
 
 const QByteArray GuiScreenFrameResponse::screenFrame() const
 {
+    // A frame without its data field (valid protobuf; the firmware never sends one) is empty.
     const auto *f = message().content.gui_screen_frame.data;
-    return QByteArray((const char*)f->bytes, f->size);
+    return f ? QByteArray((const char*)f->bytes, f->size) : QByteArray();
 }
 
 Qt::ScreenOrientation GuiScreenFrameResponse::screenOrientation() const

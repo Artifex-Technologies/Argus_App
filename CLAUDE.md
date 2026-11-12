@@ -149,6 +149,18 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — C++ fixes for what the Rust port found (both versions now agree)
+- Rule from the owner: a bug the port finds is fixed in both versions. Fixed in the C++ app: NULL `data` dereferences
+  (`storageresponse.cpp`, `guiresponse.cpp`, `statusresponse.cpp`); screen frames not 1024 bytes are dropped
+  (`screenstreamer.cpp`); `StorageReadOperation` fails on a size other than the stat (backup leaves no archive); the tar
+  writer pads correctly, refuses names over 99 bytes, ends with two zero blocks, and the reader stops only at two zero
+  blocks in a row (old archives restore whole); `GetFileTreeOperation` refuses unsafe device names (new `refused()`,
+  `isSafeName()`); directory download refuses an existing folder instead of deleting it; empty trees no longer hang.
+- **Behaviour changes others may notice:** the GUI file manager's "download folder" now fails if the target folder
+  exists (it used to delete it); a short read now fails capture pull and snapshot reads instead of passing truncated
+  data; device names with control characters are skipped (and logged) by every file-tree walk.
+- Tests: `chymaera selftest` 17/17 (was 11); `compare-cli.sh` 26/26 in six scenarios (also run in `linux.yml`).
+
 ### 2026-11-12 — Rust port phase 2 + a test-only hook in the C++ backend
 - `argus-cli` reads: `stat`, `df`, `md5`, `date`, `pull`, `backup` (`/int` as a .tar.gz the C++ restore reads). Device
   names are checked before local use; nothing local is overwritten. Plan and status: `docs/RUST_PORT.md`.
