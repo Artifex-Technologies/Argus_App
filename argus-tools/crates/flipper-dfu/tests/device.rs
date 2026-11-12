@@ -198,3 +198,26 @@ fn hostile_layouts_erase_nothing() {
     assert!(matches!(d.erase(FLASH, 0), Err(Error::Layout(_))));
     assert!(d.into_inner().erased_pages.is_empty());
 }
+
+/// The same requests over the line transport (what `argus-cli --dfu-socket` uses) as directly.
+#[test]
+fn line_transport_is_the_same_device() {
+    use std::io::BufReader;
+    use std::os::unix::net::UnixStream;
+
+    let mut rng = Rng(5);
+    let f = dfuse::parse(&file(&[T::new(0, vec![(FLASH + 0x2000, rng.bytes(5000))])])).unwrap();
+    let mut direct = dfu(Faults { busy_poll_ms: 7, ..Faults::default() });
+    direct.download_file(&f).unwrap();
+    let direct = direct.into_inner();
+
+    let (client, server) = UnixStream::pair().unwrap();
+    let served = std::thread::spawn(move || fake::serve(FakeDfu::new(Faults { busy_poll_ms: 7, ..Faults::default() }), server));
+    let reader = BufReader::new(client.try_clone().unwrap());
+    let mut d = Dfu::new(flipper_dfu::line::LineTransport::new(reader, client));
+    d.download_file(&f).unwrap();
+    drop(d);
+    let over_lines = served.join().unwrap();
+    assert_eq!(over_lines.log, direct.log);
+    assert_eq!(over_lines.flash, direct.flash);
+}

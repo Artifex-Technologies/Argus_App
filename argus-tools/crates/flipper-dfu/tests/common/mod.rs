@@ -2,7 +2,7 @@
 //! and a small seeded generator.
 #![allow(dead_code)]
 
-pub mod fake;
+pub use flipper_fake::dfu as fake;
 pub mod oracle;
 
 use flipper_dfu::dfuse::crc32;

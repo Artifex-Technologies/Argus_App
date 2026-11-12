@@ -10,6 +10,8 @@
 //! - [`recovery`]: the C++ app's recovery flows (boot mode, FUS and wireless stack, firmware,
 //!   option bytes from a file) on top of those.
 //!
+//! - [`line`]: a transport over a text stream, one request per line (the fake bootloader in tests,
+//!   `argus-cli --dfu-socket`).
 //! - `usb` (feature `usb` only): the nusb transport for a real device, which no test uses.
 //!
 //! Without the `usb` feature everything here is pure code and nothing can open a device. The tests
@@ -18,6 +20,7 @@
 pub mod device;
 pub mod dfuse;
 pub mod layout;
+pub mod line;
 pub mod recovery;
 #[cfg(feature = "usb")]
 pub mod usb;

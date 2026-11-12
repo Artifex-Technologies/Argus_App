@@ -3,11 +3,12 @@ name = "flipper-fake"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
-description = "A scripted fake Flipper Zero speaking the serial CLI handshake and protobuf RPC, for testing Argus without a device"
+description = "A scripted fake Flipper Zero speaking the serial CLI handshake and protobuf RPC, and a fake STM32WB55 DFU bootloader, for testing Argus without a device"
 publish = false
 
 [dependencies]
 flipper-rpc = { path = "../flipper-rpc" }
+flipper-dfu = { path = "../flipper-dfu" }
 prost = "0.14"
 md-5 = "0.10"
 serialport = { version = "4.10", default-features = false }

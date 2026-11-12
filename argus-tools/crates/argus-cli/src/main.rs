@@ -5,10 +5,12 @@
 //!
 //! It never looks for devices: the Flipper's serial port (`--port`) or a socket carrying its
 //! byte stream (`--socket`) must be named. Commands that change the device (`mkdir`, `rm`, `mv`,
-//! `push`, `restore`, `update`, `reboot`, `erase`) do nothing without `--yes`; `pull` and `backup` write
-//! only new local files (they never overwrite).
+//! `push`, `restore`, `update`, `reboot`, `erase`, and `recovery` but `recovery info`) do nothing without `--yes`;
+//! `pull` and `backup` write only new local files (they never overwrite). `recovery` reaches a DFU bootloader
+//! only through `--dfu-socket` (src/recovery.rs); there is no USB path in argus-cli.
 
 mod chymaera;
+mod recovery;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -44,6 +46,8 @@ const HELP: &str = "argus-cli — talk to a Flipper Zero over RPC (JSON on stdou
   chymaera ...       serve | watch | parse FILE | import FILE | selftest, as qFlipper-cli
                      chymaera (plain text like it; serve and watch use the device named
                      with --port/--socket, if any: see argus-cli chymaera)
+  recovery ...       the DFU bootloader: info, and (with --yes) exit, boot, firmware, radio,
+                     fus, option-bytes; needs --dfu-socket PATH (see argus-cli recovery)
   version | help
 
   These change the device and do nothing without --yes (exit 2, nothing opened):
@@ -78,6 +82,7 @@ struct Usage(String);
 struct Cmd {
     target: Option<Target>,
     datastore: Option<PathBuf>,
+    dfu_socket: Option<PathBuf>,
     timeout: Duration,
     frames: usize,
     yes: bool,
@@ -89,6 +94,7 @@ fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
     let mut cmd = Cmd {
         target: None,
         datastore: None,
+        dfu_socket: None,
         timeout: Duration::from_millis(5000),
         frames: 1,
         yes: false,
@@ -107,6 +113,7 @@ fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
                 cmd.target = Some(if a == "--port" { Target::Port(p) } else { Target::Socket(p) });
             }
             "--datastore" => cmd.datastore = Some(PathBuf::from(value("--datastore")?)),
+            "--dfu-socket" => cmd.dfu_socket = Some(PathBuf::from(value("--dfu-socket")?)),
             "--yes" => cmd.yes = true,
             "--recursive" => cmd.recursive = true,
             "--frames" => {
@@ -408,6 +415,9 @@ fn main() -> ExitCode {
     let words: Vec<&str> = cmd.words.iter().map(String::as_str).collect();
     if words.first() == Some(&"chymaera") {
         return chymaera::run(&cmd);
+    }
+    if words.first() == Some(&"recovery") {
+        return recovery::run(&cmd);
     }
     match words.as_slice() {
         ["help"] | [] => {

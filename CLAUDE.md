@@ -152,6 +152,12 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — `argus-cli recovery` (DFU bootloader commands, behind `--yes`, fake only)
+- `argus-cli --dfu-socket PATH recovery info | exit | boot normal|dfu | firmware F.dfu | radio F.bin | fus ... |
+  option-bytes F`; everything but `info` needs `--yes`, files are checked before anything is opened. The only transport
+  is `--dfu-socket` (`flipper_dfu::line`); argus-cli has no USB recovery path. The fake bootloader moved to
+  `flipper_fake::dfu`. Not run against a real device.
+
 ### 2026-11-12 — Rust port phase 6: the STM32WB55 layer and the recovery flows (both apps fixed)
 - `flipper_dfu::wb55` (option bytes, FUS state and commands, device information table, OTP) and `flipper_dfu::recovery`
   (`recovery.cpp`'s steps), compared with the C++ `STM32WB55` built into the oracle: Flipper's `ob.data` and 2000

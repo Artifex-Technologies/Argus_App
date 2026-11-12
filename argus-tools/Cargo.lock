@@ -67,6 +67,7 @@ version = "0.1.0"
 dependencies = [
  "argus-api",
  "argus-capture",
+ "flipper-dfu",
  "flipper-fake",
  "flipper-rpc",
  "serde_json",
@@ -373,6 +374,7 @@ dependencies = [
 name = "flipper-dfu"
 version = "0.1.0"
 dependencies = [
+ "flipper-fake",
  "md-5",
  "nusb",
  "proptest",
@@ -383,6 +385,7 @@ name = "flipper-fake"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "flipper-dfu",
  "flipper-rpc",
  "md-5",
  "nix",

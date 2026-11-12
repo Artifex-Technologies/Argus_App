@@ -1,4 +1,5 @@
-//! A fake STM32WB55 ROM bootloader (DfuSe over DFU 1.1), for tests only: interface 0 with three
+//! A fake STM32WB55 ROM bootloader (DfuSe over DFU 1.1), for tests only (moved here from flipper-dfu's
+//! tests so `argus-cli`'s tests can serve it too): interface 0 with three
 //! alternate settings (flash, option bytes, OTP), each described by its interface string, a 1 MiB
 //! flash that must be erased (0xFF) before it is written, and the DFU state machine as the device
 //! runs it. Every request is recorded in `log`, in a form both the Rust code and the C++ app (over
@@ -418,4 +419,62 @@ impl Transport for FakeDfu {
     fn sleep_ms(&mut self, ms: u32) {
         self.log.push(format!("SLEEP {ms}"));
     }
+}
+
+/// Answers one request line of the line protocol (the C++ oracle's and [`flipper_dfu::line`]'s):
+/// `ALT n`, `OUT req value hex`, `IN req value len`, `DESC`, `STRING alt` get an answer line;
+/// `SLEEP ms` is recorded and gets none. None also for a line that is not a request.
+pub fn answer(f: &mut FakeDfu, line: &str) -> Option<String> {
+    let parts: Vec<&str> = line.split(' ').collect();
+    let num = |s: &str| s.parse::<u64>().ok();
+    match parts[..] {
+        ["SLEEP", ms] => {
+            f.log.push(format!("SLEEP {ms}"));
+            None
+        }
+        ["ALT", alt] => Some(if f.set_alt(num(alt)? as u8).is_ok() { "OK".into() } else { "ERR".into() }),
+        ["OUT", req, value, data] => Some(match f.control_out(num(req)? as u8, num(value)? as u16, &unhex(data)?) {
+            Ok(n) => format!("OK {n}"),
+            Err(_) => "ERR".into(),
+        }),
+        ["IN", req, value, len] => Some(match f.control_in(num(req)? as u8, num(value)? as u16, num(len)? as u16) {
+            Ok(d) => format!("DATA {}", hex(&d)),
+            Err(_) => "ERR".into(),
+        }),
+        ["DESC"] => Some(match f.functional_descriptor() {
+            Ok(d) => format!("DATA {}", hex(&d)),
+            Err(_) => "ERR".into(),
+        }),
+        ["STRING", alt] => Some(match f.interface_string(num(alt)? as u8) {
+            Ok(d) => format!("DATA {}", hex(&d)),
+            Err(_) => "ERR".into(),
+        }),
+        _ => None,
+    }
+}
+
+/// Hex as the line protocol writes it (`-` for nothing).
+pub fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s == "-" {
+        return Some(Vec::new());
+    }
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len() / 2).map(|i| u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()).collect()
+}
+
+/// Serves one client of the line protocol on `stream` until it closes; returns the fake.
+pub fn serve(mut f: FakeDfu, stream: std::os::unix::net::UnixStream) -> FakeDfu {
+    use std::io::{BufRead, BufReader, Write};
+    let Ok(mut out) = stream.try_clone() else { return f };
+    for line in BufReader::new(stream).lines() {
+        let Ok(line) = line else { break };
+        if let Some(a) = answer(&mut f, &line) {
+            if writeln!(out, "{a}").is_err() {
+                break;
+            }
+        }
+    }
+    f
 }

@@ -14,5 +14,7 @@ usb = ["dep:nusb"]
 nusb = { version = "0.2.9", optional = true }
 
 [dev-dependencies]
+# the fake bootloader the tests drive (it depends on this crate; a dev-dependency only)
+flipper-fake = { path = "../flipper-fake" }
 md-5 = "0.10"
 proptest = "1"

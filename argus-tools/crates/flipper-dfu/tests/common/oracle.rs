@@ -7,9 +7,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use flipper_dfu::device::Transport;
-
-use super::fake::{hex, FakeDfu, Faults};
+use super::fake::{self, FakeDfu, Faults};
 
 /// The most requests one C++ run may send before it is taken as looping for ever.
 pub const MAX_REQUESTS: usize = 400_000;
@@ -21,10 +19,7 @@ pub struct Outcome {
 }
 
 pub fn unhex(s: &str) -> Vec<u8> {
-    if s == "-" {
-        return Vec::new();
-    }
-    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
+    fake::unhex(s).expect("hex from the oracle")
 }
 
 /// Runs the oracle with `args` (`device OP ...`), its USB requests served by a fresh fake. Err: it
@@ -60,36 +55,17 @@ pub fn run_cpp(oracle: &Path, args: &[String], faults: &Faults) -> Result<Outcom
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        let parts: Vec<&str> = line.split(' ').collect();
-        let answer = match parts[..] {
-            ["SLEEP", ms] => {
-                // what the device asked for, as the C++ app would wait it (an unsigned long)
-                f.log.push(format!("SLEEP {ms}"));
-                None
-            }
-            ["ALT", alt] => Some(if f.set_alt(alt.parse().unwrap()).is_ok() { "OK".to_string() } else { "ERR".into() }),
-            ["OUT", req, value, data] => Some(match f.control_out(req.parse().unwrap(), value.parse().unwrap(), &unhex(data)) {
-                Ok(n) => format!("OK {n}"),
-                Err(_) => "ERR".into(),
-            }),
-            ["IN", req, value, len] => Some(match f.control_in(req.parse().unwrap(), value.parse().unwrap(), len.parse().unwrap()) {
-                Ok(d) => format!("DATA {}", hex(&d)),
-                Err(_) => "ERR".into(),
-            }),
-            ["DESC"] => Some(format!("DATA {}", hex(&f.functional_descriptor().unwrap()))),
-            ["STRING", alt] => Some(match f.interface_string(alt.parse().unwrap()) {
-                Ok(d) => format!("DATA {}", hex(&d)),
-                Err(_) => "ERR".into(),
-            }),
-            ["RESULT", ok, data] => {
-                result = Ok((ok == "ok", unhex(data)));
-                break;
-            }
-            _ => {
-                result = Err(format!("unexpected line {line:?}"));
-                break;
-            }
-        };
+        if let Some(rest) = line.strip_prefix("RESULT ") {
+            let (ok, data) = rest.split_once(' ').unwrap_or((rest, "-"));
+            result = Ok((ok == "ok", unhex(data)));
+            break;
+        }
+        // a SLEEP line is what the device asked for, as the C++ app would wait it (an unsigned long)
+        let answer = fake::answer(&mut f, &line);
+        if answer.is_none() && !line.starts_with("SLEEP ") {
+            result = Err(format!("unexpected line {line:?}"));
+            break;
+        }
         if let Some(a) = answer {
             if writeln!(stdin, "{a}").is_err() {
                 break;

@@ -84,7 +84,9 @@ Protocol and device logic first, with the CLI as the proof surface; the UI last.
    the C++ parsers themselves, then ST's DfuSe protocol (`flipper_dfu::device`), checked request for request against
    the C++ `DfuseDevice` on one fake bootloader; both fixed. nusb is a thin adapter behind the `usb` feature that no
    test uses. Then the STM32WB55 layer (`flipper_dfu::wb55`: option bytes, FUS, device information table, OTP) and
-   `recovery.cpp`'s flows (`flipper_dfu::recovery`), compared with the C++ `STM32WB55` on the same fake; both fixed.*
+   `recovery.cpp`'s flows (`flipper_dfu::recovery`), compared with the C++ `STM32WB55` on the same fake; both fixed.
+   `argus-cli recovery ...` (behind `--yes`) reaches a bootloader only through `--dfu-socket`, tested against the
+   fake; it has no USB transport.*
 7. **Update registry and region provisioning** (HTTPS with rustls, SHA-256 checked before anything is used).
 8. **The UI** in egui/eframe, window by window. When it covers what the QML does, the C++ goes (no dead code left).
 
@@ -311,6 +313,14 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   nusb transport: it opens only a device it is handed and only ST's DFU bootloader (0483:DF11), claims interface 0,
   and does not retry transfers (a retried download could erase or write twice). No test enables it; CI lints it.
   Nothing calls it yet: a CLI command for recovery comes with option bytes and FUS, behind `--yes`.
+- `argus-cli recovery` (2026-11-12): `info` (option bytes, FUS state, versions; reads only), and with `--yes`
+  `exit`, `boot normal|dfu`, `firmware FILE.dfu`, `radio FILE.bin`, `fus start|delete|upgrade|start-stack`,
+  `option-bytes FILE`. Files are read and checked before anything is opened; without `--yes` it stops there (exit 2).
+  The only transport is `--dfu-socket PATH`: `flipper_dfu::line`, one request per line over a Unix socket (the line
+  protocol the C++ oracle speaks). The fake bootloader moved to `flipper-fake` (`flipper_fake::dfu`, with `serve`),
+  so `tests/recovery.rs` (5 tests) runs the binary against it: nothing changes without `--yes`, bad files never reach
+  the device, `info` writes nothing, every command's effect on the fake, device errors exit 1. A USB transport for
+  the CLI (the `usb` feature's `flipper_dfu::usb`) is deliberately not wired in.
 - The STM32WB55 and recovery (2026-11-12): `flipper_dfu::wb55` (option bytes as their raw 128 bytes, changed field by
   field with complements; RDP never written; Flipper's `ob.data` format with its access column; FUS state; version
   table; OTP) and `flipper_dfu::recovery` (exit, boot mode, wireless status, start FUS, FUS delete/upgrade/start,
@@ -519,9 +529,11 @@ failed, and does not read `devinfo` or start the screen.
    Before either is used on my Flipper: run `argus-cli update` and `erase` against it once with me watching.
 3. Phase 6 (DFU and recovery): the DfuSe parser, the memory layout and the DfuSe protocol are done and match the C++
    ones (`crates/flipper-dfu`; the nusb transport behind the `usb` feature, unused by tests and by any command).
-   The STM32WB55 layer and `recovery.cpp`'s flows are done too (`flipper_dfu::wb55`, `flipper_dfu::recovery`). Next:
-   an `argus-cli recovery ...` command behind `--yes`, tested only against the fake (a DFU transport over a socket to
-   a fake served by a test binary); the nusb transport stays unused by tests. No flashing in tests, and none on my
-   device until I say so.
+   The STM32WB55 layer, `recovery.cpp`'s flows and `argus-cli recovery` (behind `--yes`, `--dfu-socket` only) are done
+   too. Left for phase 6: the C++ app's multi-step operations around recovery (`backend/flipperzero/recovery/*`
+   operations, the full repair and the legacy update in `toplevel/`, which wait for the device to re-enumerate) as one
+   `argus-cli recovery repair`, and wiring `flipper_dfu::usb` into argus-cli. That last step opens a real USB device:
+   only when I say so, with me watching, and never from a test. No flashing in tests, and none on my device until I
+   say so.
 4. For the UI phase: the screen stream is there (`flipper_rpc::screen`); buttons (`GuiSendInputRequest`) and the
    virtual display come with it.

@@ -19,6 +19,7 @@ use flipper_rpc::proto::pb::{CommandStatus, Empty, Main};
 use flipper_rpc::proto::{pb_gui, pb_property, pb_storage, pb_system};
 
 pub mod archives;
+pub mod dfu;
 pub mod storage;
 
 /// Received bytes kept for the transcript.
