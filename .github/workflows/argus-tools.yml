@@ -30,7 +30,8 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # the desktop app (argus-app) builds eframe and wgpu
+    timeout-minutes: 45
     container: archlinux:latest
     steps:
       - name: Tools

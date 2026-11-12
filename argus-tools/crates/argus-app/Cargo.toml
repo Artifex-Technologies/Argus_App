@@ -1,0 +1,23 @@
+[package]
+name = "argus-app"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "The Argus desktop app in Rust (egui/eframe), the port of the Qt app's application/ folder: device, screen, files, backup and restore, updates, captures and the Sarina API, recovery"
+publish = false
+
+[[bin]]
+name = "argus-app"
+path = "src/main.rs"
+
+[dependencies]
+# the toolkit and version family of Yggdrasil's own apps
+eframe = "0.36.2"
+flipper-rpc = { path = "../flipper-rpc" }
+flipper-updates = { path = "../flipper-updates" }
+argus-api = { path = "../argus-api" }
+argus-capture = { path = "../argus-capture" }
+png = "0.18"
+
+[dev-dependencies]
+flipper-fake = { path = "../flipper-fake" }

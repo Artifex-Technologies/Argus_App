@@ -217,6 +217,21 @@ impl Bridge {
         &self.log
     }
 
+    /// `ChymaeraEventLog::clear` (the console's Clear): the ring only; the datastore keeps its events.
+    pub fn clear_log(&mut self) {
+        self.log.clear();
+    }
+
+    /// The running session's id and name, if one runs.
+    pub fn session(&self) -> Option<(i64, &str)> {
+        self.session.as_ref().map(|(id, name)| (*id, name.as_str()))
+    }
+
+    /// The newest `limit` capture rows (`capture.list`), none when the datastore is unavailable.
+    pub fn capture_rows(&self, limit: i64) -> Vec<CaptureRow> {
+        self.store.as_ref().and_then(|s| s.capture_rows(limit).ok()).unwrap_or_default()
+    }
+
     /// `ChymaeraEventLog::append`: the datastore first, then the ring.
     pub fn append(&mut self, severity: Severity, source: Source, message: &str, detail: &str) {
         self.append_q(severity, source, qs(message), qs(detail));

@@ -151,6 +151,9 @@ pub fn announce(bridge: &mut Bridge, port: u16, token_file: Option<&Path>) {
     bridge.append(Severity::Notice, Source::Sarina, &format!("Control API listening on 127.0.0.1:{port}"), &detail);
 }
 
+/// Runs a closure on the bridge (directly, or under the shared bridge's lock).
+type WithBridge<'a> = &'a mut dyn FnMut(&mut dyn FnMut(&mut Bridge));
+
 struct Client {
     stream: TcpStream,
     conn: Conn,
@@ -206,61 +209,76 @@ impl Server {
     pub fn run(&self, bridge: &mut Bridge, stop: &AtomicBool) {
         let mut clients: Vec<Client> = Vec::new();
         while !stop.load(Ordering::Relaxed) {
-            bridge.poll_device();
-            let mut fds = vec![libc::pollfd { fd: self.listener.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-            for c in &clients {
-                let mut events = libc::POLLIN;
-                if !c.out.is_empty() {
-                    events |= libc::POLLOUT;
-                }
-                fds.push(libc::pollfd { fd: c.stream.as_raw_fd(), events, revents: 0 });
+            self.step(&mut clients, &mut |f| f(bridge));
+        }
+    }
+
+    /// [`Server::run`] for a bridge the app shares with its own console: the bridge is locked only
+    /// while requests are answered, never while the server waits for clients.
+    pub fn run_shared(&self, bridge: &std::sync::Mutex<Bridge>, stop: &AtomicBool) {
+        let mut clients: Vec<Client> = Vec::new();
+        while !stop.load(Ordering::Relaxed) {
+            self.step(&mut clients, &mut |f| f(&mut bridge.lock().unwrap_or_else(|e| e.into_inner())));
+        }
+    }
+
+    /// One round: waits up to 200 ms for clients, then answers what came, with the bridge.
+    fn step(&self, clients: &mut Vec<Client>, with_bridge: WithBridge) {
+        with_bridge(&mut |b| b.poll_device());
+        let mut fds = vec![libc::pollfd { fd: self.listener.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        for c in clients.iter() {
+            let mut events = libc::POLLIN;
+            if !c.out.is_empty() {
+                events |= libc::POLLOUT;
             }
-            // SAFETY: fds is a valid array of pollfd for the duration of the call.
-            let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 200) };
-            if n <= 0 {
-                continue;
-            }
-            let mut drop_ids = Vec::new();
-            for (i, c) in clients.iter_mut().enumerate() {
-                let rev = fds[i + 1].revents;
-                if rev & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
-                    let mut buf = [0u8; 65536];
-                    match c.stream.read(&mut buf) {
-                        Ok(0) => drop_ids.push(i),
-                        Ok(k) => {
-                            let out = c.conn.feed(bridge, self.token.as_bytes(), &buf[..k]);
-                            c.out.extend_from_slice(&out);
-                        }
-                        Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {}
-                        Err(_) => drop_ids.push(i),
+            fds.push(libc::pollfd { fd: c.stream.as_raw_fd(), events, revents: 0 });
+        }
+        // SAFETY: fds is a valid array of pollfd for the duration of the call.
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 200) };
+        if n <= 0 {
+            return;
+        }
+        let mut drop_ids = Vec::new();
+        for (i, c) in clients.iter_mut().enumerate() {
+            let rev = fds[i + 1].revents;
+            if rev & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                let mut buf = [0u8; 65536];
+                match c.stream.read(&mut buf) {
+                    Ok(0) => drop_ids.push(i),
+                    Ok(k) => {
+                        let mut out = Vec::new();
+                        with_bridge(&mut |b| out = c.conn.feed(b, self.token.as_bytes(), &buf[..k]));
+                        c.out.extend_from_slice(&out);
                     }
-                }
-                if !c.out.is_empty() {
-                    match c.stream.write(&c.out) {
-                        Ok(k) => {
-                            c.out.drain(..k);
-                        }
-                        Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {}
-                        Err(_) => drop_ids.push(i),
-                    }
-                }
-                if c.out.len() > MAX_PENDING_OUT || (c.conn.closing && c.out.is_empty()) {
-                    drop_ids.push(i);
+                    Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {}
+                    Err(_) => drop_ids.push(i),
                 }
             }
-            drop_ids.sort_unstable();
-            drop_ids.dedup();
-            for i in drop_ids.into_iter().rev() {
-                clients.remove(i);
-            }
-            if fds[0].revents & libc::POLLIN != 0 {
-                while let Ok((stream, peer)) = self.listener.accept() {
-                    // Defence in depth: the socket is bound to loopback anyway.
-                    if !peer.ip().is_loopback() || clients.len() >= MAX_CLIENTS || stream.set_nonblocking(true).is_err() {
-                        continue;
+            if !c.out.is_empty() {
+                match c.stream.write(&c.out) {
+                    Ok(k) => {
+                        c.out.drain(..k);
                     }
-                    clients.push(Client { stream, conn: Conn::default(), out: Vec::new() });
+                    Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {}
+                    Err(_) => drop_ids.push(i),
                 }
+            }
+            if c.out.len() > MAX_PENDING_OUT || (c.conn.closing && c.out.is_empty()) {
+                drop_ids.push(i);
+            }
+        }
+        drop_ids.sort_unstable();
+        drop_ids.dedup();
+        for i in drop_ids.into_iter().rev() {
+            clients.remove(i);
+        }
+        if fds[0].revents & libc::POLLIN != 0 {
+            while let Ok((stream, peer)) = self.listener.accept() {
+                // Defence in depth: the socket is bound to loopback anyway.
+                if !peer.ip().is_loopback() || clients.len() >= MAX_CLIENTS || stream.set_nonblocking(true).is_err() {
+                    continue;
+                }
+                clients.push(Client { stream, conn: Conn::default(), out: Vec::new() });
             }
         }
     }

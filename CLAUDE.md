@@ -152,6 +152,17 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — Rust port, UI phase started: `argus-app` (egui/eframe), a second binary next to the Qt app
+- New `argus-tools/crates/argus-app`: qFlipper's layout and animations drawn in Yggdrasil's style (its palette, light or
+  dark and the accent from `~/.config/yggdrasil/appearance.conf`, egui's fonts; no Flipper artwork). So far: device
+  discovery by reading sysfs only, connection, device information, the live screen with the keypad, the file manager
+  with a confirmation dialog for every change. Tested headless against the fake (accessibility-tree clicks, software
+  pixel snapshots, a test per confirmation). Never run on a desktop or against a real Flipper yet. The Qt app stays.
+- `flipper_rpc`: the screen stream stays open between requests (`screen_start/next_screen_frame/screen_stop`) and input
+  events (`gui_input`), byte-identical to the C++ encoder's. `argus_api::server::Server::run_shared` serves the API
+  with a bridge the app shares; `Bridge::session/capture_rows/clear_log` for the console. Nothing in the API changed.
+- **@Sarina:** nothing changes for you.
+
 ### 2026-11-12 — Region data: the legacy update keeps the fresh one; `argus-cli update` provisions the region
 - **Changed in both (C++ and Rust):** the legacy update restored `/int` after writing fresh region data, so an older
   `/int/.region_data` in the backup replaced it. Now `/int` is restored first and the fresh region data written last.

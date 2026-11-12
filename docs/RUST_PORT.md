@@ -26,7 +26,7 @@ Line counts are `.cpp`/`.h`/`.c`/`.qml` lines (2026-11-12), without the submodul
 | `backend/argus/` (ours) | 1 837 | Bridge to argus-tools over QProcess, device storage for snapshots and installs | Reads/writes files | Disappears: argus-tools becomes a library call |
 | `argus-tools/` (ours, Rust already) | 3 862 + 1 260 tests | App extractor, compatibility, check-up, Limbo rebuilds, snapshots, capture library | No (works on listings and files) | It is the Rust side; the port's crates live in its workspace |
 | `cli/` | 1 363 | `qFlipper-cli` (upstream: default update, `backup`, `restore`, `erase`, `firmware`, `core2radio`, `core2fus`, `wipe` unimplemented) and ours (`chymaera selftest/serve/parse/import/watch/pull/pull-all/argus/argus-test`) | Yes | `argus-cli`. Started: `info`, `ls`. |
-| `application/` | 7 360 QML + 854 C++ + 1 579 QtSingleApplication | The GUI: main window, update/repair screens, file manager, screen streaming canvas, our console and Argus tools window | Through the backend | **egui/eframe**, the toolkit Yggdrasil's apps use (eframe 0.36.2 there). Last. |
+| `application/` | 7 360 QML + 854 C++ + 1 579 QtSingleApplication | The GUI: main window, update/repair screens, file manager, screen streaming canvas, our console and Argus tools window | Through the backend | **egui/eframe**, the toolkit Yggdrasil's apps use (eframe 0.36.2 there). Started: `crates/argus-app` (section 6). |
 | `driver-tool/` | 385 + libwdi | Windows USB driver installer | No | Windows only; not ported until there is a Windows build of the Rust app |
 
 What talks to the device, by channel:
@@ -48,8 +48,9 @@ What talks to the device, by channel:
 | nanopb (`3rdparty/nanopb`) | zlib | Not used by the Rust code. The tests build the C++ app's nanopb code to check the Rust encoding against it |
 | QtSingleApplication (`application/qtsingleapplication`) | BSD (Digia) | Not ported; a lock file or socket in Rust replaces it |
 | libwdi (`driver-tool/libwdi`) | LGPL-3.0 (`COPYING-LGPL`) | Windows only, not ported |
-| Fonts in `application/assets/fonts` (Born2bSporty, HaxrCorp 4089, ProggySquare, Share Tech, Share Tech Mono) | Check each when the UI is ported | Decided at the UI phase |
-| Rust crates added now | prost, prost-build (Apache-2.0); serialport (MPL-2.0); proptest (MIT/Apache-2.0); serde_json (MIT/Apache-2.0); rusqlite (MIT); libc (MIT/Apache-2.0); md-5 for tests (MIT/Apache-2.0); ureq (MIT/Apache-2.0), rustls and rustls-native-certs (Apache-2.0/ISC/MIT), ring (Apache-2.0 and ISC) for HTTPS | All compatible with GPL-3.0 |
+| Fonts in `application/assets/fonts` (Born2bSporty, HaxrCorp 4089, ProggySquare, Share Tech, Share Tech Mono) | Check each when the UI is ported | Not used: the Rust app uses egui's built-in fonts, as Yggdrasil's own apps do |
+| qFlipper's artwork (`application/assets/gfx`: the device picture, dolphin art, logo) | Flipper's trademarks and art | Not used: the Rust app draws the device and its icons as plain shapes |
+| Rust crates added now | prost, prost-build (Apache-2.0); serialport (MPL-2.0); proptest (MIT/Apache-2.0); serde_json (MIT/Apache-2.0); rusqlite (MIT); libc (MIT/Apache-2.0); md-5 for tests (MIT/Apache-2.0); ureq (MIT/Apache-2.0), rustls and rustls-native-certs (Apache-2.0/ISC/MIT), ring (Apache-2.0 and ISC) for HTTPS; eframe/egui (MIT/Apache-2.0) and png (MIT/Apache-2.0) for the app | All compatible with GPL-3.0 |
 | Qt's JSON rules (`qjsonparser.cpp`, `qjsonwriter.cpp`, `qlocale_tools.cpp`, Qt 6.12) | LGPL-3.0/GPL | Not copied: `argus-api::qjson` is written from scratch to behave the same, and checked against Qt itself |
 
 ## 3. The order
@@ -93,6 +94,8 @@ Protocol and device logic first, with the CLI as the proof surface; the UI last.
    *Done 2026-11-12 (`crates/flipper-updates`, `argus-cli updates|region`, the region step of `recovery repair|
    legacy-update|finish`), proven against a local HTTPS stand-in only; compared with the C++ code; both fixed.*
 8. **The UI** in egui/eframe, window by window. When it covers what the QML does, the C++ goes (no dead code left).
+   *Started 2026-11-12 (section 6): the shell, device information, the live screen with the keypad and the file manager
+   in `crates/argus-app`, tested headless against the fake. The Qt app stays until I switch; `argus-app` ships next to it.*
 
 ## 4. How the port is proven without a device
 
@@ -712,6 +715,66 @@ outside the capture folders before it opens the port (the C++ CLI refuses once t
 staging folder in UTC (the C++ app in local time), creates it 0700 and its files 0600, removes a file whose read
 failed, and does not read `devinfo` or start the screen.
 
+## 6. The UI (phase 8)
+
+`argus-tools/crates/argus-app` is the desktop app in Rust: a library (`ArgusApp::ui` draws one frame into any
+`egui::Ui`) and the `argus-app` binary (eframe 0.36.2, wgpu, as Yggdrasil's apps). It ships as a second program next
+to the Qt app until I switch; nothing of `application/` is removed yet.
+
+**How it looks and moves (decided 2026-11-12).** I like qFlipper's look and motion, so the app follows qFlipper's layout
+and animations (application/ is a fork of it, GPL-3.0, so both may be carried over) but is drawn in Yggdrasil's style:
+
+- Layout as `MainWindow.qml`: a title strip, one content card (830 x 390), a footer with LOGS, CONSOLE (qFlipper's ARGUS
+  button and the Chymaera console in one), SETTINGS and the status bar, and a log drawer below. In the card, one
+  overlay per stage of `ApplicationBackend`: no device, home (tabs Info, Actions, Files on the left, the device on the
+  right with its name, state, the main button, the channel link and "Install from file"), an operation, its end (with
+  the partial-success warning), the full-size screen with the keypad.
+- Motion as the QML's Behaviors, same durations and curves: overlays and dialogs fade in 150 ms (InOutQuad), the device
+  slides between its home and its operation position in 350 ms (InOutQuad), the log drawer opens in 500 ms (InOutQuad),
+  the status bar turns red in 150 ms (OutQuad), the connection spinner turns once in 1.5 s, the keypad's long press
+  comes after 350 ms and repeats every 150 ms (`KeypadButton.qml`).
+- Light: egui asks for frames only while something moves, the screen stream only repaints on a new frame, and an idle
+  window does no work. qFlipper's grid background sweeps a scanline for ever; here the grid is still.
+- Yggdrasil's style: its palette (mirrored from `yggdrasil-ui` in `theme.rs`, since Argus's CI has no Yggdrasil
+  checkout), light or dark from Settings > Appearance (`~/.config/yggdrasil/appearance.conf`, re-read once a second),
+  the user's accent colour (Yggdrasil's purple 124,84,214 by default) wherever qFlipper has orange, the screen's LCD
+  in light and dark tints of the accent, rounded shapes, egui's fonts, Yggdrasil's title strip with traffic lights.
+- No Flipper artwork or branding: the device is drawn as plain shapes (a rounded body, the screen, a round keypad), the
+  app is "Argus" in its chrome; "Flipper Zero" appears only where text names the device.
+
+**What it does so far.** Devices are found by reading sysfs only (`/sys/class/tty/ttyACM*` and
+`/sys/bus/usb/devices/*`, Flipper's IDs; no device node is opened until the app connects); with exactly one found and
+auto-connect on, it connects, as qFlipper does. `--port`/`--socket` name the only device, `--no-discovery` finds none.
+A worker thread owns the RPC session (`device.rs`): device information as the C++ helper reads it (without setting
+the clock), the screen stream kept open between requests while the home screen or the full-size screen shows (stopped
+for the file manager, as qFlipper's), the keypad's inputs, and once a second while idle a protobuf version request to
+notice an unplugged device. The file manager browses with back and forward, names the storages "SD Card" and "Internal
+Flash", hides dot files unless asked, and downloads into new local files only. Upload, new folder, rename and delete
+each go through a confirmation dialog (qFlipper confirms only delete); a screenshot is saved as a PNG four times the
+screen's size, or copied. The Actions tab, the main button, the console and settings are drawn and wired; backup,
+restore, erase and updates are tested in the next step (Resume here).
+
+**How it is tested** (`crates/argus-app/tests`, never a real device, never a window on my desktop):
+
+- `tests/common` runs the app headless: it makes up input (pointer moves and clicks, keys, text) on a clock of its own,
+  and finds widgets the way assistive technology does, through the accessibility tree egui builds each frame (role,
+  label, bounds, disabled), so a test clicks "Delete…" as a person would, never by calling the app's methods.
+- Pixel snapshots: egui's own output (the tessellated meshes and textures a GPU would get) is rasterised in software
+  and compared with the pictures in `tests/snapshots/` (no GPU, no window, no compositor). A missing snapshot fails;
+  `ARGUS_UPDATE_SNAPSHOTS=1` writes them. Snapshots so far: no device (dark and light), home with the device
+  information and the live screen, the full-size screen with the keypad, the file manager on the SD card.
+- The fake on a Unix socket, session after session, recording every request as it arrives: the app's reads are the
+  C++ helper's (protobuf version, devinfo, `/ext` space, `/ext/Manifest`) and then the stream; the keypad sends
+  qFlipper's sequences (press-short-release for a click, press-long-repeat-release for a hold, the keyboard's keys).
+- Every confirmation: cancelled once, nothing that changes the device (write, mkdir, delete, rename, reboot, reset,
+  update) reaches the fake; confirmed, exactly that request and the change on the fake. Bad names are refused in the
+  dialog, an existing local file is never overwritten.
+- The live screen's protocol (`flipper-fake/tests/stream.rs`): stream start, input events and stop are the C++ app's
+  bytes (the nanopb fixture), a quiet device leaves the session usable, frames of the wrong length are skipped.
+
+I chose this over Yggdrasil's headless compositor for now: it needs no compositor build and runs in Argus's own CI. A
+smoke test of the real binary inside that compositor (`tests/apps.rs` there shows how) can come once the app is whole.
+
 ## Resume here
 
 1. Phase 4 continues: app installs (the argus-tools installer's writes through `flipper_rpc::write`, with the C++
@@ -729,5 +792,10 @@ failed, and does not read `devinfo` or start the screen.
    The legacy update keeps the fresh region data over the backup's (both apps). The firmware's NULL `country_code`
    read is noted for Argus_Firmware (its local PROGRESS.md). Left: look at the GUI's partial-success warning once on a
    screen.
-5. For the UI phase: the screen stream is there (`flipper_rpc::screen`); buttons (`GuiSendInputRequest`) and the
-   virtual display come with it.
+5. The UI phase (section 6) has started: shell, device information, live screen and keypad, file manager, tested
+   headless with snapshots and a test per confirmation. Next, in this order: backup, restore, erase and the update
+   (from the server and from a file) through their dialogs against the fake and `flipper_fake::update_server`; then
+   the console (capture pulls, the capture list, the Sarina API toggle on a test port); then recovery (repair through
+   `flipper_dfu::recovery` behind an interface, only `--dfu-socket`, no USB). Not started: the developer tab, the
+   Argus tools window (apps, check-up, rebuild, snapshots, capture library search), app installs. The app has never
+   run on my desktop or against my Flipper: the first run is with me watching.
