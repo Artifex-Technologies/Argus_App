@@ -10,8 +10,9 @@
 //   - treats that port as the one connected Flipper,
 //   - does not raise DTR on it (a pseudo-terminal has no modem lines),
 //   - does not fetch the firmware update directory (no network),
-//   - takes a restart or factory reset as done once its request is sent (a pseudo-terminal
-//     has no USB to come back on; the fake ends the session as the device would).
+//   - takes a restart, factory reset or the start of the updater as done once its request is
+//     sent (a pseudo-terminal has no USB to come back on; the fake ends the session as the
+//     device would), and never fetches region data for a firmware update.
 // Unset (always, outside tests), nothing changes.
 namespace Argus {
 inline QString testSerialPort()

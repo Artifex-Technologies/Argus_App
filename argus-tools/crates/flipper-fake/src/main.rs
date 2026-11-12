@@ -25,7 +25,8 @@
 //!
 //! `flipper-fake --write-archives DIR` writes the restore test archives (`good-*.tgz` that
 //! must restore, `hostile-*.tgz` that must be refused, `bomb.tgz`) and `hostile.txt` (name and
-//! reason) into DIR, which must not exist, and exits. `--print-dump` prints the dump of the
+//! reason), `update.tgz` and `update-bad-manifest.tgz` (update packages) into DIR, which must not
+//! exist, and exits. `--print-dump` prints the dump of the
 //! starting storage (after the other options) and exits.
 
 use std::io::{self, Write};
@@ -192,6 +193,8 @@ fn write_archives(dir: &std::path::Path) -> ExitCode {
             list.push_str(&format!("{name}\t{why}\n"));
         }
         std::fs::write(dir.join("hostile.txt"), list)?;
+        std::fs::write(dir.join("update.tgz"), archives::update_package(true))?;
+        std::fs::write(dir.join("update-bad-manifest.tgz"), archives::update_package(false))?;
         std::fs::write(dir.join("bomb.tgz"), archives::bomb())
     })();
     match r {

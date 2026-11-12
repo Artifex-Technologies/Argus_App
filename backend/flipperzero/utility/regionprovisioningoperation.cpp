@@ -16,6 +16,8 @@
 
 Q_DECLARE_LOGGING_CATEGORY(CATEGORY_DEBUG)
 
+#include "testhooks.h"
+
 using namespace Flipper;
 using namespace Zero;
 
@@ -67,7 +69,8 @@ void RegionProvisioningOperation::checkHardwareRegion()
 {
     const auto &hardwareInfo = deviceState()->deviceInfo().hardware;
 
-    if(hardwareInfo.region == Region::Dev) {
+    // Test hook (testhooks.h): never fetch the region bundle from the network.
+    if(hardwareInfo.region == Region::Dev || Argus::isTestSerialPort()) {
         qCDebug(CATEGORY_DEBUG) << "Development hardware region detected, skipping region provisioning...";
         setOperationState(UploadingRegionData);
     }

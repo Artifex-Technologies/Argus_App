@@ -224,6 +224,26 @@ impl<T: Transport> Session<T> {
         r
     }
 
+    /// Sends one request and returns its single answer whatever its status (a status the
+    /// schema does not know is still an error). For requests whose refusals carry content,
+    /// such as the update request's result code.
+    pub fn request_any_status(&mut self, content: Content) -> Result<Main, RpcError> {
+        let id = self.send(vec![content])?;
+        let mut ignored = 0usize;
+        let r = (|| loop {
+            let resp = self.next_message()?;
+            if resp.command_id == id {
+                CommandStatus::try_from(resp.command_status).map_err(|_| RpcError::UnknownStatus(resp.command_status))?;
+                return Ok(resp);
+            }
+            ignored += 1;
+            if ignored > MAX_IGNORED_FRAMES {
+                return Err(RpcError::Limit(format!("more than {MAX_IGNORED_FRAMES} frames for other requests")));
+            }
+        })();
+        self.check(r)
+    }
+
     fn receive_inner(&mut self, id: u32, on_response: &mut impl FnMut(Main) -> Result<bool, RpcError>) -> Result<(), RpcError> {
         let mut ignored = 0usize;
         let mut answered = 0usize;

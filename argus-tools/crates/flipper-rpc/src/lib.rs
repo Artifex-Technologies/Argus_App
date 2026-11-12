@@ -12,6 +12,8 @@
 //! - [`write`]: operations that change the device (write, mkdir, remove, rename, reboot,
 //!   factory reset); callers ask the user first.
 //! - [`restore`]: reading a backup with every entry checked, and restoring it to `/int`.
+//! - [`update`]: an update package uploaded to `/ext/update` and the device's updater started
+//!   (protocol only; no DFU).
 //! - [`transport`]: serial port or Unix socket. Nothing here searches for or opens a device on
 //!   its own; callers name the port.
 
@@ -22,6 +24,7 @@ pub mod screen;
 pub mod session;
 pub mod transfer;
 pub mod transport;
+pub mod update;
 pub mod write;
 
 pub use session::{RpcError, Session};

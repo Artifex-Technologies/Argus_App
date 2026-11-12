@@ -257,6 +257,22 @@ impl Storage {
         Ok(p)
     }
 
+    /// What the firmware's `update_operation_prepare` would answer for this manifest path: 0
+    /// when it can be armed, 2 (folder not found), 3 (manifest invalid) or 1 (path invalid).
+    pub fn update_check(&self, manifest: &str) -> i32 {
+        let Ok(p) = Self::resolve(manifest) else { return 1 };
+        if !p.starts_with("/ext/") {
+            return 1;
+        }
+        if !self.is_dir(parent(&p)) {
+            return 2;
+        }
+        match self.find(&p) {
+            Some(n) if !n.dir && self.data(&p).starts_with(b"Filetype: Flipper firmware upgrade configuration") => 0,
+            _ => 3,
+        }
+    }
+
     /// A factory reset formats the internal storage on the next boot: `/int` is emptied.
     pub fn factory_reset(&mut self) {
         self.writing = None;

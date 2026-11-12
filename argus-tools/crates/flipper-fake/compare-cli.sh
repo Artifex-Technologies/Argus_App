@@ -214,7 +214,7 @@ run_change() {
 
 changes() { # changes NAME-SIDE: the requests of the work that change the device
     [ -f "$out/$1/requests.txt" ] || return 0
-    storage_requests "$1" | grep 'Storage\(Write\|Mkdir\|Delete\|Rename\)Request\|SystemRebootRequest\|SystemFactoryResetRequest'
+    storage_requests "$1" | grep 'Storage\(Write\|Mkdir\|Delete\|Rename\)Request\|SystemRebootRequest\|SystemFactoryResetRequest\|SystemUpdateRequest'
 }
 
 same_restore() { # same_restore NAME START_DUMP: both exit 0, same storage afterwards, same requests
@@ -285,8 +285,81 @@ run_change erase rs none erase
 same_restore erase
 check "erase: /int is empty afterwards" "$(! grep -q '^[df] /int/' "$out/erase-rs/dump.txt"; echo $?)"
 
+# ---- the update through the device's own updater (phase 5, protocol only: no DFU) ----
+# qFlipper-cli firmware PACKAGE.tgz | argus-cli update PACKAGE.tgz --yes: upload to /ext/update/<folder>,
+# arm the updater (SystemUpdateRequest), reboot into it
+run_update() { # run_update NAME SIDE PACKAGE [fake args...]
+    name=$1 side=$2 pkg=$3; shift 3
+    d="$out/$name-$side"
+    if [ "$side" = cpp ]; then
+        start_fake "$d" 2 --dump "$d/dump.txt" "$@"
+        mkdir -p "$d/tmp"
+        TMPDIR="$d/tmp" ARGUS_TEST_SERIAL_PORT=$port timeout 90 "$cpp" firmware "$pkg" > "$d/stdout.txt" 2> "$d/stderr.txt" < /dev/null
+    else
+        start_fake "$d" 1 --dump "$d/dump.txt" "$@"
+        timeout 90 "$rs" --port "$port" update "$pkg" --yes > "$d/stdout.txt" 2> "$d/stderr.txt" < /dev/null
+    fi
+    echo $? > "$d/exit.txt"
+    wait_fake
+}
+
+echo "== update: a package uploaded and the updater started"
+run_update update cpp "$out/archives/update.tgz"
+run_update update rs "$out/archives/update.tgz"
+same_restore update
+check "update: the package is on the card and the device was rebooted into the updater" \
+    "$(test "$(grep -c '^f /ext/update/f7-update-test/' "$out/update-rs/dump.txt")" -eq 5 && tail -1 "$out/update-rs/requests.txt" | grep -q 'SystemRebootRequest mode 2'; echo $?)"
+
+echo "== update again: the files on the card are checked by MD5 and not sent again"
+for side in cpp rs; do
+    d="$out/update-again-$side"
+    if [ "$side" = cpp ]; then n=4; else n=2; fi
+    start_fake "$d" $n --dump "$d/dump.txt"
+    for i in 1 2; do
+        if [ "$side" = cpp ]; then
+            TMPDIR="$d" ARGUS_TEST_SERIAL_PORT=$port timeout 90 "$cpp" firmware "$out/archives/update.tgz" > "$d/stdout$i.txt" 2> "$d/stderr$i.txt" < /dev/null
+        else
+            timeout 90 "$rs" --port "$port" update "$out/archives/update.tgz" --yes > "$d/stdout$i.txt" 2> "$d/stderr$i.txt" < /dev/null
+        fi
+        echo $? >> "$d/exits.txt"
+    done
+    wait_fake
+done
+check "update again: both runs of both apps exit 0" "$(test "$(cat "$out/update-again-cpp/exits.txt" "$out/update-again-rs/exits.txt" | tr -d '\n')" = 0000; echo $?)"
+# the second run's requests: the C++ app's 4th session, the Rust CLI's 2nd
+grep '^4 ' "$out/update-again-cpp/requests.txt" | cut -d' ' -f3- | grep -v '^Gui\|^PropertyGetRequest' > "$out/update-again-cpp/second.txt"
+grep '^2 ' "$out/update-again-rs/requests.txt" | cut -d' ' -f3- > "$out/update-again-rs/second.txt"
+diff "$out/update-again-cpp/second.txt" "$out/update-again-rs/second.txt" > "$out/update-again-requests.diff"
+check "update again: same requests, MD5s and no writes ($(grep -c Md5 "$out/update-again-rs/second.txt") MD5 requests)" \
+    "$(test -s "$out/update-again-rs/second.txt" && cmp -s "$out/update-again-cpp/second.txt" "$out/update-again-rs/second.txt" && ! grep -q 'Write' "$out/update-again-rs/second.txt"; echo $?)"
+check "update again: the same bytes on the fake" "$(cmp -s "$out/update-again-cpp/dump.txt" "$out/update-again-rs/dump.txt"; echo $?)"
+
+echo "== update with a manifest the updater refuses"
+run_update update-refused cpp "$out/archives/update-bad-manifest.tgz"
+run_update update-refused rs "$out/archives/update-bad-manifest.tgz"
+for side in cpp rs; do
+    check "update-refused: $side fails (exit $(exit_of "update-refused-$side")) and does not reboot into the updater" \
+        "$(test "$(exit_of "update-refused-$side")" != 0 && ! grep -q SystemRebootRequest "$out/update-refused-$side/requests.txt"; echo $?)"
+done
+check "update-refused: the same bytes on the fake" "$(cmp -s "$out/update-refused-cpp/dump.txt" "$out/update-refused-rs/dump.txt"; echo $?)"
+storage_requests update-refused-cpp > "$out/update-refused-cpp/storage.txt"
+storage_requests update-refused-rs > "$out/update-refused-rs/storage.txt"
+check "update-refused: same requests" "$(cmp -s "$out/update-refused-cpp/storage.txt" "$out/update-refused-rs/storage.txt"; echo $?)"
+
+echo "== update without an SD card, and a hostile package"
+run_update update-no-sd cpp "$out/archives/update.tgz" --no-sd
+run_update update-no-sd rs "$out/archives/update.tgz" --no-sd
+run_update update-hostile cpp "$out/archives/hostile-dotdot.tgz"
+run_update update-hostile rs "$out/archives/hostile-dotdot.tgz"
+for c in update-no-sd update-hostile; do
+    for side in cpp rs; do
+        check "$c: $side fails (exit $(exit_of "$c-$side")) and changes nothing" \
+            "$(test "$(exit_of "$c-$side")" != 0 && test -z "$(changes "$c-$side")" && { test ! -f "$out/$c-$side/dump.txt" || cmp -s "$out/$c-$side/dump.txt" "$out/standard.dump"; }; echo $?)"
+    done
+done
+
 echo "== nothing changes the device without --yes (argus-cli)"
-for c in "restore $out/backup-cpp/backup.tgz" "erase" "reboot" "mkdir /int/x" "rm /int/favorites.txt" "mv /int/a /int/b" "push $out/standard.dump /int/x"; do
+for c in "restore $out/backup-cpp/backup.tgz" "update $out/archives/update.tgz" "erase" "reboot" "mkdir /int/x" "rm /int/favorites.txt" "mv /int/a /int/b" "push $out/standard.dump /int/x"; do
     # shellcheck disable=SC2086
     "$rs" --port "$out/no-such-port" $c > "$out/confirm.out" 2>&1
     code=$?

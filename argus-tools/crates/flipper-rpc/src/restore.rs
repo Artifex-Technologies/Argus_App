@@ -66,7 +66,7 @@ impl std::fmt::Display for ArchiveError {
 
 impl std::error::Error for ArchiveError {}
 
-fn bad(msg: impl Into<String>) -> ArchiveError {
+pub(crate) fn bad(msg: impl Into<String>) -> ArchiveError {
     ArchiveError(msg.into())
 }
 
@@ -128,14 +128,14 @@ fn octal(field: &[u8], what: &str) -> Result<u64, ArchiveError> {
 
 /// One entry of a tar stream: its name parts, whether it is a folder, and its data.
 #[derive(Debug)]
-struct TarEntry {
-    parts: Vec<String>,
-    dir: bool,
-    data: std::ops::Range<usize>,
+pub(crate) struct TarEntry {
+    pub(crate) parts: Vec<String>,
+    pub(crate) dir: bool,
+    pub(crate) data: std::ops::Range<usize>,
 }
 
 /// The rules every archive must meet (the C++ `TarArchive` reader's): see the module text.
-fn read_tar(t: &[u8], max_entries: usize) -> Result<Vec<TarEntry>, ArchiveError> {
+pub(crate) fn read_tar(t: &[u8], max_entries: usize) -> Result<Vec<TarEntry>, ArchiveError> {
     let mut out: Vec<TarEntry> = Vec::new();
     let mut seen: HashMap<Vec<String>, bool> = HashMap::new();
     let mut pos = 0usize;

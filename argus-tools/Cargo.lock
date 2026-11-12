@@ -387,6 +387,7 @@ name = "flipper-rpc"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "md-5",
  "proptest",
  "prost",
  "prost-build",

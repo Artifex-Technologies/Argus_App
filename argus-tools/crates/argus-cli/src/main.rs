@@ -5,7 +5,7 @@
 //!
 //! It never looks for devices: the Flipper's serial port (`--port`) or a socket carrying its
 //! byte stream (`--socket`) must be named. Commands that change the device (`mkdir`, `rm`, `mv`,
-//! `push`, `restore`, `reboot`, `erase`) do nothing without `--yes`; `pull` and `backup` write
+//! `push`, `restore`, `update`, `reboot`, `erase`) do nothing without `--yes`; `pull` and `backup` write
 //! only new local files (they never overwrite).
 
 mod chymaera;
@@ -54,6 +54,8 @@ const HELP: &str = "argus-cli — talk to a Flipper Zero over RPC (JSON on stdou
   restore FILE       restore a backup of /int (from backup, or the C++ app's), then reboot;
                      the archive is checked whole first, before the port is opened: without
                      --yes only that check runs
+  update FILE        upload an update package (.tgz) to /ext/update and start the device's
+                     own updater (no DFU); checked whole first, like restore
   reboot             restart the device
   erase              factory reset: the device formats /int and restarts
 
@@ -205,6 +207,17 @@ fn check_backup(path: &Path) -> Result<flipper_rpc::restore::BackupArchive, (Str
         .map_err(|e| ("archive".to_string(), e.to_string()))
 }
 
+/// Reads and checks an update package without opening the device.
+fn check_package(path: &Path) -> Result<flipper_rpc::update::UpdatePackage, (String, String)> {
+    let meta = std::fs::metadata(path).map_err(|e| ("local".to_string(), format!("{}: {e}", path.display())))?;
+    if !meta.is_file() {
+        return Err(("local".into(), format!("{} is not a regular file", path.display())));
+    }
+    let f = std::fs::File::open(path).map_err(|e| ("local".to_string(), format!("{}: {e}", path.display())))?;
+    flipper_rpc::update::read_update_package(std::io::BufReader::new(f), &flipper_rpc::update::PackageLimits::default())
+        .map_err(|e| ("archive".to_string(), e.to_string().replace("backup refused", "update package refused")))
+}
+
 fn run(cmd: &Cmd) -> Result<Value, RpcError> {
     let target = cmd.target.as_ref().expect("checked by main");
     // read before the port is opened, so a bad local file changes nothing on the device
@@ -216,8 +229,22 @@ fn run(cmd: &Cmd) -> Result<Value, RpcError> {
         [c, file] if c == "restore" => Some(check_backup(Path::new(file)).map_err(|(_, m)| RpcError::Invalid(m))?),
         _ => None,
     };
+    let package = match cmd.words.as_slice() {
+        [c, file] if c == "update" => Some(check_package(Path::new(file)).map_err(|(_, m)| RpcError::Invalid(m))?),
+        _ => None,
+    };
     let mut s = Session::start(open(target, cmd.timeout)?, cmd.timeout)?;
     match cmd.words[0].as_str() {
+        "update" => {
+            let pkg = package.expect("checked above");
+            let r = s.update(&pkg)?;
+            let gone = s.wait_until_gone(GONE_WAIT);
+            Ok(json!({
+                "ok": true, "command": "update", "file": cmd.words[1], "package": pkg.dir, "manifest": pkg.manifest(),
+                "dirs_made": r.dirs_made, "files_sent": r.files_sent, "files_kept": r.files_kept, "bytes": r.bytes,
+                "updater_started": true, "gone": gone,
+            }))
+        }
         "mkdir" => {
             s.storage_mkdir(&cmd.words[1])?;
             Ok(json!({"ok": true, "command": "mkdir", "path": cmd.words[1]}))
@@ -407,11 +434,22 @@ fn main() -> ExitCode {
                 Ok(_) => {}
             }
         }
+        ["update", file] => match check_package(Path::new(file)) {
+            Err((code, m)) => return fail(&code, m, 1),
+            Ok(p) if !cmd.yes => {
+                print(json!({
+                    "ok": false, "command": "update", "file": file, "checked": true, "package": p.dir, "files": p.files.len(),
+                    "error": {"code": "confirm", "message": "the package is fine; installing it changes the device: run again with --yes"},
+                }));
+                return ExitCode::from(2);
+            }
+            Ok(_) => {}
+        },
         ["mkdir" | "rm", _] | ["mv" | "push", _, _] | ["reboot"] | ["erase"] if !cmd.yes => {
             return fail("confirm", format!("{} changes the device; run again with --yes", words[0]), 2)
         }
         ["mkdir" | "rm", _] | ["mv" | "push", _, _] | ["reboot"] | ["erase"] => {}
-        ["mkdir" | "rm" | "restore"] => return fail("usage", format!("{} needs a path", words[0]), 2),
+        ["mkdir" | "rm" | "restore" | "update"] => return fail("usage", format!("{} needs a path", words[0]), 2),
         ["mv" | "push", ..] => return fail("usage", format!("{} needs two paths", words[0]), 2),
         ["screen", dir] if Path::new(dir).exists() => return fail("exists", format!("{dir} exists"), 1),
         ["screen", _] => {}

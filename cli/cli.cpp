@@ -97,7 +97,7 @@ void Cli::initParser()
     m_parser.addPositionalArgument(QStringLiteral("restore"), QStringLiteral("Restore Internal Memory contents"), QStringLiteral("restore <backup_file>,"));
     m_parser.addPositionalArgument(QStringLiteral("erase"), QStringLiteral("Erase Internal Memory contents"), QStringLiteral("erase,"));
     m_parser.addPositionalArgument(QStringLiteral("wipe"), QStringLiteral("Wipe entire MCU Flash Memory"), QStringLiteral("wipe,"));
-    m_parser.addPositionalArgument(QStringLiteral("firmware"), QStringLiteral("Flash Core1 Firmware"), QStringLiteral("firmware <firmware_file.dfu>,"));
+    m_parser.addPositionalArgument(QStringLiteral("firmware"), QStringLiteral("Flash Core1 Firmware"), QStringLiteral("firmware <firmware_file.dfu|update_package.tgz>,"));
     m_parser.addPositionalArgument(QStringLiteral("core2radio"), QStringLiteral("Flash Core2 Radio stack"), QStringLiteral("core2radio <firmware_file.bin>,"));
     m_parser.addPositionalArgument(QStringLiteral("core2fus"), QStringLiteral("Flash Core2 Firmware Update Service"), QStringLiteral("core2fus <firmware_file.bin> <target_address>}"));
 
@@ -252,8 +252,10 @@ void Cli::beginFirmware()
     verifyArgumentCount(2);
     const auto arg = m_parser.positionalArguments().at(1);
 
-    if(!arg.endsWith(QStringLiteral(".dfu"), Qt::CaseInsensitive)) {
-        qCCritical(LOG_CLI) << "Please provide a firmware file in DFUse format.";
+    // A .tgz is an update package for the device's own updater (FlipperZero::installFirmware
+    // takes it, as the GUI's "install from file" does); a .dfu goes through recovery mode.
+    if(!arg.endsWith(QStringLiteral(".dfu"), Qt::CaseInsensitive) && !arg.endsWith(QStringLiteral(".tgz"))) {
+        qCCritical(LOG_CLI) << "Please provide a firmware file in DFUse format, or an update package (.tgz).";
         std::exit(-1);
     }
 

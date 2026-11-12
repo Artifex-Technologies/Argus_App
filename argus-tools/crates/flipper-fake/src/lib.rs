@@ -112,6 +112,8 @@ pub struct Transcript {
     pub received: Vec<u8>,
     /// Every RPC request the client sent, decoded, in order.
     pub requests: Vec<Main>,
+    /// The session ended because the device left (a reboot or factory reset).
+    pub left: bool,
 }
 
 impl Default for FakeFlipper {
@@ -327,6 +329,7 @@ impl FakeFlipper {
                 let fault = if first { self.fault.clone() } else { Fault::None };
                 first = false;
                 if !self.answer(io, &req, &fault)? {
+                    t.left = matches!(req.content, Some(Content::SystemRebootRequest(_)) | Some(Content::SystemFactoryResetRequest(_)));
                     return Ok(t);
                 }
             }
@@ -542,6 +545,22 @@ impl FakeFlipper {
                     return Ok(false);
                 }
             }
+            // update_operation_prepare: the manifest must be a file whose folder exists and whose
+            // first line names the format; a refusal is ERROR_INVALID_PARAMETERS with the code.
+            Some(Content::SystemUpdateRequest(r)) => {
+                let code = self.with_storage(|s| s.update_check(&r.update_manifest));
+                let status = if code == 0 { CommandStatus::Ok } else { CommandStatus::ErrorInvalidParameters };
+                let resp = pb_system::UpdateResponse { code };
+                send(
+                    io,
+                    Main {
+                        command_id: id,
+                        command_status: status as i32,
+                        content: Some(Content::SystemUpdateResponse(resp)),
+                        ..Default::default()
+                    },
+                )?;
+            }
             Some(Content::SystemFactoryResetRequest(_)) => {
                 self.with_storage(|s| s.factory_reset());
                 return Ok(false);
@@ -746,6 +765,23 @@ pub mod pty {
         false
     }
 
+    /// After the device left (reboot, factory reset): waits until the client has closed the port,
+    /// so that the next session starts with the next open, as a device back on USB would. A
+    /// pseudo-terminal cannot vanish the way a USB port does, so a client waiting for the device
+    /// to leave sees it only when the fake exits.
+    pub fn wait_for_close(port: &serialport::TTYPort) {
+        use nix::poll::{poll, PollFd, PollFlags};
+        let start = Instant::now();
+        while start.elapsed() < WAIT {
+            let mut fds = [PollFd::new(port.as_raw_fd(), PollFlags::empty())];
+            match poll(&mut fds, 50) {
+                Ok(_) if fds[0].revents().is_some_and(|r| r.contains(PollFlags::POLLHUP)) => return,
+                Ok(_) => {}
+                Err(_) => return,
+            }
+        }
+    }
+
     /// Makes a pseudo-terminal, calls `ready` with its path, then serves `sessions` clients one
     /// after the other (the C++ app opens the port twice: device information, then the work).
     /// Like a real Flipper, the banner goes out when a client opens the port.
@@ -762,7 +798,12 @@ pub mod pty {
                 }
                 // Let the client finish setting up the port before the banner.
                 std::thread::sleep(Duration::from_millis(200));
-                all.push(fake.serve(&mut PtyMaster { port: &mut master })?);
+                let t = fake.serve(&mut PtyMaster { port: &mut master })?;
+                let left = t.left;
+                all.push(t);
+                if left {
+                    wait_for_close(&master);
+                }
             }
             Ok(())
         })();

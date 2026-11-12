@@ -5,6 +5,8 @@
 #include "flipperzero/rpc/systemrebootoperation.h"
 #include "flipperzero/rpc/systemupdateoperation.h"
 
+#include "testhooks.h"
+
 using namespace Flipper;
 using namespace Zero;
 
@@ -90,6 +92,14 @@ void StartUpdaterOperation::rebootToUpdater()
 void StartUpdaterOperation::waitForUpdate()
 {
     deviceState()->setStatusString(QStringLiteral("Updating, follow the progress on your Flipper Zero"));
+
+    // Test hook (testhooks.h): a pseudo-terminal has no USB to come back on; the updater has
+    // been started once the reboot request is sent.
+    if(Argus::isTestSerialPort()) {
+        advanceOperationState();
+        return;
+    }
+
 
     connect(deviceState(), &DeviceState::isOnlineChanged, this, &StartUpdaterOperation::onDeviceOnlineChanged);
     startTimeout();

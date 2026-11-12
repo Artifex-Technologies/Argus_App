@@ -233,6 +233,29 @@ pub fn hostile() -> Vec<(&'static str, &'static str, Vec<u8>)> {
     out
 }
 
+/// An update package: one folder of files with a manifest, as Flipper's build makes them
+/// (made-up contents). `valid` false gives a manifest the updater refuses.
+pub fn update_package(valid: bool) -> Vec<u8> {
+    let manifest: &[u8] = if valid {
+        b"Filetype: Flipper firmware upgrade configuration\nVersion: 2\nInfo: f7-update-test\nTarget: 7\nLoader: updater.bin\nFirmware: firmware.dfu\nRadio: radio.bin\nResources: resources.tar\n"
+    } else {
+        b"Filetype: something else\n"
+    };
+    let pattern = |n: usize, seed: usize| (0..n).map(|i| ((i * 31 + seed) % 251) as u8).collect::<Vec<u8>>();
+    gzip(&tar(
+        &[
+            Raw::dir("f7-update-test/"),
+            Raw::file("f7-update-test/firmware.dfu", &pattern(4096, 1)),
+            Raw::file("f7-update-test/radio.bin", &pattern(2048, 2)),
+            // over 100 KiB: its write gets status pings
+            Raw::file("f7-update-test/resources.tar", &pattern(120 * 1024, 3)),
+            Raw::file("f7-update-test/update.fuf", manifest),
+            Raw::file("f7-update-test/updater.bin", &pattern(3000, 4)),
+        ],
+        true,
+    ))
+}
+
 /// More than 80 MiB of tar inside a small gzip: both apps stop decompressing at the limit.
 pub fn bomb() -> Vec<u8> {
     let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());

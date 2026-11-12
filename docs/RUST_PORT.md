@@ -75,6 +75,9 @@ Protocol and device logic first, with the CLI as the proof surface; the UI last.
    in `flipper_rpc::write` and `flipper_rpc::restore`; `argus-cli mkdir|rm|mv|push|restore|reboot|erase`, each
    doing nothing without `--yes`. App installs and date/time set are still to come.*
 5. **Firmware update over the updater** (package upload plus `SystemUpdateRequest`), factory reset (`erase`).
+   *Done 2026-11-12 at the protocol level, against the fake only: `flipper_rpc::update`, `argus-cli update
+   PACKAGE.tgz --yes` (the C++ CLI's `firmware` takes a `.tgz` for the comparison), and `argus-cli erase --yes`.
+   Neither has been run against a real Flipper.*
 6. **DFU and recovery** with nusb: DfuSe parsing first (pure, fuzzed), then option bytes, FUS and radio stack. No
    flashing in tests, and none on my device until I say so.
 7. **Update registry and region provisioning** (HTTPS with rustls, SHA-256 checked before anything is used).
@@ -143,11 +146,23 @@ and the same bytes on the fake, and for every hostile archive no change request 
 open the port). The write requests are byte-identical to the C++ app's nanopb encoder (12 more frames in the
 fixture: write chunks, an empty file, mkdir, delete with and without `recursive`, rename, ping, reboot, factory reset,
 update). A storage that refuses every change (`--read-only`) must fail both restores at the same first write.
-Result on 2026-11-12: 136 checks, all passed.
+Result on 2026-11-12: 136 checks, all passed (153 with the update below).
 
-The C++ CLI's restore and `erase` wait for the device to come back over USB after its reboot, which a
-pseudo-terminal cannot do; with the test hook set they take the request as done once it is sent (two more guarded
-spots: `restartoperation.cpp`, `factoryresetutiloperation.cpp`).
+**The update through the device's updater.** `qFlipper-cli firmware PACKAGE.tgz` (the C++ `FullUpdateOperation`
+with a local package, which the GUI's "install from file" uses) and `argus-cli update PACKAGE.tgz --yes` against the
+same fake: storage check, the `/ext/update/<folder>` path made folder by folder, every file written (one over
+100 KiB gets status pings), `SystemUpdateRequest` with the manifest, which the fake answers as the firmware's
+`update_operation_prepare` does (a refusal is `ERROR_INVALID_PARAMETERS` carrying the result code), and a reboot into
+the updater. Then the same package again on the same fake (each file's MD5 compared, nothing sent), a manifest the
+updater refuses (both fail, neither reboots), no SD card and a hostile package (both fail, nothing changed). Same
+requests, same bytes. No DFU and nothing that flashes: the updater on the device would do that, and the fake only
+records the reboot.
+
+The C++ CLI's restore, `erase` and update wait for the device to come back over USB after its reboot, which a
+pseudo-terminal cannot do; with the test hook set they take the request as done once it is sent, and region
+provisioning never fetches from the network (guarded spots in `restartoperation.cpp`,
+`factoryresetutiloperation.cpp`, `startupdateroperation.cpp`, `regionprovisioningoperation.cpp`). The fake, after a
+reboot, waits for the client to close the port before it serves the next session, as a device back on USB.
 
 **The Sarina control API against the C++ server.** The wire format is the contract, so it is proven three
 ways. (1) `crates/argus-api/tests/qt_json.rs` feeds 4000 generated request lines per seed (numbers at
@@ -231,6 +246,9 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   device to leave the port (`"gone"`). The fake keeps a changing storage; `tests/writes.rs` (6 tests) covers the
   firmware rules, writes with pings, an interrupted write, reboot and reset, every hostile archive, and restores.
   `compare-cli.sh`: 136 checks.
+- Phase 5 at the protocol level (2026-11-12): `flipper_rpc::update` (package check, `/ext/update/<folder>` made,
+  MD5 check of what is there, upload, `SystemUpdateRequest`, reboot into the updater) and `argus-cli update
+  PACKAGE.tgz --yes`; `tests/writes.rs` 8 tests; `compare-cli.sh` 153 checks.
 - Tests: 77 in the new crates (frames, paths, schema, nanopb fixtures, session and reads against the fake with
   every fault, hostile names, the CLI binary over a socket and a pseudo-terminal), all green; argus-tools' own
   tests unchanged; `qFlipper-cli chymaera selftest` 11/11 with the hook built in.
@@ -358,7 +376,10 @@ screen stream and a status screen; the Rust CLI only reads what the command need
 opens the port (the C++ app connects first), refuses non-ASCII names before sending them (the firmware refuses them),
 sends a large file up to each status ping and waits for that ping's answer (the C++ app sends it all at once; the
 frames are the same), and after a reboot or reset waits for the device to leave instead of for it to come back
-(it has no USB hot-plug). The C++ mkdir takes "already exists" as success (its callers make folders that may be
+(it has no USB hot-plug). The update reads the package whole before the port is opened and takes only one folder
+of plain files with an `update.fuf` (the C++ app unpacks it, takes the first folder by name and skips hidden files and
+subfolders), and does no region provisioning (it needs Flipper's server: phase 7; the C++ app skips it for
+development-region devices such as the fake). The C++ mkdir takes "already exists" as success (its callers make folders that may be
 there); `flipper_rpc`'s `storage_mkdir` returns it as an error and `argus-cli mkdir` exits 1 (the restore only makes
 folders that are missing, so the two never differ there). The C++ CLI exits 255 on any error, the Rust CLI 1. For capture pull: the Rust CLI refuses a path
 outside the capture folders before it opens the port (the C++ CLI refuses once the device is ready), names the
@@ -370,10 +391,8 @@ failed, and does not read `devinfo` or start the screen.
 1. Phase 4 continues: app installs (the argus-tools installer's writes through `flipper_rpc::write`, with the C++
    `devicestorage` as the reference) and date/time set. Nothing reachable from the Sarina API may change the
    device without my approval in the app.
-2. Phase 5, the update over the updater, as a protocol-level operation against the fake only: the C++
-   `FullUpdateOperation` with a local `.tgz` (upload to `/ext/update/<name>/`, `SystemUpdateRequest`, reboot to
-   UPDATE). The C++ CLI's `firmware` command takes only `.dfu` (DFU, not yet), so comparing it needs that CLI to take
-   a `.tgz` too, or a test-only entry point. The fake must answer `SystemUpdateRequest` as the firmware does
-   (`rpc_system.c`, `update_operation_prepare`). The factory reset is done (`erase`).
-3. For the UI phase: the screen stream is there (`flipper_rpc::screen`); buttons (`GuiSendInputRequest`) and the
+2. Phase 5 is done at the protocol level (update over the updater, factory reset), proven against the fake only.
+   Before either is used on my Flipper: run `argus-cli update` and `erase` against it once with me watching.
+3. Phase 6 (DFU and recovery with nusb): the DfuSe parser first, pure and fuzzed; no flashing in tests.
+4. For the UI phase: the screen stream is there (`flipper_rpc::screen`); buttons (`GuiSendInputRequest`) and the
    virtual display come with it.

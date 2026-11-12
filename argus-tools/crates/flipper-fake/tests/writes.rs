@@ -177,3 +177,58 @@ fn restore_brings_int_back_and_refuses_a_conflict_before_writing() {
     assert_eq!(r.unwrap().dirs_made, 2);
     assert_eq!(dump, FakeFlipper::standard().dump());
 }
+
+#[test]
+fn update_uploads_the_package_arms_the_updater_and_skips_unchanged_files() {
+    use flipper_rpc::update::{read_update_package, PackageLimits};
+    let pkg = read_update_package(&archives::update_package(true)[..], &PackageLimits::default()).unwrap();
+    assert_eq!(pkg.dir, "f7-update-test");
+    let names: Vec<&str> = pkg.files.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["firmware.dfu", "radio.bin", "resources.tar", "update.fuf", "updater.bin"]);
+    let fake = FakeFlipper::standard();
+    let p2 = pkg.clone();
+    let (r, t, dump) = run(fake, move |mut s| s.update(&p2));
+    let r = r.unwrap();
+    assert_eq!((r.dirs_made, r.files_sent, r.files_kept), (2, 5, 0));
+    assert!(matches!(&t.requests.last().unwrap().content, Some(Content::SystemRebootRequest(m)) if m.mode == 2));
+    assert_eq!(dump.lines().filter(|l| l.starts_with("f /ext/update/f7-update-test/")).count(), 5);
+
+    // the same package again on the same storage: MD5s, no writes
+    let fake = FakeFlipper::standard();
+    fake.with_storage(|s| {
+        s.nodes.push(flipper_fake::Node { path: "/ext/update".into(), dir: true, size: 0 });
+        s.nodes.push(flipper_fake::Node { path: "/ext/update/f7-update-test".into(), dir: true, size: 0 });
+        for (name, data) in &pkg.files {
+            let path = format!("/ext/update/f7-update-test/{name}");
+            s.nodes.push(flipper_fake::Node { path: path.clone(), dir: false, size: data.len() as u32 });
+            s.contents.insert(path, data.clone());
+        }
+    });
+    let (r, t, _) = run(fake, move |mut s| s.update(&pkg));
+    assert_eq!(r.unwrap().files_kept, 5);
+    assert!(!t.requests.iter().any(|m| matches!(m.content, Some(Content::StorageWriteRequest(_)))));
+
+    // a manifest the updater refuses: no reboot
+    let bad = read_update_package(&archives::update_package(false)[..], &PackageLimits::default()).unwrap();
+    let (r, t, _) = run(FakeFlipper::standard(), move |mut s| s.update(&bad));
+    assert!(matches!(r, Err(RpcError::Invalid(ref m)) if m.contains("manifest invalid (3)")), "{r:?}");
+    assert!(!t.requests.iter().any(|m| matches!(m.content, Some(Content::SystemRebootRequest(_)))));
+}
+
+#[test]
+fn update_packages_must_be_one_folder_of_plain_files() {
+    use archives::{gzip, tar, Raw};
+    use flipper_rpc::update::{read_update_package, PackageLimits};
+    let fuf = Raw::file("u/update.fuf", b"Filetype: Flipper firmware upgrade configuration\n");
+    for (why, entries) in [
+        ("no folder first", vec![Raw::file("update.fuf", b"x")]),
+        ("no manifest", vec![Raw::dir("u/"), Raw::file("u/a.bin", b"x")]),
+        ("a subfolder", vec![Raw::dir("u/"), fuf.clone(), Raw::dir("u/sub/")]),
+        ("a second folder", vec![Raw::dir("u/"), fuf.clone(), Raw::dir("v/")]),
+        ("a hidden file", vec![Raw::dir("u/"), fuf.clone(), Raw::file("u/.x", b"x")]),
+        ("a name with ..", vec![Raw::dir("u/"), fuf.clone(), Raw::file("u/../x", b"x")]),
+    ] {
+        assert!(read_update_package(&gzip(&tar(&entries, true))[..], &PackageLimits::default()).is_err(), "{why}");
+    }
+    assert!(read_update_package(&gzip(&tar(&[Raw::dir("u/"), fuf], true))[..], &PackageLimits::default()).is_ok());
+}

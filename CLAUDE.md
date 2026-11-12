@@ -152,6 +152,14 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — Rust port phase 5 at the protocol level: the update through the device's updater
+- `argus-cli update PACKAGE.tgz --yes` uploads an update package to `/ext/update/<folder>`, arms the device's updater
+  (`SystemUpdateRequest`) and reboots into it; no DFU. `qFlipper-cli firmware` now also takes a `.tgz` (what the GUI's
+  "install from file" already did). `compare-cli.sh` runs both against the fake (fresh, again with MD5 checks, a refused
+  manifest, no SD card, a hostile package): 153 checks. Proven against the fake only; not run on a real Flipper.
+- Test hook only: with `ARGUS_TEST_SERIAL_PORT` set, the updater start counts as done once its reboot is sent, and
+  region provisioning never fetches from the network.
+
 ### 2026-11-12 — Rust port phase 4: writes and restore (both apps fixed), `erase`
 - `argus-cli mkdir|rm|mv|push|restore|reboot|erase` (`flipper_rpc::write`, `flipper_rpc::restore`); none of them does
   anything without `--yes`. `compare-cli.sh` has each app restore its own backup and the other's onto the fake (same
