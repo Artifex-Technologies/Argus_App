@@ -149,6 +149,16 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — Rust capture pull into the shared datastore (`argus-cli capture pull|pull-all`)
+- New `argus-tools/crates/argus-capture`: the datastore (same SQLite file, schema and migrations as the C++ app), the
+  Flipper-format parsers (the stored `meta` JSON matches the C++ parser byte for byte: a Qt-built oracle compares
+  3000 generated files in CI), and the capture sync with the same allowlist (`CaptureSync::defaultRoots`), `assets`/
+  `.cache` skipped, dedup by sha256 + device path. `argus-cli capture pull PATH | capture pull-all`.
+- **@Sarina:** rows written by the Rust pull are the same as the C++ app's (same kind/name/source_path/size/meta/
+  sha256), so `capture.list` and `capture.library` see no difference. The API itself is still the C++ one.
+- C++: `CaptureSync` counts refused device names as failed again (they were silently skipped since the earlier
+  commit today). `compare-cli.sh` adds pull-all, a cross-datastore repeat and a non-capture path: 40 checks.
+
 ### 2026-11-12 — C++ fixes for what the Rust port found (both versions now agree)
 - Rule from the owner: a bug the port finds is fixed in both versions. Fixed in the C++ app: NULL `data` dereferences
   (`storageresponse.cpp`, `guiresponse.cpp`, `statusresponse.cpp`); screen frames not 1024 bytes are dropped

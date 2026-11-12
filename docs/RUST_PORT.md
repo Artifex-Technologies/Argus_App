@@ -65,6 +65,8 @@ Protocol and device logic first, with the CLI as the proof surface; the UI last.
    pcap export, the `.nfc`/`.sub` parsers (argus-tools has them), the Sarina control API server (loopback, token
    always required, same wire format, `docs/SARINA_API.md` stays the contract), the event log. CLI parity with
    `qFlipper-cli chymaera ...`, so Sarina's clients see no change.
+   *Started 2026-11-12: capture pull and pull-all into the shared datastore (`crates/argus-capture`,
+   `argus-cli capture pull PATH | capture pull-all`).*
 4. **Writes, behind a confirmation.** Write, mkdir, rename, remove, restore, app installs, date/time set, reboot.
    Nothing reachable from the Sarina API transmits, flashes or changes the device without my approval in the app.
 5. **Firmware update over the updater** (package upload plus `SystemUpdateRequest`), factory reset (`erase`).
@@ -98,6 +100,16 @@ No test opens `/dev/ttyACM*` or any real device, and nothing flashes. The proof 
    same: file listings and reads (phase 2), update manifests and `directory.json` (phase 7), DfuSe files (phase 6),
    tar backups (phase 2).
 
+**The capture metadata against the C++ parser itself.** What a capture says about itself is stored as its
+`meta` JSON and handed out by the Sarina API, so it must match byte for byte. `crates/argus-capture/tests/qt-oracle`
+builds a small program from the C++ app's own `flipperfileformat.cpp` (QtCore only) that prints what
+`recordCapture` would store; `tests/qt_oracle.rs` feeds it and the Rust port 3000 generated files per run (key/value
+lines mixed with carriage returns, invalid UTF-8, BOMs, Unicode spaces, NULs, odd numbers, every suffix) and
+requires identical output. The Linux workflow runs it; 13 seeds (39 000 files) agreed here. It found three Qt
+rules the port now follows: the file is read in `Text` mode, which drops **every** `\r` byte, not only in `\r\n`;
+each byte of an invalid UTF-8 sequence becomes its own U+FFFD; and `toInt` reads only up to a NUL and trims ASCII
+whitespace (with `\v`) but no other kind.
+
 **The C++ CLI against the same fake.** The C++ app finds a Flipper by USB VID/PID. A test-only hook
 (`backend/testhooks.h`) changes that only when `ARGUS_TEST_SERIAL_PORT` names a port: the registry then does not
 watch USB at all (a real Flipper plugged in is never seen), uses that port as the one device, does not raise DTR
@@ -126,7 +138,13 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   `compare-cli.sh`.
 - The C++ fixes above (2026-11-12): `chymaera selftest` 17/17 (six new checks: old and new archives, end blocks, long
   names, device names); `compare-cli.sh` 26/26 over six scenarios.
-- Tests: 64 in the new crates (frames, paths, schema, nanopb fixtures, session and reads against the fake with
+- Phase 3 start (2026-11-12): `crates/argus-capture` (the datastore with the C++ schema and migrations, the
+  Flipper-format parsers, the capture sync with the allowlist); `argus-cli capture pull PATH | capture pull-all`
+  (`--datastore DB`, default the shared one). `compare-cli.sh` now also runs `qFlipper-cli chymaera pull-all`
+  against `argus-cli capture pull-all`: the same 26 capture rows (kind, name, path, size, meta, sha256), the same
+  requests, neither touches `/ext/u2f` or an `assets` file, and each app finds nothing new in the datastore the
+  other filled. 40 checks in nine scenarios.
+- Tests: 77 in the new crates (frames, paths, schema, nanopb fixtures, session and reads against the fake with
   every fault, hostile names, the CLI binary over a socket and a pseudo-terminal), all green; argus-tools' own
   tests unchanged; `qFlipper-cli chymaera selftest` 11/11 with the hook built in.
 
@@ -170,14 +188,23 @@ port finds is fixed in the C++ too). `compare-cli.sh` has a case for each, and b
   download refuses an existing local folder instead of deleting it. Case: `hostile`.
 - **An empty tree hung backup and directory download** (they waited for a last file that never came); they now go on.
 
+A regression of my own, caught by porting the capture sync: once `GetFileTreeOperation` left unsafe names out,
+the C++ capture pull stopped counting them as failed (as `stagedPath` used to). `CaptureSync` now counts every
+refused name as failed again, and the Rust pull does the same.
+
 What still differs, on purpose: the C++ app probes the device before a backup (and **sets its clock**) and starts the
 screen stream and a status screen; the Rust CLI only reads what the command needs. The C++ restore of an archive and
-the Rust backup agree; a restore from Rust waits for writes (phase 4).
+the Rust backup agree; a restore from Rust waits for writes (phase 4). For capture pull: the Rust CLI refuses a path
+outside the capture folders before it opens the port (the C++ CLI refuses once the device is ready), names the
+staging folder in UTC (the C++ app in local time), creates it 0700 and its files 0600, removes a file whose read
+failed, and does not read `devinfo` or start the screen.
 
 ## Resume here
 
-1. Phase 3, starting with capture pull and pull-all on top of `transfer::pull` (the `CaptureSync` allowlist:
-   capture folders only, secrets never read, `assets`/`.cache` skipped), then the SQLite datastore and
-   `argus-cli` parity with `qFlipper-cli chymaera pull|pull-all`; `compare-cli.sh` gets a pull scenario.
-2. `restore` needs writes (phase 4); until then the fake answers write requests "not implemented". The fake can
-   then check the C++ restore of a Rust backup and the other way round.
+1. The rest of phase 3: the Sarina control API server in Rust (loopback, token always required, the wire format of
+   `docs/SARINA_API.md`; the C++ server and Sarina's client tests are the comparison), then `chymaera
+   parse|import|watch|serve|selftest` parity, the event log, pcap export and the screen streamer (drop frames that are
+   not 1024 bytes, as the C++ now does).
+2. One Flipper-format parser: argus-tools' `flipperfile.rs` (values cut at 512 characters, for the capture
+   library) and `argus-capture::meta` (exact C++ parity) should become one module with both views.
+3. `restore` needs writes (phase 4); then the fake can check each app's restore of the other's backup.

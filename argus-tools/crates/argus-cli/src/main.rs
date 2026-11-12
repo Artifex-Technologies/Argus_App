@@ -32,6 +32,8 @@ const HELP: &str = "argus-cli — talk to a Flipper Zero over RPC (JSON on stdou
   date               the device clock
   pull PATH DEST     copy a file or directory off the device to DEST (must not exist)
   backup FILE        /int as a .tar.gz the C++ app's restore reads (FILE must not exist)
+  capture pull PATH  pull a capture folder (or a path inside one) into the datastore
+  capture pull-all   pull every capture folder into the datastore
   version | help
 
   All commands only read from the device. Names the device lists that could lead outside
@@ -39,7 +41,9 @@ const HELP: &str = "argus-cli — talk to a Flipper Zero over RPC (JSON on stdou
 
   --port DEVICE   the Flipper's serial port, e.g. /dev/ttyACM0 (never guessed)
   --socket PATH   a Unix socket carrying the same byte stream (tests use a fake Flipper here)
-  --timeout MS    per-read timeout, default 5000";
+  --timeout MS    per-read timeout, default 5000
+  --datastore DB  the capture datastore, default the one the Argus app and the Sarina API use
+                  ($XDG_DATA_HOME/Argus/chymaera/chymaera.db)";
 
 enum Target {
     Port(PathBuf),
@@ -50,12 +54,13 @@ struct Usage(String);
 
 struct Cmd {
     target: Option<Target>,
+    datastore: Option<PathBuf>,
     timeout: Duration,
     words: Vec<String>,
 }
 
 fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
-    let mut cmd = Cmd { target: None, timeout: Duration::from_millis(5000), words: Vec::new() };
+    let mut cmd = Cmd { target: None, datastore: None, timeout: Duration::from_millis(5000), words: Vec::new() };
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| Usage(format!("{name} needs a value")));
@@ -67,6 +72,7 @@ fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
                 let p = PathBuf::from(value(&a)?);
                 cmd.target = Some(if a == "--port" { Target::Port(p) } else { Target::Socket(p) });
             }
+            "--datastore" => cmd.datastore = Some(PathBuf::from(value("--datastore")?)),
             "--timeout" => {
                 let ms: u64 = value("--timeout")?.parse().map_err(|_| Usage("--timeout takes milliseconds".into()))?;
                 if !(10..=600_000).contains(&ms) {
@@ -179,6 +185,42 @@ fn run(cmd: &Cmd) -> Result<Value, RpcError> {
                 json!({"ok": true, "command": "pull", "path": remote, "dest": dest.display().to_string(), "files": r.files, "dirs": r.dirs, "bytes": r.bytes, "refused": r.refused}),
             )
         }
+        "capture" => {
+            let all = cmd.words[1] == "pull-all";
+            let roots: Vec<&str> = if all { argus_capture::sync::CAPTURE_ROOTS.to_vec() } else { vec![cmd.words[2].as_str()] };
+            if let Some(bad) = roots.iter().find(|r| !argus_capture::sync::is_capture_root(r)) {
+                return Err(RpcError::Invalid(format!(
+                    "only the capture folders may be pulled, not {bad}: {}",
+                    argus_capture::sync::CAPTURE_ROOTS.join(", ")
+                )));
+            }
+            let db = match &cmd.datastore {
+                Some(p) => p.clone(),
+                None => argus_capture::store::default_path().ok_or_else(|| RpcError::Local("no home folder for the datastore".into()))?,
+            };
+            let store = argus_capture::store::Store::open(&db).map_err(|e| RpcError::Local(e.to_string()))?;
+            let label = if all { "all capture folders".to_string() } else { cmd.words[2].clone() };
+            let r = argus_capture::sync::pull(&mut s, &store, &roots, &label, &Limits::default()).map_err(|e| match e {
+                argus_capture::sync::PullError::Rpc(e) => e,
+                other => RpcError::Local(other.to_string()),
+            })?;
+            let failed: Vec<Value> = r.failed.iter().map(|(p, why)| json!({"path": p, "reason": why})).collect();
+            let mut out = json!({
+                "ok": r.failed.is_empty(),
+                "command": if all { "capture pull-all" } else { "capture pull" },
+                "new": r.new,
+                "duplicates": r.duplicates,
+                "failed": failed,
+                "missing_roots": r.missing_roots,
+                "bytes": r.bytes,
+                "recorded": r.recorded,
+                "datastore": db.display().to_string(),
+            });
+            if !r.failed.is_empty() {
+                out["error"] = json!({"code": "failed", "message": format!("{} file(s) could not be read", r.failed.len())});
+            }
+            Ok(out)
+        }
         "backup" => {
             let out = PathBuf::from(&cmd.words[1]);
             let mtime = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -213,6 +255,13 @@ fn main() -> ExitCode {
         ["info"] | ["date"] | ["ls" | "stat" | "df" | "md5", _] | ["pull", _, _] | ["backup", _] => {}
         ["ls" | "stat" | "df" | "md5"] => return fail("usage", format!("{} needs a device path", words[0]), 2),
         ["pull", ..] => return fail("usage", "pull needs a device path and a new local path".into(), 2),
+        ["capture", "pull", path] if !argus_capture::sync::is_capture_root(path) => {
+            // refused before the device is even opened
+            let roots = argus_capture::sync::CAPTURE_ROOTS.join(", ");
+            return fail("not_allowed", format!("only the capture folders may be pulled, not {path}: {roots}"), 1);
+        }
+        ["capture", "pull", _] | ["capture", "pull-all"] => {}
+        ["capture", ..] => return fail("usage", "capture pull PATH | capture pull-all".into(), 2),
         ["backup"] => return fail("usage", "backup needs a new local file".into(), 2),
         _ => return fail("usage", format!("unknown command: {}", words.join(" ")), 2),
     }
@@ -221,8 +270,13 @@ fn main() -> ExitCode {
     }
     match run(&cmd) {
         Ok(v) => {
+            let ok = v["ok"] == true;
             print(v);
-            ExitCode::SUCCESS
+            if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
         }
         Err(e) => fail(e.code(), e.to_string(), 1),
     }

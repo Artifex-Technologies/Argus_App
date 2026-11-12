@@ -44,15 +44,19 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           .github/scripts/package_linux.sh build-release
 
-      # The Rust port's proof against the C++ app (docs/RUST_PORT.md, section 4): both CLIs back up the
-      # same fake Flipper over a pseudo-terminal; files, requests and exit codes are compared. Rust is
-      # installed only here, so the build and package step above runs exactly as before.
+      # The Rust port's proof against the C++ app (docs/RUST_PORT.md, section 4): both CLIs back up and pull
+      # captures from the same fake Flipper over a pseudo-terminal; archives, datastore rows, requests and exit
+      # codes are compared. Rust is installed only here, so the build and package step above runs exactly as
+      # before.
       - name: Compare qFlipper-cli with argus-cli on the fake Flipper
         run: |
           pacman -S --noconfirm --needed rust protobuf
           (cd argus-tools && cargo build --locked -j4 -p argus-cli -p flipper-fake)
           QT_QPA_PLATFORM=offscreen sh argus-tools/crates/flipper-fake/compare-cli.sh build-release/qFlipper-cli \
             argus-tools/target/debug/argus-cli argus-tools/target/debug/flipper-fake "$RUNNER_TEMP/compare"
+          # the capture metadata against the C++ parser itself, 3000 generated files
+          sh argus-tools/crates/argus-capture/tests/qt-oracle/build.sh "$RUNNER_TEMP/qt-oracle"
+          (cd argus-tools && ARGUS_QT_ORACLE="$RUNNER_TEMP/qt-oracle" cargo test --locked -j4 -p argus-capture --test qt_oracle)
 
       - name: Upload the package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2, pinned by commit

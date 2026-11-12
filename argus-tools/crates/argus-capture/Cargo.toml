@@ -1,0 +1,18 @@
+[package]
+name = "argus-capture"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Argus capture pull and datastore, the Rust port of backend/chymaera (CaptureSync, ChymaeraDatastore, FlipperFileFormat): only the capture folders leave the device, every capture is hashed and recorded in the SQLite datastore the GUI and the Sarina API share"
+publish = false
+
+[dependencies]
+flipper-rpc = { path = "../flipper-rpc" }
+rusqlite = "0.42"
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+flipper-fake = { path = "../flipper-fake" }
+proptest = "1"

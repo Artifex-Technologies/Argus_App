@@ -156,6 +156,13 @@ void CaptureSync::listNextRoot()
             emit rootMissing(root, operation->errorString());
 
         } else {
+            // Names the tree walk refused (they could lead outside the staging folder) count as
+            // failed files, as stagedPath's refusals always did.
+            for(const auto &path : operation->refused()) {
+                ++m_failedCount;
+                emit fileFailed(QString::fromUtf8(path), QStringLiteral("refused: the device sent a name that leads outside the staging folder"));
+            }
+
             for(const auto &fileInfo : operation->files()) {
                 if(fileInfo.type == FileType::RegularFile && !isExcluded(fileInfo.absolutePath)) {
                     m_queue.append(fileInfo);

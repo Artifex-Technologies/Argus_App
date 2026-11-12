@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 flipper-rpc = { path = "../flipper-rpc" }
+argus-capture = { path = "../argus-capture" }
 serde_json = "1"
 
 [dev-dependencies]

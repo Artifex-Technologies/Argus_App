@@ -56,11 +56,11 @@ backup_both() {
 
 exit_of() { cat "$out/$1/exit.txt"; }
 
-# requests of the backup itself, without session and command id, and without the C++ app's
-# screen requests (Gui*: the Rust CLI has no screen to drive)
+# requests of the work itself, without session and command id, and without what only the C++
+# app asks once connected: its screen (Gui*) and, when its console attaches, devinfo
 storage_requests() {
     if [ -n "$(grep '^2 ' "$out/$1/requests.txt")" ]; then grep '^2 ' "$out/$1/requests.txt"; else cat "$out/$1/requests.txt"; fi \
-        | cut -d' ' -f3- | grep -v '^Gui'
+        | cut -d' ' -f3- | grep -v '^Gui\|^PropertyGetRequest'
 }
 
 # The C++ restore reads past single zero blocks; plain tar must now read every entry too.
@@ -112,6 +112,69 @@ for fault in short-read long-read; do
         check "$fault: $side fails (exit $(exit_of "$fault-$side")) and leaves no archive" \
             "$(test "$(exit_of "$fault-$side")" != 0 && test ! -e "$out/$fault-$side/backup.tgz"; echo $?)"
     done
+done
+
+# ---- capture pull into the datastore (qFlipper-cli chymaera pull-all | argus-cli capture pull-all) ----
+# run_pull NAME SIDE DATA_HOME ARGS...: one pull from a fresh fake with the capture files
+run_pull() {
+    name=$1 side=$2 data=$3; shift 3
+    if [ "$side" = cpp ]; then
+        start_fake "$out/$name-cpp" 2 --captures
+        XDG_DATA_HOME=$data ARGUS_TEST_SERIAL_PORT=$port timeout 90 "$cpp" chymaera "$@" > "$out/$name-cpp/stdout.txt" 2> "$out/$name-cpp/stderr.txt"
+        echo $? > "$out/$name-cpp/exit.txt"
+    else
+        start_fake "$out/$name-rs" 1 --captures
+        XDG_DATA_HOME=$data timeout 90 "$rs" --port "$port" capture "$@" > "$out/$name-rs/stdout.txt" 2> "$out/$name-rs/stderr.txt"
+        echo $? > "$out/$name-rs/exit.txt"
+        # argus-cli refuses a non-capture path before opening the port; don't let the fake
+        # (started by this script) wait for it
+        [ "$name" = outside ] && kill "$fake_pid" 2>/dev/null
+    fi
+    stop_fake
+}
+
+rows() { # rows DATA_HOME: the captures table without times and local paths, sorted
+    sqlite3 "$1/Argus/chymaera/chymaera.db" "SELECT type, name, source_path, size, meta, sha256 FROM captures ORDER BY source_path, sha256"
+}
+
+echo "== capture pull-all into the datastore"
+mkdir -p "$out/data-cpp" "$out/data-rs"
+run_pull pull-all cpp "$out/data-cpp" pull-all
+run_pull pull-all rs "$out/data-rs" pull-all
+check "pull-all: C++ exit 0" "$(test "$(exit_of pull-all-cpp)" = 0; echo $?)"
+check "pull-all: Rust exit 0" "$(test "$(exit_of pull-all-rs)" = 0; echo $?)"
+rows "$out/data-cpp" > "$out/pull-all-cpp/rows.txt"
+rows "$out/data-rs" > "$out/pull-all-rs/rows.txt"
+diff "$out/pull-all-cpp/rows.txt" "$out/pull-all-rs/rows.txt" > "$out/pull-all-rows.diff"
+check "pull-all: same captures recorded ($(wc -l < "$out/pull-all-rs/rows.txt") rows: kind, name, path, size, meta, sha256)" $?
+storage_requests pull-all-cpp > "$out/pull-all-cpp/storage.txt"
+storage_requests pull-all-rs > "$out/pull-all-rs/storage.txt"
+diff "$out/pull-all-cpp/storage.txt" "$out/pull-all-rs/storage.txt" > "$out/pull-all-requests.diff"
+check "pull-all: same storage requests in the same order" $?
+note "C++ only, once connected: $(grep '^2 ' "$out/pull-all-cpp/requests.txt" | cut -d' ' -f3- | grep '^Gui\|^PropertyGetRequest' | tr '\n' ' ')"
+for side in cpp rs; do
+    grep -q 'u2f\|StorageReadRequest .*/assets/' "$out/pull-all-$side/requests.txt"
+    check "pull-all: $side never read /ext/u2f or an assets file" "$(test $? -ne 0; echo $?)"
+done
+
+echo "== each app pulls again into the other's datastore: nothing new"
+run_pull again cpp "$out/data-rs" pull-all
+run_pull again rs "$out/data-cpp" pull-all
+check "again: C++ exit 0" "$(test "$(exit_of again-cpp)" = 0; echo $?)"
+check "again: Rust exit 0, 0 new" "$(test "$(exit_of again-rs)" = 0 && grep -q '"new":0' "$out/again-rs/stdout.txt"; echo $?)"
+rows "$out/data-rs" > "$out/again-cpp-rows.txt"
+rows "$out/data-cpp" > "$out/again-rs-rows.txt"
+check "again: C++ added nothing to the Rust datastore" "$(cmp -s "$out/again-cpp-rows.txt" "$out/pull-all-rs/rows.txt"; echo $?)"
+check "again: Rust added nothing to the C++ datastore" "$(cmp -s "$out/again-rs-rows.txt" "$out/pull-all-cpp/rows.txt"; echo $?)"
+
+echo "== a path outside the capture folders"
+run_pull outside cpp "$out/data-cpp" pull /int
+run_pull outside rs "$out/data-rs" pull /int
+for side in cpp rs; do
+    check "outside: $side refuses (exit $(exit_of "outside-$side"))" "$(test "$(exit_of "outside-$side")" = 1; echo $?)"
+    # no request file at all: the CLI never opened the port
+    ! [ -f "$out/outside-$side/requests.txt" ] || ! grep -q 'StorageReadRequest\|StorageListRequest /int' "$out/outside-$side/requests.txt"
+    check "outside: $side read nothing from /int" $?
 done
 
 echo "== results in $out"

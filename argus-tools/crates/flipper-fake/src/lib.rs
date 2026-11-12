@@ -81,6 +81,8 @@ pub struct FakeFlipper {
     /// Raw entries added to a folder's listing as they are, bypassing the firmware's
     /// rules: (folder, name, is_dir). For tests of what a hostile device could send.
     pub hostile: Vec<(String, String, bool)>,
+    /// Files whose bytes are given instead of [`Node::content`]'s pattern: (path, bytes).
+    pub contents: Vec<(String, Vec<u8>)>,
 }
 
 /// What passed over the connection.
@@ -114,6 +116,35 @@ impl FakeFlipper {
         }
         self.hostile.push(("/int".into(), "..".into(), true));
         self
+    }
+
+    /// [`FakeFlipper::standard`] plus capture files in the capture folders the apps pull
+    /// (real Flipper-format files from argus-tools' test fixtures), a key dictionary under
+    /// `assets` (never pulled) and a secret outside the capture folders (never read).
+    pub fn with_captures(mut self) -> FakeFlipper {
+        let files: [(&str, &[u8]); 8] = [
+            ("/ext/nfc/office.nfc", include_bytes!("../../../tests/fixtures/captures/ext/nfc/badge.nfc")),
+            ("/ext/nfc/full.nfc", include_bytes!("../../../tests/fixtures/captures/ext/nfc/badge_full.nfc")),
+            ("/ext/nfc/assets/mf_classic_dict_user.nfc", b"A0A1A2A3A4A5\n"),
+            ("/ext/subghz/garage.sub", include_bytes!("../../../tests/fixtures/captures/ext/subghz/garage.sub")),
+            ("/ext/infrared/tv.ir", include_bytes!("../../../tests/fixtures/captures/ext/infrared/tv.ir")),
+            ("/ext/lfrfid/door.rfid", include_bytes!("../../../tests/fixtures/captures/ext/lfrfid/door.rfid")),
+            ("/ext/wifi_scan/scan_1.csv", b"tick_ms,bssid,ssid,hidden,channel,rssi_dbm,encrypted\n1,,\"test\",0,6,-40,1\n"),
+            ("/ext/u2f/key.u2f", b"not for the desktop"),
+        ];
+        for dir in ["/ext/nfc/assets", "/ext/infrared", "/ext/lfrfid", "/ext/wifi_scan", "/ext/u2f"] {
+            self.nodes.push(Node { path: dir.into(), dir: true, size: 0 });
+        }
+        for (path, bytes) in files {
+            self.nodes.push(Node { path: path.into(), dir: false, size: bytes.len() as u32 });
+            self.contents.push((path.into(), bytes.to_vec()));
+        }
+        self
+    }
+
+    /// A file's bytes: given in [`FakeFlipper::contents`], or [`Node::content`]'s pattern.
+    pub fn data_of(&self, n: &Node) -> Vec<u8> {
+        self.contents.iter().find(|(p, _)| *p == n.path).map(|(_, d)| d.clone()).unwrap_or_else(|| n.content())
     }
 
     /// A made-up device on Argus firmware with a few folders. No real device's names or
@@ -179,7 +210,16 @@ impl FakeFlipper {
         for i in 0..19 {
             nodes.push(Node { path: format!("/ext/subghz/signal_{i:02}.sub"), dir: false, size: 100 + i });
         }
-        FakeFlipper { protobuf_version: (0, 25), devinfo, legacy_info, nodes, sd_card: true, fault: Fault::None, hostile: Vec::new() }
+        FakeFlipper {
+            protobuf_version: (0, 25),
+            devinfo,
+            legacy_info,
+            nodes,
+            sd_card: true,
+            fault: Fault::None,
+            hostile: Vec::new(),
+            contents: Vec::new(),
+        }
     }
 
     /// Serves one connection until the client closes it. Returns what the client sent.
@@ -336,7 +376,7 @@ impl FakeFlipper {
             Some(Content::StorageReadRequest(r)) => match self.nodes.iter().find(|n| n.path == r.path && !n.dir) {
                 None => send(io, error(CommandStatus::ErrorStorageNotExist))?,
                 Some(n) => {
-                    let mut data = n.content();
+                    let mut data = self.data_of(n);
                     match self.fault {
                         Fault::ShortRead if !data.is_empty() => {
                             data.pop();
@@ -365,7 +405,7 @@ impl FakeFlipper {
                 None => send(io, error(CommandStatus::ErrorStorageNotExist))?,
                 Some(n) => {
                     use md5::Digest;
-                    let md5sum: String = md5::Md5::digest(n.content()).iter().map(|b| format!("{b:02x}")).collect();
+                    let md5sum: String = md5::Md5::digest(self.data_of(n)).iter().map(|b| format!("{b:02x}")).collect();
                     send(io, ok(Content::StorageMd5sumResponse(pb_storage::Md5sumResponse { md5sum }), false))?;
                 }
             },

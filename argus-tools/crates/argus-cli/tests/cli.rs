@@ -281,3 +281,25 @@ fn over_a_pseudo_terminal() {
     assert!(out.is_file());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn capture_pull_into_a_datastore() {
+    let dir = tempdir();
+    let db = dir.join("chymaera.db");
+    let fake = FakeFlipper::standard().with_captures();
+    let r = run_with(fake.clone(), &["--datastore", db.to_str().unwrap(), "capture", "pull", "/ext/nfc"]);
+    assert_eq!(r.status, 0, "{}", r.json);
+    assert_eq!(r.json["new"], 3);
+    assert_eq!(r.json["duplicates"], 0);
+    let r = run_with(fake.clone(), &["--datastore", db.to_str().unwrap(), "capture", "pull-all"]);
+    assert_eq!(r.status, 0, "{}", r.json);
+    assert_eq!((r.json["new"].as_u64(), r.json["duplicates"].as_u64()), (Some(23), Some(3)));
+    assert_eq!(r.json["missing_roots"].as_array().unwrap().len(), 5);
+
+    // refused before the device is opened: no socket is even connected
+    let r = usage(&["--socket", "/nonexistent", "--datastore", db.to_str().unwrap(), "capture", "pull", "/int"]);
+    assert_eq!((r.status, &r.json["error"]["code"]), (1, &Value::from("not_allowed")));
+    let r = usage(&["capture", "frob"]);
+    assert_eq!(r.status, 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
