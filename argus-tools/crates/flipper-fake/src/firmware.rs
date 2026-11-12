@@ -154,9 +154,18 @@ pub fn resources_archive(mismatch: bool) -> Vec<u8> {
     gzip(&tar(&entries, true))
 }
 
+/// A region bundle in the format of Flipper's `/regions/api/v0/bundle` (made-up band names and values):
+/// three countries, the default bands, and the country the server "saw" (`null` for none).
+pub fn region_bundle(country: Option<&str>) -> String {
+    let country = country.map_or("null".to_string(), |c| format!("\"{c}\""));
+    format!(
+        r#"{{"success":{{"bands":{{"BAND_A":{{"start":433050000,"end":434790000,"max_power":10,"duty_cycle":100}},"BAND_B":{{"start":868150000,"end":868550000,"max_power":14,"duty_cycle":1}},"BAND_C":{{"start":902000000,"end":928000000,"max_power":30,"duty_cycle":100}},"BAND_D":{{"start":312000000,"end":316000000,"max_power":-5,"duty_cycle":0}}}},"countries":{{"DE":["BAND_A","BAND_B"],"US":["BAND_C","BAND_D","BAND_A"],"JP":["BAND_D"]}},"country":{country},"default":["BAND_A","BAND_D"]}}}}"#
+    )
+}
+
 /// Writes the firmware folder into `dir`, which must not exist: `directory.json` (one "release"
-/// channel, one version, its four files for target f7) and the files, plus `firmware.dfu`, `radio.bin`
-/// and `ob.data` as plain files for argus-cli. `resources_mismatch`: see [`resources_archive`] (its SHA-256 in
+/// channel, one version, its four files for target f7) and the files, `bundle` (the region bundle, country
+/// `DE`), plus `firmware.dfu`, `radio.bin` and `ob.data` as plain files for argus-cli. `resources_mismatch`: see [`resources_archive`] (its SHA-256 in
 /// `directory.json` is right, so only the app's own check can catch it).
 pub fn write(dir: &Path, resources_mismatch: bool) -> io::Result<()> {
     std::fs::create_dir(dir)?;
@@ -180,6 +189,7 @@ pub fn write(dir: &Path, resources_mismatch: bool) -> io::Result<()> {
         list.join(",")
     );
     std::fs::write(dir.join("directory.json"), directory)?;
+    std::fs::write(dir.join("bundle"), region_bundle(Some("DE")))?;
     std::fs::write(dir.join("firmware.dfu"), firmware())?;
     std::fs::write(dir.join("radio.bin"), radio())?;
     std::fs::write(dir.join("ob.data"), OB_DATA)

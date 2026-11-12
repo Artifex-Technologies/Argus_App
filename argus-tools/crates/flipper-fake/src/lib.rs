@@ -22,6 +22,7 @@ pub mod archives;
 pub mod dfu;
 pub mod firmware;
 pub mod storage;
+pub mod update_server;
 
 /// Received bytes kept for the transcript.
 const MAX_RECORD: usize = 1 << 20;

@@ -136,9 +136,9 @@ pub fn fus_info_table() -> Vec<u8> {
 
 /// An OTP area holding valid factory information (format 2, as the factory writes it) for the made-up
 /// device of `FakeFlipper::standard`: name "Fakeflip", hardware 12, target 7, body 9, connect 6, color 1,
-/// region 0. The C++ app names a device in its bootloader by it, and must find the same name as on the
+/// `region` (0 is the development region). The C++ app names a device in its bootloader by it, and must find the same name as on the
 /// firmware side to see "the same device back". The rest of the OTP is unprogrammed (0xFF).
-pub fn factory_otp() -> Vec<u8> {
+pub fn factory_otp(region: u8) -> Vec<u8> {
     let mut otp = vec![0xFF; 1024];
     let mut info = Vec::with_capacity(32);
     info.extend(0xBABEu16.to_le_bytes());
@@ -146,7 +146,7 @@ pub fn factory_otp() -> Vec<u8> {
     info.extend(1_700_000_000u32.to_le_bytes());
     info.extend([12, 7, 9, 6, 1, 0]); // version, target, body, connect, display, reserved
     info.extend(0u16.to_le_bytes());
-    info.extend([1, 0]); // color, region
+    info.extend([1, region]); // color, region
     info.extend(0u16.to_le_bytes());
     info.extend(0u32.to_le_bytes());
     info.extend(b"Fakeflip");

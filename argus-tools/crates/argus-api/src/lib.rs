@@ -13,5 +13,5 @@ pub mod bridge;
 pub mod device;
 pub mod eventlog;
 pub mod pcap;
-pub mod qjson;
+pub use qjson;
 pub mod server;

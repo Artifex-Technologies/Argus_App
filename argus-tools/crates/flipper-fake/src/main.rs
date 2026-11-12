@@ -37,8 +37,13 @@
 //! `/ext/Manifest` (src/firmware.rs); `--start-firmware`: the chip starts as the firmware on the
 //! pseudo-terminal and turns into its bootloader when asked to reboot into DFU (the legacy update);
 //! `--old-radio`: devinfo reports wireless stack 1.16.3, older than the update's 1.17.3.
-//! `flipper-fake --write-firmware DIR [--resources-mismatch]` writes a made-up update folder (`directory.json` and its files) for
-//! the C++ app's test hook `ARGUS_TEST_FIRMWARE_DIR` (src/firmware.rs) and exits.
+//! `--region N`: the device's built-in region (devinfo and the OTP's factory information; default 0, the
+//! development region, which needs no region data).
+//! `flipper-fake --write-firmware DIR [--resources-mismatch]` writes a made-up update folder (`directory.json`, its files
+//! and the region `bundle`) for the C++ app's test hook `ARGUS_TEST_FIRMWARE_DIR` (src/firmware.rs) and exits.
+//! `flipper-fake --update-server DIR --ca-out FILE` serves such a folder over HTTPS on 127.0.0.1 (src/update_server.rs)
+//! with a test CA made at start and written to FILE, prints `listening https://127.0.0.1:PORT`, serves until its standard
+//! input closes, then prints the requests it saw.
 //!
 //! `flipper-fake --write-archives DIR` writes the restore test archives (`good-*.tgz` that
 //! must restore, `hostile-*.tgz` that must be refused, `bomb.tgz`) and `hostile.txt` (name and
@@ -81,6 +86,34 @@ fn usage() -> ExitCode {
     ExitCode::from(2)
 }
 
+/// `--update-server DIR --ca-out FILE`: the HTTPS stand-in for Flipper's update server (src/update_server.rs)
+/// on 127.0.0.1, its test CA written to FILE (which must not exist); prints `listening https://127.0.0.1:PORT`
+/// and serves until its standard input closes, then prints the requests it saw (`GET PATH`).
+fn serve_updates(dir: &std::path::Path, ca_out: &std::path::Path) -> ExitCode {
+    use flipper_fake::update_server::{TestCa, UpdateServer};
+    let ca = TestCa::new();
+    let written =
+        std::fs::OpenOptions::new().write(true).create_new(true).open(ca_out).and_then(|mut f| f.write_all(ca.ca_pem().as_bytes()));
+    if let Err(e) = written {
+        eprintln!("flipper-fake: {}: {e}", ca_out.display());
+        return ExitCode::from(1);
+    }
+    let server = match UpdateServer::start(dir, &ca) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("flipper-fake: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    println!("listening {}", server.base());
+    let _ = io::stdout().flush();
+    let _ = io::copy(&mut io::stdin(), &mut io::sink());
+    for r in server.requests.lock().expect("log").iter() {
+        println!("{r}");
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let mut socket: Option<PathBuf> = None;
     let mut pty = false;
@@ -95,6 +128,7 @@ fn main() -> ExitCode {
     let mut fail_write_at: Option<u32> = None;
     let mut fus_never_settles = false;
     let mut start_firmware = false;
+    let mut region = 0u8;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -130,6 +164,23 @@ fn main() -> ExitCode {
                 };
             }
             "--recovery" => recovery = args.next().map(PathBuf::from),
+            "--region" => match args.next().and_then(|n| n.parse::<u8>().ok()) {
+                Some(n) => {
+                    region = n;
+                    for (k, v) in fake.devinfo.iter_mut() {
+                        if k == "hardware.region.builtin" {
+                            *v = n.to_string();
+                        }
+                    }
+                }
+                None => return usage(),
+            },
+            "--update-server" => {
+                let (Some(dir), Some("--ca-out"), Some(ca)) = (args.next(), args.next().as_deref(), args.next()) else {
+                    return usage();
+                };
+                return serve_updates(&PathBuf::from(dir), &PathBuf::from(ca));
+            }
             "--fus" => match args.next().as_deref() {
                 Some("running") => fus = [0xFF, 0xFE],
                 Some("idle") => fus = [0, 0],
@@ -185,7 +236,7 @@ fn main() -> ExitCode {
         let faults = dfu::Faults {
             fus_model: true,
             fus: Some(fus),
-            otp: Some(dfu::factory_otp()),
+            otp: Some(dfu::factory_otp(region)),
             fail_write_at,
             fus_never_settles,
             ..dfu::Faults::default()

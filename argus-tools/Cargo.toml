@@ -7,7 +7,7 @@ description = "Non-UI logic for Argus_App: firmware package app extraction, FAP 
 publish = false
 
 [workspace]
-members = [".", "crates/flipper-rpc", "crates/flipper-fake", "crates/argus-cli", "crates/argus-capture", "crates/argus-api", "crates/flipper-dfu"]
+members = [".", "crates/flipper-rpc", "crates/flipper-fake", "crates/argus-cli", "crates/argus-capture", "crates/argus-api", "crates/flipper-dfu", "crates/qjson", "crates/flipper-updates"]
 
 [lib]
 name = "argus_tools"

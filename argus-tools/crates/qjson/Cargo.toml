@@ -1,0 +1,10 @@
+[package]
+name = "qjson"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "JSON as Qt 6 reads and writes it (QJsonDocument), written from scratch and checked against Qt itself; shared by the Sarina API server and the update and region parsers"
+publish = false
+
+[dependencies]
+serde_json = "1"

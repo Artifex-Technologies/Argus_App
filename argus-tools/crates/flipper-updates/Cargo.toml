@@ -1,0 +1,21 @@
+[package]
+name = "flipper-updates"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Flipper's update directory and region bundle for Argus: the C++ app's update registry and region provisioning, read as Qt reads them, fetched over HTTPS (rustls, system roots) with every download bounded and hash-checked"
+publish = false
+
+[dependencies]
+qjson = { path = "../qjson" }
+flipper-rpc = { path = "../flipper-rpc" }
+prost = "0.14"
+sha2 = "0.10"
+hex = "0.4"
+ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+
+[dev-dependencies]
+flipper-fake = { path = "../flipper-fake" }
+tempfile = "3"
