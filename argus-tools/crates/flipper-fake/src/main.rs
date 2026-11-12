@@ -23,6 +23,20 @@
 //! `--read-only` refuses every change with "access denied" (a write-protected or failing card).
 //! A reboot or factory reset request ends the session, as the device leaves USB.
 //!
+//! `flipper-fake --recovery DIR [--fus running|idle|stuck|never-settles] [--no-sd] [--fail-write-at HEX]` is one Flipper across
+//! its lives, for comparing the full repair (`compare-repair.sh`): the fake bootloader (with factory
+//! information in its OTP) on the Unix socket `DIR/dfu.sock`, gone after every reset and back while the
+//! chip boots into it; once the chip boots its firmware, the fake Flipper on a pseudo-terminal (printed as
+//! `pty /dev/pts/N` at the start). `DIR/state` says which is plugged in (`dfu N`, `serial N`, `none`; N counts the chip's lives), for the
+//! C++ app's test hook `ARGUS_TEST_DEVICE_STATE`. It runs until its standard input closes, then writes
+//! `DIR/dfu.log` (every bootloader request, `SESSION n` where each connection began), `DIR/flash.bin`,
+//! `DIR/chip.txt` (option bytes, OTP, FUS state, resets), `DIR/requests.txt` (the RPC requests) and
+//! `DIR/dump.txt` (the storage). `--fus`: the wireless stack running (default), the FUS running, or a FUS
+//! stuck in a state the repair does not know, or one that never finishes deleting the wireless stack; `--fail-write-at HEX`: the data block written over that
+//! address fails (errPROG).
+//! `flipper-fake --write-firmware DIR` writes a made-up update folder (`directory.json` and its files) for
+//! the C++ app's test hook `ARGUS_TEST_FIRMWARE_DIR` (src/firmware.rs) and exits.
+//!
 //! `flipper-fake --write-archives DIR` writes the restore test archives (`good-*.tgz` that
 //! must restore, `hostile-*.tgz` that must be refused, `bomb.tgz`) and `hostile.txt` (name and
 //! reason), `update.tgz` and `update-bad-manifest.tgz` (update packages) into DIR, which must not
@@ -34,7 +48,7 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use flipper_fake::{describe, pty, FakeFlipper, Fault, Transcript};
+use flipper_fake::{describe, dfu, pty, FakeFlipper, Fault, Transcript};
 
 fn parse_fault(name: &str) -> Option<Fault> {
     Some(match name {
@@ -73,6 +87,10 @@ fn main() -> ExitCode {
     let mut dump: Option<PathBuf> = None;
     let mut print_dump = false;
     let mut fake = FakeFlipper::standard();
+    let mut recovery: Option<PathBuf> = None;
+    let mut fus = [0xFF, 0xFE];
+    let mut fail_write_at: Option<u32> = None;
+    let mut fus_never_settles = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -89,6 +107,33 @@ fn main() -> ExitCode {
             "--changed-int" => fake = fake.with_changed_int(),
             "--int-conflict" => fake = fake.with_int_conflict(),
             "--read-only" => fake.read_only = true,
+            "--write-firmware" => {
+                return match args.next() {
+                    Some(dir) => match flipper_fake::firmware::write(&PathBuf::from(&dir)) {
+                        Ok(()) => ExitCode::SUCCESS,
+                        Err(e) => {
+                            eprintln!("flipper-fake: {dir}: {e}");
+                            ExitCode::from(1)
+                        }
+                    },
+                    None => usage(),
+                }
+            }
+            "--recovery" => recovery = args.next().map(PathBuf::from),
+            "--fus" => match args.next().as_deref() {
+                Some("running") => fus = [0xFF, 0xFE],
+                Some("idle") => fus = [0, 0],
+                Some("stuck") => fus = [0x30, 0x02],
+                Some("never-settles") => {
+                    fus = [0xFF, 0xFE];
+                    fus_never_settles = true;
+                }
+                _ => return usage(),
+            },
+            "--fail-write-at" => match args.next().and_then(|a| u32::from_str_radix(a.trim_start_matches("0x"), 16).ok()) {
+                Some(a) => fail_write_at = Some(a),
+                None => return usage(),
+            },
             "--write-archives" => {
                 return match args.next() {
                     Some(dir) => write_archives(&PathBuf::from(dir)),
@@ -113,6 +158,26 @@ fn main() -> ExitCode {
     if print_dump {
         print!("{}", fake.dump());
         return ExitCode::SUCCESS;
+    }
+    if let Some(dir) = recovery {
+        if pty || socket.is_some() {
+            return usage();
+        }
+        let faults = dfu::Faults {
+            fus_model: true,
+            fus: Some(fus),
+            otp: Some(dfu::factory_otp()),
+            fail_write_at,
+            fus_never_settles,
+            ..dfu::Faults::default()
+        };
+        return match serve_recovery(&dir, faults, fake) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("flipper-fake: {}: {e}", dir.display());
+                ExitCode::from(1)
+            }
+        };
     }
     if pty == socket.is_some() {
         return usage();
@@ -204,4 +269,132 @@ fn write_archives(dir: &std::path::Path) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Waits until a client opens the pseudo-terminal, or `stop` is set (false then).
+fn wait_for_client_or(port: &serialport::TTYPort, stop: &std::sync::atomic::AtomicBool) -> bool {
+    use nix::poll::{poll, PollFd, PollFlags};
+    use std::os::fd::AsRawFd;
+    use std::sync::atomic::Ordering;
+    while !stop.load(Ordering::SeqCst) {
+        let mut fds = [PollFd::new(port.as_raw_fd(), PollFlags::POLLIN)];
+        match poll(&mut fds, 50) {
+            Ok(_) if fds[0].revents().is_some_and(|r| r.contains(PollFlags::POLLHUP)) => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            Ok(_) => return true,
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// `--recovery DIR` (see the top of this file).
+fn serve_recovery(dir: &std::path::Path, faults: dfu::Faults, fake: FakeFlipper) -> io::Result<()> {
+    use serialport::SerialPort;
+    use std::io::Read;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let state = dir.join("state");
+    let write_state = {
+        let (dir, state) = (dir.to_path_buf(), state.clone());
+        move |s: &str| {
+            let tmp = dir.join("state.tmp");
+            let _ = std::fs::write(&tmp, s).and_then(|()| std::fs::rename(&tmp, &state));
+        }
+    };
+    write_state("none");
+
+    let (mut master, slave) = serialport::TTYPort::pair().map_err(io::Error::from)?;
+    let name = slave.name().unwrap_or_default();
+    drop(slave);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let booted = Arc::new(AtomicBool::new(false));
+
+    // the firmware side: sessions on the pseudo-terminal once the chip has booted its firmware
+    let (stop2, booted2) = (stop.clone(), booted.clone());
+    let rpc = std::thread::spawn(move || {
+        let mut all: Vec<Transcript> = Vec::new();
+        while !booted2.load(Ordering::SeqCst) && !stop2.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for _ in 0..16 {
+            if !wait_for_client_or(&master, &stop2) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            match fake.serve(&mut pty::PtyMaster { port: &mut master }) {
+                Ok(t) => {
+                    let left = t.left;
+                    all.push(t);
+                    if left {
+                        pty::wait_for_close(&master);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        (fake, all)
+    });
+
+    let sock = dir.join("dfu.sock");
+    let (stop3, booted3, sock2) = (stop.clone(), booted.clone(), sock.clone());
+    let chip = std::thread::spawn(move || {
+        // the chip's lives are counted, so a reader that misses a short absence still sees a new device
+        let mut lives = 0;
+        dfu::serve_lives(dfu::FakeDfu::new(faults), &sock2, Duration::from_millis(100), &stop3, &mut |life| match life {
+            dfu::Life::Bootloader => {
+                lives += 1;
+                write_state(&format!("dfu {lives}"));
+            }
+            dfu::Life::Gone => write_state("none"),
+            dfu::Life::Firmware => {
+                lives += 1;
+                booted3.store(true, Ordering::SeqCst);
+                write_state(&format!("serial {lives}"));
+            }
+        })
+    });
+    println!("pty {name}");
+    println!("listening {}", sock.display());
+    let _ = io::stdout().flush();
+
+    // until the harness closes our standard input
+    let mut sink = Vec::new();
+    let _ = io::stdin().take(1 << 20).read_to_end(&mut sink);
+    stop.store(true, Ordering::SeqCst);
+
+    let f = chip.join().map_err(|_| io::Error::other("the bootloader thread panicked"))?;
+    let (fake, transcripts) = rpc.join().map_err(|_| io::Error::other("the firmware thread panicked"))?;
+
+    std::fs::write(dir.join("dfu.log"), dfu::log_with_sessions(&f).join("\n") + "\n")?;
+    std::fs::write(dir.join("flash.bin"), &f.flash)?;
+    let ws = &f.sram[0x100 + 20..0x100 + 24];
+    let chip_text = format!(
+        "option_bytes {}\notp {}\nfus {}\nfus_commands {}\nwireless_stack {}.{}.{}\nerased_pages {}\nresets {}\nbooted_firmware {}\n",
+        dfu::hex(&f.option_bytes),
+        dfu::hex(&f.otp),
+        dfu::hex(&f.fus),
+        dfu::hex(&f.fus_commands),
+        ws[3],
+        ws[2],
+        ws[1],
+        f.erased_pages.len(),
+        f.resets,
+        f.booted_firmware
+    );
+    std::fs::write(dir.join("chip.txt"), chip_text)?;
+    let mut text = String::new();
+    for (i, t) in transcripts.iter().enumerate() {
+        for m in &t.requests {
+            text.push_str(&format!("{} {}\n", i + 1, describe(m)));
+        }
+    }
+    std::fs::write(dir.join("requests.txt"), text)?;
+    std::fs::write(dir.join("dump.txt"), fake.dump())?;
+    let _ = std::fs::remove_file(&state);
+    Ok(())
 }

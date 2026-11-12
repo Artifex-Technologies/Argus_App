@@ -27,6 +27,9 @@ private slots:
     void onDownloadProgress(qint64 received, qint64 total);
 
 private:
+    void checkFile(QIODevice *outputFile);
+    bool fetchTestFile(const QString &remoteUrl, QIODevice *outputFile);
+
     QNetworkAccessManager *m_manager;
     QByteArray m_expectedChecksum;
 };

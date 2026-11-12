@@ -11,6 +11,7 @@ flipper-rpc = { path = "../flipper-rpc" }
 flipper-dfu = { path = "../flipper-dfu" }
 prost = "0.14"
 md-5 = "0.10"
+sha2 = "0.10"
 serialport = { version = "4.10", default-features = false }
 nix = { version = "0.26", default-features = false, features = ["poll"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

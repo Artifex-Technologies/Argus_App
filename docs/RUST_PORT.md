@@ -169,6 +169,35 @@ and resets when its option bytes are written. Against the C++ code before the fi
 744 of the 2002 files and all 600 encodings differed; now all agree. `tests/wb55.rs` (6 tests) checks the Rust side
 alone.
 
+**The full repair against the C++ app's, across the chip's resets.** The C++ `FullRepairOperation` needs the whole
+backend: the device registry, hot-plug, the update server, both transports. Test hooks (`backend/testhooks.h`; unset,
+nothing changes) let `qFlipper-cli` run it on the fakes: `ARGUS_TEST_DFU_SOCKET` makes `dfu/libusb/usbdevice.cpp` send
+each USB request to a Unix socket as one line of `flipper_dfu::line` instead of calling libusb (only the libusb calls
+are replaced; the retries and checks around them stay); `ARGUS_TEST_DEVICE_STATE` makes the registry read a state file
+(`dfu N`, `serial N`, `none`; N counts the chip's lives, so a reset that comes and goes between two reads is still a
+device leaving and coming back, as queued hot-plug events are) instead of watching USB; `ARGUS_TEST_FIRMWARE_DIR`
+makes `RemoteFileFetcher` read the update directory and every file from a local folder by the file name of its URL,
+with the same SHA-256 check, and while any hook is set it never uses the network. `flipper-fake --recovery DIR` is one
+Flipper across its lives: the fake bootloader on `DIR/dfu.sock` with valid factory information in its OTP (the C++ app
+names a device in DFU by it and must find the same name, `Fakeflip`, on the firmware side), gone from the moment a
+reset happens (before the answer that saw it goes out) and back 100 ms later while nBOOT0 is 0, then the fake Flipper
+on a pseudo-terminal once the chip boots its firmware. The FUS model resets the chip right after the answer that asks
+for it (the second state read while the wireless stack runs, the end of an upgrade, starting the stack).
+`flipper-fake --write-firmware DIR` writes a made-up update folder: `directory.json`, a two-element firmware `.dfu`,
+`core2_firmware.tgz` (manifest and image), `scripts.tgz` (Flipper's `ob.data`) and `resources.tgz`.
+`argus-tools/crates/flipper-fake/compare-repair.sh` runs `qFlipper-cli` (no command: on a device in recovery mode,
+the full repair) and `argus-cli recovery repair` with the same files in six scenarios (the wireless stack running,
+the FUS already running, a FUS stuck in an unknown state, a FUS that never finishes deleting the stack, a flash block of
+the wireless stack refused, a flash block of the firmware refused) and compares the exit status, every bootloader request in order, the whole 1 MiB flash, the
+option bytes (RDP 0xAA, untouched), OTP, FUS state and commands, the wireless stack version, the pages erased, the
+resets and whether the chip booted its firmware. The C++ app's own identification of the device (an OTP read each
+time it appears, which leaves the chip in dfuUPLOAD-IDLE, so its next connection starts with an abort) is left out of
+the request comparison; argus-cli does not name the device. Result on 2026-11-12: 87 checks, all passed; the two do
+the same requests in the same order (450 in the main scenario, 1824 when the FUS never settles: 120 state reads each)
+and leave the same bytes. No difference turned up in the bootloader part, so nothing needed fixing there. The C++ run then goes on over
+RPC on the pseudo-terminal: its device probe (and it **sets the clock**), the resources onto `/ext` (it first deletes
+every file it is about to write, then writes them), no region data (development region), a reboot.
+
 **The C++ CLI against the same fake.** The C++ app finds a Flipper by USB VID/PID. A test-only hook
 (`backend/testhooks.h`) changes that only when `ARGUS_TEST_SERIAL_PORT` names a port: the registry then does not
 watch USB at all (a real Flipper plugged in is never seen), uses that port as the one device, does not raise DTR
@@ -518,12 +547,19 @@ Found while porting the full repair, and **fixed in both versions** on 2026-11-1
 - **The FUS polls could run for ever.** `WirelessStackDownloadOperation` polled the wireless status every second
   while the FUS deleted or installed the stack, until it reported a state the flow knows; a FUS stuck in another state
   (or a device that answered, but not with that) kept it polling, and with the device online the operation's timeout
-  never started. Both now give up after 120 polls. (Rust: `tests/recovery.rs`; the C++ change is not covered by a
-  comparison yet, see Resume here.)
+  never started. Both now give up after 120 polls. (Rust: `tests/recovery.rs`; both: the `never-settles` scenario of
+  `compare-repair.sh`, the same 120 state reads.)
 
 A regression of my own, caught by porting the capture sync: once `GetFileTreeOperation` left unsafe names out,
 the C++ capture pull stopped counting them as failed (as `stagedPath` used to). `CaptureSync` now counts every
 refused name as failed again, and the Rust pull does the same.
+
+For the full repair: the C++ app names the device in its bootloader from the OTP each time it appears and
+argus-cli does not (it has one device, the one on `--dfu-socket`); a wireless stack step that fails ends the C++
+repair with "SUCCESS", exit 0 and the failure only in its log (the chip then runs its firmware without a wireless
+stack), while argus-cli also exits 0 but reports `"radio": {"installed": false, "error": ...}`; the C++ app waits for
+re-enumeration through hot-plug and argus-cli by trying the socket again (at most 30 s, as the C++ timeout); and
+argus-cli stops when the chip boots its firmware (the steps over RPC after that are not ported yet).
 
 What still differs, on purpose: the C++ app probes the device before a backup (and **sets its clock**) and starts the
 screen stream and a status screen; the Rust CLI only reads what the command needs. For writes: the Rust CLI asks for
@@ -552,15 +588,11 @@ failed, and does not read `devinfo` or start the screen.
    ones (`crates/flipper-dfu`; the nusb transport behind the `usb` feature, unused by tests and by any command).
    The STM32WB55 layer, `recovery.cpp`'s flows and `argus-cli recovery` (behind `--yes`, `--dfu-socket` only) are done
    too, and the full repair (`argus-cli recovery repair`, fake only). Left for phase 6:
-   - **Compare the repair with the C++ app on the fakes.** The C++ `FullRepairOperation` needs the whole backend, so it
-     needs test hooks (`backend/testhooks.h`, unset = no change): `ARGUS_TEST_DFU_SOCKET` in
-     `dfu/libusb/usbdevice.cpp` (the line protocol over a Unix socket instead of libusb); the registry polling a state
-     file the harness writes (`dfu`, `serial`, `none`) instead of USB hot-plug, so resets look like re-enumeration;
-     OTP in the fake holding a valid `FactoryInfo` (the DFU device must carry the serial device's name to be "the same
-     device back online"); `FirmwareHelper` reading a local folder (`ARGUS_TEST_FIRMWARE_DIR`) instead of the update
-     server; and the RPC fake on its pseudo-terminal for the steps after the firmware boots (assets, region, restart).
-     The legacy update (`LegacyUpdateOperation`) also backs up `/int` first and restores it after: the same hooks
-     cover it.
+   - The repair is compared with the C++ `FullRepairOperation` on the fakes (`compare-repair.sh`, section 4; in
+     `linux.yml`): same bootloader requests, flash and option bytes in six scenarios. Still to compare: the legacy
+     update (`LegacyUpdateOperation`: backup of `/int` over RPC, reboot into DFU, firmware, leave, restore). The hooks
+     cover it; the fake needs to start as the firmware on its pseudo-terminal and turn into the bootloader when it
+     gets a reboot into DFU (`--no-sd` then selects the legacy path in the C++ app).
    - The steps on the firmware after a repair (assets from the bundle, region data, restart) in Rust.
    - Wiring `flipper_dfu::usb` into argus-cli opens a real USB device: only when I say so, with me watching, and
      never from a test.

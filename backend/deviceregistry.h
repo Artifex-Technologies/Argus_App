@@ -44,6 +44,7 @@ public slots:
 
 private slots:
     void processDevice();
+    void pollTestDeviceState();
 
 private:
     void setError(BackendError::ErrorType newError);
@@ -53,6 +54,7 @@ private:
     DeviceList m_devices;
     BackendError::ErrorType m_error;
     bool m_isQueryInProgress;
+    QString m_testDeviceState;
 };
 
 }

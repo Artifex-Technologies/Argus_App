@@ -141,7 +141,8 @@ fn connect(path: &Path) -> Result<Device, String> {
 }
 
 /// The bootloader on `--dfu-socket`, opened again for every step: after a reset it is waited for
-/// (bounded) until it answers a status request.
+/// (bounded) until its socket is back, as the C++ app waits for the device to re-enumerate. Opening
+/// sends nothing (the C++ app's `beginTransaction` sends nothing either).
 struct SocketBootloader<'a> {
     path: &'a Path,
     poll: Duration,
@@ -153,10 +154,8 @@ impl Bootloader for SocketBootloader<'_> {
     fn open(&mut self) -> Result<Device, recovery::Error> {
         let deadline = Instant::now() + REENUMERATION;
         loop {
-            if let Ok(mut d) = connect(self.path) {
-                if d.get_status().is_ok() {
-                    return Ok(d);
-                }
+            if let Ok(d) = connect(self.path) {
+                return Ok(d);
             }
             if Instant::now() >= deadline {
                 let gone =

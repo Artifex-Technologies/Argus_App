@@ -61,6 +61,12 @@ pub struct Faults {
     /// into it. A reset brings the chip back in the bootloader when nBOOT0 is 0, else it boots its
     /// firmware (`booted_firmware`) and the bootloader is gone.
     pub fus_model: bool,
+    /// With `fus_model`: the FUS never finishes deleting the wireless stack ("service ongoing" for ever).
+    pub fus_never_settles: bool,
+    /// A data block written over this address fails with errPROG (as a flash that will not program).
+    pub fail_write_at: Option<u32>,
+    /// The OTP area (1 KiB) as given (default: bytes counting up, no factory information).
+    pub otp: Option<Vec<u8>>,
 }
 
 pub const FUS_STATUS: u32 = 0xFFFF_0054;
@@ -128,6 +134,26 @@ pub fn fus_info_table() -> Vec<u8> {
     t
 }
 
+/// An OTP area holding valid factory information (format 2, as the factory writes it) for the made-up
+/// device of `FakeFlipper::standard`: name "Fakeflip", hardware 12, target 7, body 9, connect 6, color 1,
+/// region 0. The C++ app names a device in its bootloader by it, and must find the same name as on the
+/// firmware side to see "the same device back". The rest of the OTP is unprogrammed (0xFF).
+pub fn factory_otp() -> Vec<u8> {
+    let mut otp = vec![0xFF; 1024];
+    let mut info = Vec::with_capacity(32);
+    info.extend(0xBABEu16.to_le_bytes());
+    info.extend([2, 0]); // format 2, reserved
+    info.extend(1_700_000_000u32.to_le_bytes());
+    info.extend([12, 7, 9, 6, 1, 0]); // version, target, body, connect, display, reserved
+    info.extend(0u16.to_le_bytes());
+    info.extend([1, 0]); // color, region
+    info.extend(0u16.to_le_bytes());
+    info.extend(0u32.to_le_bytes());
+    info.extend(b"Fakeflip");
+    otp[..32].copy_from_slice(&info);
+    otp
+}
+
 pub struct FakeDfu {
     pub log: Vec<String>,
     pub flash: Vec<u8>,
@@ -141,6 +167,8 @@ pub struct FakeDfu {
     /// Resets so far, and whether the last one booted the firmware.
     pub resets: usize,
     pub booted_firmware: bool,
+    /// Where each client connection's requests start in `log` (multi-connection servers only).
+    pub sessions: Vec<usize>,
     reset_pending: bool,
     not_running_reads: usize,
     fus_countdown: usize,
@@ -182,7 +210,7 @@ impl FakeDfu {
             log: Vec::new(),
             flash: vec![0xFF; FLASH_SIZE],
             option_bytes,
-            otp: (0..1024).map(|i| i as u8).collect(),
+            otp: faults.otp.clone().unwrap_or_else(|| (0..1024).map(|i| i as u8).collect()),
             sram,
             fus,
             erased_pages: Vec::new(),
@@ -190,6 +218,7 @@ impl FakeDfu {
             left: false,
             resets: 0,
             booted_firmware: false,
+            sessions: Vec::new(),
             reset_pending: false,
             not_running_reads: 0,
             fus_countdown: 0,
@@ -327,7 +356,7 @@ impl FakeDfu {
                         match *c {
                             command::FUS_FW_DELETE => {
                                 self.fus = vec![0x30, 0];
-                                self.fus_countdown = 2;
+                                self.fus_countdown = if self.faults.fus_never_settles { 0 } else { 2 };
                                 self.fus_after = Some(([0, 0], false));
                                 self.set_wireless_version([0, 0, 0]);
                             }
@@ -353,6 +382,13 @@ impl FakeDfu {
                 let flash = self.alt == 0 && address < SRAM2A;
                 if self.alt == 0 && address >= FUS_STATUS {
                     return ERR_TARGET;
+                }
+                if self
+                    .faults
+                    .fail_write_at
+                    .is_some_and(|a| (u64::from(address)..u64::from(address) + data.len() as u64).contains(&u64::from(a)))
+                {
+                    return ERR_PROG;
                 }
                 let Some((mem, off)) = self.region(address, data.len()) else { return ERR_ADDRESS };
                 if flash && mem[off..off + data.len()].iter().any(|&b| b != 0xFF) {
@@ -516,6 +552,16 @@ impl Transport for FakeDfu {
 /// `ALT n`, `OUT req value hex`, `IN req value len`, `DESC`, `STRING alt` get an answer line;
 /// `SLEEP ms` is recorded and gets none. None also for a line that is not a request.
 pub fn answer(f: &mut FakeDfu, line: &str) -> Option<String> {
+    let a = answer_request(f, line);
+    // a reset the FUS model asked for (a second state read while the wireless stack runs, the end of
+    // an upgrade, starting the wireless stack) happens right after this answer
+    if f.reset_pending {
+        f.reset();
+    }
+    a
+}
+
+fn answer_request(f: &mut FakeDfu, line: &str) -> Option<String> {
     let parts: Vec<&str> = line.split(' ').collect();
     let num = |s: &str| s.parse::<u64>().ok();
     match parts[..] {
@@ -556,12 +602,22 @@ pub fn unhex(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Serves one client of the line protocol on `stream` until it closes; returns the fake.
-pub fn serve(mut f: FakeDfu, stream: std::os::unix::net::UnixStream) -> FakeDfu {
+pub fn serve(f: FakeDfu, stream: std::os::unix::net::UnixStream) -> FakeDfu {
+    serve_with(f, stream, &mut || {})
+}
+
+/// [`serve`], calling `gone` when the chip resets, before the answer to that request goes out: whoever
+/// gets that answer and opens the device again finds it gone (as USB reports a device that left).
+pub fn serve_with(mut f: FakeDfu, stream: std::os::unix::net::UnixStream, gone: &mut dyn FnMut()) -> FakeDfu {
     use std::io::{BufRead, BufReader, Write};
     let Ok(mut out) = stream.try_clone() else { return f };
     for line in BufReader::new(stream).lines() {
         let Ok(line) = line else { break };
-        if let Some(a) = answer(&mut f, &line) {
+        let a = answer(&mut f, &line);
+        if f.left {
+            gone();
+        }
+        if let Some(a) = a {
             if writeln!(out, "{a}").is_err() {
                 break;
             }
@@ -574,15 +630,27 @@ pub fn serve(mut f: FakeDfu, stream: std::os::unix::net::UnixStream) -> FakeDfu 
     f
 }
 
+/// What [`serve_lives`] reports as the chip comes and goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Life {
+    /// The bootloader is on the socket.
+    Bootloader,
+    /// The chip reset and is off the bus.
+    Gone,
+    /// The chip booted its firmware: the bootloader does not come back.
+    Firmware,
+}
+
 /// Serves the fake on a socket at `path` across resets, as a chip that leaves USB and comes back:
-/// every connection is one session; after a reset the socket goes away for `gap` and comes back if
-/// the chip is in its bootloader again, and stays away once it has booted its firmware. Runs until
-/// `stop` is set; returns the fake.
-pub fn serve_with_resets(
+/// every connection is one session; after a reset the socket goes away (before the answer that saw the
+/// reset) for `gap` and comes back if the chip is in its bootloader again, and stays away once it has
+/// booted its firmware. `life` hears each change. Runs until `stop` is set; returns the fake.
+pub fn serve_lives(
     mut f: FakeDfu,
     path: &std::path::Path,
     gap: std::time::Duration,
     stop: &std::sync::atomic::AtomicBool,
+    life: &mut dyn FnMut(Life),
 ) -> FakeDfu {
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::Ordering;
@@ -593,28 +661,60 @@ pub fn serve_with_resets(
         l
     };
     let mut listener = Some(bind());
+    life(Life::Bootloader);
     while !stop.load(Ordering::SeqCst) {
-        let Some(l) = &listener else {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            continue;
+        let accepted = match &listener {
+            Some(l) => l.accept(),
+            None => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
         };
-        match l.accept() {
+        match accepted {
             Ok((s, _)) => {
                 let _ = s.set_nonblocking(false);
-                f = serve(f, s);
-                if f.left {
-                    drop(listener.take());
+                f.sessions.push(f.log.len());
+                f = serve_with(f, s, &mut || {
+                    listener = None;
                     let _ = std::fs::remove_file(path);
-                    if !f.booted_firmware {
+                    life(Life::Gone);
+                });
+                if f.left {
+                    if f.booted_firmware {
+                        life(Life::Firmware);
+                    } else {
                         std::thread::sleep(gap);
                         f.left = false;
                         listener = Some(bind());
+                        life(Life::Bootloader);
                     }
                 }
             }
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(2)),
         }
     }
+    drop(listener);
     let _ = std::fs::remove_file(path);
     f
+}
+
+/// [`serve_lives`] without listening to the changes.
+pub fn serve_with_resets(f: FakeDfu, path: &std::path::Path, gap: std::time::Duration, stop: &std::sync::atomic::AtomicBool) -> FakeDfu {
+    serve_lives(f, path, gap, stop, &mut |_| {})
+}
+
+/// The log with a `SESSION n` line where each connection started.
+pub fn log_with_sessions(f: &FakeDfu) -> Vec<String> {
+    let mut out = Vec::with_capacity(f.log.len() + f.sessions.len());
+    let mut next = f.sessions.iter().enumerate().peekable();
+    for (i, line) in f.log.iter().enumerate() {
+        while let Some((n, _)) = next.next_if(|(_, &at)| at <= i) {
+            out.push(format!("SESSION {}", n + 1));
+        }
+        out.push(line.clone());
+    }
+    for (n, _) in next {
+        out.push(format!("SESSION {}", n + 1));
+    }
+    out
 }

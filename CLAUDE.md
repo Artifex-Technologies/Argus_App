@@ -152,6 +152,18 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — The full repair compared with the C++ app on the fakes (`compare-repair.sh`)
+- New test-only hooks in the C++ app (`backend/testhooks.h`; unset, nothing changes): `ARGUS_TEST_DFU_SOCKET` (the libusb
+  `USBDevice` sends each request to a Unix socket instead of libusb), `ARGUS_TEST_DEVICE_STATE` (the registry reads a state
+  file instead of watching USB), `ARGUS_TEST_FIRMWARE_DIR` (`RemoteFileFetcher` reads update files from a local folder;
+  with any hook set it never uses the network). `flipper-fake --recovery DIR` is one fake Flipper across resets
+  (bootloader on a socket, then the firmware on a pseudo-terminal); `--write-firmware DIR` a made-up update folder.
+- `argus-tools/crates/flipper-fake/compare-repair.sh` (also in `linux.yml`): `qFlipper-cli` (FullRepairOperation) and
+  `argus-cli recovery repair` in six scenarios: same bootloader requests in order, same flash, option bytes (RDP
+  untouched), FUS state and exit status; 87 checks pass. No bug turned up in either version's bootloader part.
+- argus-cli no longer sends a status request when it reopens the bootloader (the C++ app sends nothing there).
+- No USB device opened, no network, nothing flashed; the real Flipper was never touched.
+
 ### 2026-11-12 — `argus-cli recovery repair` (the full repair with local files, fake only)
 - `argus-cli --dfu-socket PATH recovery repair FIRMWARE.dfu OB.data [RADIO.bin] --yes`: recovery boot mode, the
   wireless stack through the FUS (delete, write below SFSA, install, version check; bounded retries), the firmware,

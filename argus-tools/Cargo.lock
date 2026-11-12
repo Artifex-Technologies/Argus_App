@@ -391,6 +391,7 @@ dependencies = [
  "nix",
  "prost",
  "serialport",
+ "sha2",
  "tar",
 ]
 

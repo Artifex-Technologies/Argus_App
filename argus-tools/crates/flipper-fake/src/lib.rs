@@ -20,6 +20,7 @@ use flipper_rpc::proto::{pb_gui, pb_property, pb_storage, pb_system};
 
 pub mod archives;
 pub mod dfu;
+pub mod firmware;
 pub mod storage;
 
 /// Received bytes kept for the transcript.

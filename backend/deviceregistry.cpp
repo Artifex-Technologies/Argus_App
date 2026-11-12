@@ -3,6 +3,7 @@
 #include <QDebug>
 #include <QMetaObject>
 #include <QTimer>
+#include <QFile>
 #include <QLoggingCategory>
 
 #include "flipperzero/helper/deviceinfohelper.h"
@@ -26,8 +27,20 @@ DeviceRegistry::DeviceRegistry(QObject *parent):
     m_error(BackendError::UnknownError),
     m_isQueryInProgress(false)
 {
-    if(Argus::isTestSerialPort()) {
-        // Test hook (testhooks.h): no USB watching at all; one device on the given port.
+    if(!Argus::testDeviceStateFile().isEmpty()) {
+        // Test hook (testhooks.h): no USB watching at all; the harness's state file says what is plugged in.
+        qCDebug(LOG_DEVREG).noquote() << "Test device state file:" << Argus::testDeviceStateFile();
+        auto *timer = new QTimer(this);
+        connect(timer, &QTimer::timeout, this, &DeviceRegistry::pollTestDeviceState);
+        timer->start(50);
+        return;
+
+    } else if(Argus::isTestDevice()) {
+        // Test hook (testhooks.h): no USB watching at all; one device on the given port (none without one).
+        if(!Argus::isTestSerialPort()) {
+            return;
+        }
+
         qCDebug(LOG_DEVREG).noquote() << "Test serial port:" << Argus::testSerialPort();
         const auto testDevice = USBDeviceInfo(FLIPPER_ZERO_VID, FLIPPER_ZERO_PID_VCP)
             .withManufacturer(QStringLiteral("Flipper Devices Inc."))
@@ -47,6 +60,65 @@ DeviceRegistry::DeviceRegistry(QObject *parent):
             .withManufacturer("Flipper Devices Inc.")
             .withProductDescription("Flipper Control Virtual ComPort")
                                  });
+}
+
+// Test hook (testhooks.h): the devices the harness's state file describes. They have no libusb device behind
+// them: the bootloader is reached over ARGUS_TEST_DFU_SOCKET, the firmware over ARGUS_TEST_SERIAL_PORT.
+static USBDeviceInfo testDeviceInfo(const QString &state)
+{
+    if(state == QStringLiteral("dfu")) {
+        return USBDeviceInfo(FLIPPER_ZERO_VID, FLIPPER_ZERO_PID_DFU)
+            .withManufacturer(QStringLiteral("STMicroelectronics"))
+            .withProductDescription(QStringLiteral("DFU in FS Mode"))
+            .withSerialNumber(QStringLiteral("argus-test-dfu"))
+            .withBackendData(QStringLiteral("argus-test-dfu"));
+    } else if(state == QStringLiteral("serial")) {
+        return USBDeviceInfo(FLIPPER_ZERO_VID, FLIPPER_ZERO_PID_VCP)
+            .withManufacturer(QStringLiteral("Flipper Devices Inc."))
+            .withProductDescription(QStringLiteral("Flipper Control Virtual ComPort"))
+            .withSerialNumber(QStringLiteral("argus-test"))
+            .withBackendData(QStringLiteral("argus-test"));
+    } else {
+        return USBDeviceInfo();
+    }
+}
+
+void DeviceRegistry::pollTestDeviceState()
+{
+    QFile file(Argus::testDeviceStateFile());
+    QString line;
+
+    if(file.open(QIODevice::ReadOnly)) {
+        line = QString::fromLatin1(file.read(64)).trimmed();
+    }
+
+    // "KIND N": N counts the device's lives, so a reset and return between two polls is still seen as one
+    // (USB hot-plug queues both events too)
+    if(line == m_testDeviceState) {
+        return;
+    }
+
+    auto kind = line.section(' ', 0, 0);
+
+    // a state without its transport is no device: nothing may fall through to libusb or a real port
+    if((kind == QStringLiteral("dfu") && Argus::testDfuSocket().isEmpty()) ||
+       (kind == QStringLiteral("serial") && !Argus::isTestSerialPort()) ||
+       (kind != QStringLiteral("dfu") && kind != QStringLiteral("serial"))) {
+        kind = QStringLiteral("none");
+    }
+
+    qCDebug(LOG_DEVREG).noquote() << "Test device state:" << m_testDeviceState << "->" << line;
+
+    const auto oldKind = m_testDeviceState.section(' ', 0, 0);
+    if(oldKind == QStringLiteral("dfu") || oldKind == QStringLiteral("serial")) {
+        removeDevice(testDeviceInfo(oldKind));
+    }
+
+    m_testDeviceState = (kind == QStringLiteral("none")) ? QStringLiteral("none") : line;
+
+    if(kind != QStringLiteral("none")) {
+        insertDevice(testDeviceInfo(kind));
+    }
 }
 
 void DeviceRegistry::setBackendLogLevel(int logLevel)
