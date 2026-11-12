@@ -41,6 +41,21 @@ pub struct Capture {
     pub local_path: String,
 }
 
+/// One row of `captures` as the Sarina API's `capture.list` reads it; `None` is SQL NULL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureRow {
+    pub id: i64,
+    pub session_id: Option<i64>,
+    pub ts: i64,
+    pub kind: String,
+    pub name: Option<String>,
+    pub source_path: Option<String>,
+    pub size: Option<i64>,
+    pub meta: Option<String>,
+    pub sha256: Option<String>,
+    pub local_path: Option<String>,
+}
+
 pub struct Store {
     conn: Connection,
     path: PathBuf,
@@ -157,22 +172,84 @@ impl Store {
 
     /// `addCapture`, outside any session (as the C++ CLI's pulls).
     pub fn add_capture(&self, c: &Capture) -> Result<i64, StoreError> {
+        self.add_capture_in(None, c)
+    }
+
+    /// `addCapture` within a session (or none). An empty sha256 or local path is stored as NULL.
+    pub fn add_capture_in(&self, session: Option<i64>, c: &Capture) -> Result<i64, StoreError> {
         let size = i64::try_from(c.size).map_err(|_| StoreError("capture too large".into()))?;
+        let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
         self.conn.execute(
             "INSERT INTO captures(session_id, ts, type, name, source_path, size, meta, sha256, local_path)
-             VALUES(NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![now_ms(), c.kind, c.name, c.source_path, size, c.meta, c.sha256, c.local_path],
+             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![session, now_ms(), c.kind, c.name, c.source_path, size, c.meta, opt(&c.sha256), opt(&c.local_path)],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
     /// `logEvent`, outside any session.
     pub fn log_event(&self, severity: Severity, source: Source, message: &str, detail: &str) -> Result<(), StoreError> {
+        self.log_event_in(None, severity, source, message, detail)
+    }
+
+    /// `logEvent` within a session (or none). An empty detail is stored as NULL, as Qt binds a null
+    /// string.
+    pub fn log_event_in(
+        &self,
+        session: Option<i64>,
+        severity: Severity,
+        source: Source,
+        message: &str,
+        detail: &str,
+    ) -> Result<(), StoreError> {
+        let detail = (!detail.is_empty()).then_some(detail);
         self.conn.execute(
-            "INSERT INTO events(session_id, ts, severity, source, message, detail) VALUES(NULL, ?, ?, ?, ?, ?)",
-            params![now_ms(), severity as i64, source as i64, message, detail],
+            "INSERT INTO events(session_id, ts, severity, source, message, detail) VALUES(?, ?, ?, ?, ?, ?)",
+            params![session, now_ms(), severity as i64, source as i64, message, detail],
         )?;
         Ok(())
+    }
+
+    /// `startSession`: the new session's id.
+    pub fn start_session(&self, name: &str, notes: &str) -> Result<i64, StoreError> {
+        let secs = now_ms() / 1000;
+        let notes = (!notes.is_empty()).then_some(notes);
+        self.conn.execute("INSERT INTO sessions(name, notes, started_at) VALUES(?, ?, ?)", params![name, notes, secs])?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// `endSession`: stamps the session's end.
+    pub fn end_session(&self, id: i64) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE sessions SET ended_at = ? WHERE id = ?", params![now_ms() / 1000, id])?;
+        Ok(())
+    }
+
+    /// `eventCount`.
+    pub fn event_count(&self) -> Result<i64, StoreError> {
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?)
+    }
+
+    /// `captures(limit)`: newest first; a negative limit is no limit (SQLite's rule, as in the C++
+    /// app).
+    pub fn capture_rows(&self, limit: i64) -> Result<Vec<CaptureRow>, StoreError> {
+        let mut q = self.conn.prepare(
+            "SELECT id, session_id, ts, type, name, source_path, size, meta, sha256, local_path FROM captures ORDER BY id DESC LIMIT ?",
+        )?;
+        let rows = q.query_map([limit], |r| {
+            Ok(CaptureRow {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                ts: r.get(2)?,
+                kind: r.get(3)?,
+                name: r.get(4)?,
+                source_path: r.get(5)?,
+                size: r.get(6)?,
+                meta: r.get(7)?,
+                sha256: r.get(8)?,
+                local_path: r.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Every capture, oldest first (for tests and comparisons).

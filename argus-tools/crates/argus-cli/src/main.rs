@@ -7,6 +7,8 @@
 //! byte stream (`--socket`) must be named. Nothing it does writes to the device; `pull` and
 //! `backup` write only new local files (they never overwrite).
 
+mod chymaera;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -34,6 +36,8 @@ const HELP: &str = "argus-cli — talk to a Flipper Zero over RPC (JSON on stdou
   backup FILE        /int as a .tar.gz the C++ app's restore reads (FILE must not exist)
   capture pull PATH  pull a capture folder (or a path inside one) into the datastore
   capture pull-all   pull every capture folder into the datastore
+  chymaera ...       serve | parse FILE | import FILE | selftest, as qFlipper-cli chymaera
+                     (plain text like it, no device: see argus-cli chymaera)
   version | help
 
   All commands only read from the device. Names the device lists that could lead outside
@@ -243,6 +247,9 @@ fn main() -> ExitCode {
         Err(Usage(m)) => return fail("usage", m, 2),
     };
     let words: Vec<&str> = cmd.words.iter().map(String::as_str).collect();
+    if words.first() == Some(&"chymaera") {
+        return chymaera::run(&cmd.words[1..]);
+    }
     match words.as_slice() {
         ["help"] | [] => {
             println!("{HELP}");

@@ -33,6 +33,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-api"
+version = "0.1.0"
+dependencies = [
+ "argus-capture",
+ "argus-tools",
+ "hex",
+ "libc",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "argus-capture"
 version = "0.1.0"
 dependencies = [
@@ -49,10 +62,12 @@ dependencies = [
 name = "argus-cli"
 version = "0.1.0"
 dependencies = [
+ "argus-api",
  "argus-capture",
  "flipper-fake",
  "flipper-rpc",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

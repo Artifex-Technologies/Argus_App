@@ -58,6 +58,18 @@ jobs:
           sh argus-tools/crates/argus-capture/tests/qt-oracle/build.sh "$RUNNER_TEMP/qt-oracle"
           (cd argus-tools && ARGUS_QT_ORACLE="$RUNNER_TEMP/qt-oracle" cargo test --locked -j4 -p argus-capture --test qt_oracle)
 
+      # The Sarina control API: the C++ server and the Rust one answer the same recorded requests byte for byte
+      # (and the C++ answers are still tests/fixtures/api_responses.txt, which argus-tools.yml replays against the
+      # Rust code); Qt's own JSON parser and the C++ pcap writer against the Rust ones.
+      - name: Compare the Sarina API servers (C++ and Rust)
+        run: |
+          pacman -S --noconfirm --needed iproute2
+          (cd argus-tools && cargo build --locked -j4 -p argus-cli -p argus-tools)
+          bash argus-tools/crates/argus-api/compare-api.sh build-release/qFlipper-cli argus-tools/target/debug/argus-cli \
+            argus-tools/target/debug/argus-tools "$RUNNER_TEMP/compare-api"
+          sh argus-tools/crates/argus-api/tests/qt-oracle/build.sh "$RUNNER_TEMP/api-oracles"
+          (cd argus-tools && ARGUS_QT_ORACLES="$RUNNER_TEMP/api-oracles" cargo test --locked -j4 -p argus-api --test qt_json --test pcap)
+
       - name: Upload the package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2, pinned by commit
         with:

@@ -13,14 +13,19 @@ contracts.
 - **Newline-delimited JSON.** One request object per line (`\n`), one response
   object per line.
 - **Off by default.** It must be started explicitly (from the Chymaera Console
-  UI, or `Chymaera.startServer(port, token)`).
+  UI, or `Chymaera.startServer(port, token)`), or headless with
+  `qFlipper-cli chymaera serve [port] [token]`. The Rust port, `argus-cli chymaera serve [port] [token]`,
+  is the same server: it answers byte for byte as the C++ one (`argus-tools/crates/argus-api`, proven
+  against it in CI; docs/RUST_PORT.md).
 - **Token always required** (since 2026-10-27, `f7d5e44`). Every request must include a
   matching `"token"` field; otherwise the response is `{"ok":false,"error":"unauthorized"}`.
   Started with a token, the server uses it. Started without one (as the console button
   does), it makes a random 256-bit token and writes it to `$XDG_RUNTIME_DIR/argus/token`
   (folder 0700, file 0600; removed on stop). If it cannot write that file, it does not
   start. Tokens are compared in constant time. Sarina's console clients read the token
-  file by default.
+  file by default. Since 2026-11-12 the port is taken before the token file is written, so a second
+  server that cannot listen (the port is in use) no longer replaces the running server's token, and
+  `serve` stopped with Ctrl+C or SIGTERM removes its token file.
 
 ### Request / response shape
 
@@ -46,12 +51,23 @@ responses. Every response has a boolean `ok`; failures carry `"error"`.
 | `session.start` | `name` (req), `notes` | `sessionId` |
 | `session.end` | — | — |
 | `capture.list` | `limit` (default 50) | `captures` (array) |
-| `capture.import` | `path` (req) | `summary` |
+| `capture.import` | `path` (req: a local `.nfc`, `.sub`, `.rfid`, `.ir`, `.ibtn`, `.pcap` or `.pcapng` file) | `summary` |
 | `device.status` | — | `connected`, `name` |
 | `capture.pull` | `path` (req: a capture folder or below one, e.g. `/ext/nfc`) | `started`, `path` |
 | `capture.pullAll` | — | `started`, `paths` (the folders it will read) |
 | `capture.library` | `query` (optional), `limit` (default 50, max 500) | `total`, `captures` (array, see below) |
 | `capture.explain` | `id` (req: 8+ hex digits of the capture's SHA-256) | `capture`, `explanation` |
+
+### `capture.import` takes only capture files (2026-11-12)
+
+`capture.import` records a file on this PC. Over the API it takes only the Flipper's capture formats and
+packet captures (`.nfc`, `.sub`, `.rfid`, `.ir`, `.ibtn`, `.pcap`, `.pcapng`); any other name fails with
+`only capture files may be imported: .nfc, .sub, …`. Before, any file this account could read was parsed,
+and the generic parser stores every `Key: Value` line of a file in `meta`, so a caller holding only the
+token could read, say, a config file with a password in it through `capture.list`. Only a regular file is
+read (a FIFO used to hang the app, `/dev/zero` never ended, a folder was recorded as a capture); those fail
+with `could not parse capture`. A file over 64 MiB is recorded unparsed. Importing in the Argus window or
+with `chymaera import` has no suffix rule (I choose those files myself), but the other rules hold there too.
 
 ### `device.status` and `capture.pull` (added 2026-09-12)
 
@@ -154,6 +170,10 @@ fail with `the capture library has not been built yet (capture index)`.
                               // v1.2: the kept copy on this machine; null on older rows
 }
 ```
+
+`session_id` is null for a capture recorded outside a session. Until 2026-11-12 the C++ app sent an empty
+string (`""`) wherever this document says null (`session_id`, `sha256`, `local_path`); it now sends null,
+as documented.
 
 The datastore (and the `pulls/` folder of received files) lives at
 `~/.local/share/Argus/chymaera/` on Linux, shared by the GUI and `qFlipper-cli` since

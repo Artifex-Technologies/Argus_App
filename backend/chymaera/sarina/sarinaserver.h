@@ -49,6 +49,8 @@ public:
 
     bool isListening() const;
     quint16 port() const;
+    // The file the token was written to when this server made it; empty when it was given.
+    QString tokenFile() const;
 
 signals:
     void listeningChanged();

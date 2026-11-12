@@ -30,6 +30,13 @@
 
 #include <QBuffer>
 #include <QTemporaryDir>
+#include <QSocketNotifier>
+
+#ifdef Q_OS_UNIX
+#include <csignal>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 using namespace Chymaera;
 
@@ -85,6 +92,17 @@ QByteArray oldStyleTar(const QList<QPair<QByteArray, QByteArray>> &files)
     }
     return out;
 }
+
+#ifdef Q_OS_UNIX
+// SIGINT/SIGTERM reach the event loop through this pair, so `serve` stops cleanly.
+int stopSignalPair[2] = {-1, -1};
+
+void onStopSignal(int)
+{
+    const char c = 1;
+    [[maybe_unused]] const auto n = ::write(stopSignalPair[0], &c, 1);
+}
+#endif
 
 // One self-test check. Prints a PASS/FAIL line and accumulates failures.
 bool check(const QString &name, bool ok, const QString &detail, int &failures)
@@ -367,9 +385,12 @@ int ChymaeraCli::cmdServe(QCoreApplication &app, const QStringList &args)
     if(!args.isEmpty()) {
         bool ok = false;
         const int p = args.first().toInt(&ok);
-        if(ok) {
-            port = p;
+        if(!ok || p < 0 || p > 65535) {
+            out() << "Not a port: " << args.first() << " (0 to 65535)\n";
+            out().flush();
+            return 1;
         }
+        port = p;
     }
     if(args.size() > 1) {
         token = args.at(1);
@@ -391,12 +412,30 @@ int ChymaeraCli::cmdServe(QCoreApplication &app, const QStringList &args)
     }
 
     out() << "Sarina control API listening on 127.0.0.1:" << bridge.serverPort()
-          << (token.isEmpty() ? " (no token)" : " (token required)") << "\n"
+          << (bridge.tokenFile().isEmpty() ? QStringLiteral(" (token required)")
+                                          : QStringLiteral(" (token written to %1)").arg(bridge.tokenFile())) << "\n"
           << "Datastore: " << bridge.datastorePath() << "\n"
           << "Press Ctrl+C to stop.\n";
     out().flush();
 
-    return app.exec();
+#ifdef Q_OS_UNIX
+    // Ctrl+C or SIGTERM: leave the event loop, so the server stops and removes the token file it wrote
+    // (the default action would end the process with the file left behind).
+    if(::socketpair(AF_UNIX, SOCK_STREAM, 0, stopSignalPair) == 0) {
+        auto *notifier = new QSocketNotifier(stopSignalPair[1], QSocketNotifier::Read, &app);
+        QObject::connect(notifier, &QSocketNotifier::activated, &app, [&app]() { app.quit(); });
+        struct sigaction sa {};
+        sa.sa_handler = onStopSignal;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_RESTART;
+        sigaction(SIGINT, &sa, nullptr);
+        sigaction(SIGTERM, &sa, nullptr);
+    }
+#endif
+
+    const int rc = app.exec();
+    bridge.stopServer();
+    return rc;
 }
 
 int ChymaeraCli::cmdParse(const QStringList &args)

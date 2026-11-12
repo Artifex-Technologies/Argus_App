@@ -106,6 +106,17 @@ QString Bridge::version() const
     return QStringLiteral(APP_VERSION);
 }
 
+QString Bridge::tokenFile() const
+{
+    return m_server->tokenFile();
+}
+
+QStringList Bridge::apiImportSuffixes()
+{
+    return { QStringLiteral("nfc"), QStringLiteral("sub"), QStringLiteral("rfid"), QStringLiteral("ir"),
+             QStringLiteral("ibtn"), QStringLiteral("pcap"), QStringLiteral("pcapng") };
+}
+
 QString Bridge::defaultDatastorePath()
 {
     // One location for the GUI and the CLI alike (AppDataLocation differs per
@@ -158,9 +169,12 @@ bool Bridge::startServer(int port, const QString &token)
     m_server->setToken(token);
     const bool ok = m_server->start(static_cast<quint16>(port));
     if(ok) {
+        // A token is always required; without one given, the server wrote its own to a file.
         m_eventLog->append(Severity::Notice, Source::Sarina,
                            QStringLiteral("Control API listening on 127.0.0.1:%1").arg(m_server->port()),
-                           token.isEmpty() ? QStringLiteral("no token") : QStringLiteral("token required"));
+                           m_server->tokenFile().isEmpty()
+                               ? QStringLiteral("token required")
+                               : QStringLiteral("token required (written to %1)").arg(m_server->tokenFile()));
     } else {
         m_eventLog->append(Severity::Error, Source::Sarina,
                            QStringLiteral("Control API failed to start on port %1").arg(port));
@@ -193,6 +207,10 @@ static QString rawKindForSuffix(const QString &suffix)
 
 static QString sha256OfFile(const QString &path)
 {
+    // Only a regular file: a FIFO would block the app here and /dev/zero would never end.
+    if(!QFileInfo(path).isFile()) {
+        return QString();
+    }
     QFile f(path);
     if(!f.open(QIODevice::ReadOnly)) {
         return QString();
@@ -559,6 +577,16 @@ QJsonObject Bridge::handleApiRequest(const QJsonObject &request)
         const QString path = request.value(QStringLiteral("path")).toString();
         if(path.isEmpty()) {
             return fail(QStringLiteral("path is required"));
+        }
+        // Over the API only capture files: the generic parser hands back every "Key: Value" line of a
+        // file, so any other file of this account (a config file with a password in it) would be read
+        // for a caller who holds nothing but the token.
+        if(!apiImportSuffixes().contains(QFileInfo(path).suffix().toLower())) {
+            QStringList dotted;
+            for(const auto &s : apiImportSuffixes()) {
+                dotted << QLatin1Char('.') + s;
+            }
+            return fail(QStringLiteral("only capture files may be imported: %1").arg(dotted.join(QStringLiteral(", "))));
         }
         const QString summary = importCapture(path);
         if(summary.isEmpty()) {

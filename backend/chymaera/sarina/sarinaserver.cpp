@@ -42,12 +42,24 @@ bool SarinaServer::start(quint16 port)
         stop();
     }
 
+    // Loopback only — never expose the control API on the network. The port is taken before any token
+    // file is written: a server that cannot listen (the port is in use, say by the GUI's own server)
+    // must leave the token file of the one already running alone.
+    if(!m_server->listen(QHostAddress::LocalHost, port)) {
+        const auto msg = QStringLiteral("Cannot listen on 127.0.0.1:%1: %2")
+                             .arg(port).arg(m_server->errorString());
+        qCWarning(LOG_SARINA).noquote() << msg;
+        emit errorOccured(msg);
+        return false;
+    }
+
     // Loopback is not a boundary between accounts: every local user (and the sarina service account) can connect. With no
     // token given, one is made here and written where only this account can read it ($XDG_RUNTIME_DIR/argus/token, 0600);
     // Sarina's console clients read it from there.
     if(m_token.isEmpty()) {
         const QString runtime = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
         if(runtime.isEmpty()) {
+            m_server->close();
             emit errorOccured(QStringLiteral("No private runtime folder for the control token; not starting"));
             return false;
         }
@@ -62,21 +74,13 @@ bool SarinaServer::start(quint16 port)
         if(!f.open(QIODevice::WriteOnly | QIODevice::NewOnly)
            || !f.setPermissions(QFile::ReadOwner | QFile::WriteOwner)
            || f.write(token.toLatin1()) != token.size()) {
+            m_server->close();
             emit errorOccured(QStringLiteral("Cannot write the control token to %1; not starting").arg(f.fileName()));
             return false;
         }
         f.close();
         m_token = token;
         m_tokenFile = f.fileName();
-    }
-
-    // Loopback only — never expose the control API on the network.
-    if(!m_server->listen(QHostAddress::LocalHost, port)) {
-        const auto msg = QStringLiteral("Cannot listen on 127.0.0.1:%1: %2")
-                             .arg(port).arg(m_server->errorString());
-        qCWarning(LOG_SARINA).noquote() << msg;
-        emit errorOccured(msg);
-        return false;
     }
 
     qCInfo(LOG_SARINA).noquote() << "Sarina control API listening on 127.0.0.1:" << m_server->serverPort();
@@ -112,6 +116,11 @@ void SarinaServer::stop()
 bool SarinaServer::isListening() const
 {
     return m_server->isListening();
+}
+
+QString SarinaServer::tokenFile() const
+{
+    return m_tokenFile;
 }
 
 quint16 SarinaServer::port() const

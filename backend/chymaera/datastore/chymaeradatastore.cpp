@@ -285,18 +285,14 @@ QVariantList ChymaeraDatastore::captures(int limit) const
         return out;
     }
 
+    // SQL NULL (no session; sha256/local_path of rows from before v1.2) is JSON null, as
+    // docs/SARINA_API.md says; QSQLITE hands it out as an empty string otherwise.
+    static const char *const columns[] = {"id", "session_id", "ts", "type", "name", "source_path", "size", "meta", "sha256", "local_path"};
     while(q.next()) {
         QVariantMap row;
-        row[QStringLiteral("id")] = q.value(0);
-        row[QStringLiteral("session_id")] = q.value(1);
-        row[QStringLiteral("ts")] = q.value(2);
-        row[QStringLiteral("type")] = q.value(3);
-        row[QStringLiteral("name")] = q.value(4);
-        row[QStringLiteral("source_path")] = q.value(5);
-        row[QStringLiteral("size")] = q.value(6);
-        row[QStringLiteral("meta")] = q.value(7);
-        row[QStringLiteral("sha256")] = q.value(8);
-        row[QStringLiteral("local_path")] = q.value(9);
+        for(int i = 0; i < 10; ++i) {
+            row[QString::fromLatin1(columns[i])] = q.isNull(i) ? QVariant::fromValue(nullptr) : q.value(i);
+        }
         out.append(row);
     }
 

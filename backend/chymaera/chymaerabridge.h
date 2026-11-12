@@ -78,6 +78,12 @@ public:
     // Default on-disk location of the datastore (under the app data dir).
     static QString defaultDatastorePath();
 
+    // Where the server wrote the token it made (empty when one was given or it is not running).
+    QString tokenFile() const;
+
+    // The file suffixes capture.import takes over the API.
+    static QStringList apiImportSuffixes();
+
     /* Actions — callable from QML and from C++ (CLI). */
 
     Q_INVOKABLE void log(const QString &message);

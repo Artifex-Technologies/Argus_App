@@ -22,7 +22,7 @@ Line counts are `.cpp`/`.h`/`.c`/`.qml` lines (2026-11-12), without the submodul
 | `backend/flipperzero/recovery*` + `dfu/` | 735 + 2 904 | Recovery mode: DfuSe file format, STM32WB55 option bytes, FUS and radio stack, libusb and WinUSB backends | USB DFU (VID 0483, PID DF11) | **nusb** (pure Rust USB); DfuSe parser in pure Rust |
 | `backend/flipperzero/` (rest) | ~4 200 | Device state model, screen streamer, virtual display, file manager, manifests (assets, radio), factory info | Yes | Mostly logic; ported with the phases that need it |
 | `backend/` (top level) | 4 731 | Device registry (USB hot-plug by VID/PID), serial finder, update registries (download `directory.json` from Flipper's update server), tar/gzip, preferences, logger, region info | USB enumeration; HTTPS | `nusb` hot-plug, `tar`/`flate2` (already in argus-tools), an HTTPS client with rustls |
-| `backend/chymaera/` (ours) | 2 744 | SQLite datastore, event log, pcap/pcapng exporter, `.nfc`/`.sub` parsers, capture pull with its allowlist, the Sarina control API server | Pull reads files | `rusqlite`, std `TcpListener` (loopback), argus-tools' parsers |
+| `backend/chymaera/` (ours) | 2 744 | SQLite datastore, event log, pcap/pcapng exporter, `.nfc`/`.sub` parsers, capture pull with its allowlist, the Sarina control API server | Pull reads files | `rusqlite`, std `TcpListener` (loopback), argus-tools' parsers. Ported (`argus-capture`, `argus-api`), except `watch` and a device in `serve` |
 | `backend/argus/` (ours) | 1 837 | Bridge to argus-tools over QProcess, device storage for snapshots and installs | Reads/writes files | Disappears: argus-tools becomes a library call |
 | `argus-tools/` (ours, Rust already) | 3 862 + 1 260 tests | App extractor, compatibility, check-up, Limbo rebuilds, snapshots, capture library | No (works on listings and files) | It is the Rust side; the port's crates live in its workspace |
 | `cli/` | 1 363 | `qFlipper-cli` (upstream: default update, `backup`, `restore`, `erase`, `firmware`, `core2radio`, `core2fus`, `wipe` unimplemented) and ours (`chymaera selftest/serve/parse/import/watch/pull/pull-all/argus/argus-test`) | Yes | `argus-cli`. Started: `info`, `ls`. |
@@ -49,7 +49,8 @@ What talks to the device, by channel:
 | QtSingleApplication (`application/qtsingleapplication`) | BSD (Digia) | Not ported; a lock file or socket in Rust replaces it |
 | libwdi (`driver-tool/libwdi`) | LGPL-3.0 (`COPYING-LGPL`) | Windows only, not ported |
 | Fonts in `application/assets/fonts` (Born2bSporty, HaxrCorp 4089, ProggySquare, Share Tech, Share Tech Mono) | Check each when the UI is ported | Decided at the UI phase |
-| Rust crates added now | prost, prost-build (Apache-2.0); serialport (MPL-2.0); proptest (MIT/Apache-2.0); serde_json (MIT/Apache-2.0) | All compatible with GPL-3.0 |
+| Rust crates added now | prost, prost-build (Apache-2.0); serialport (MPL-2.0); proptest (MIT/Apache-2.0); serde_json (MIT/Apache-2.0); rusqlite (MIT); libc (MIT/Apache-2.0) | All compatible with GPL-3.0 |
+| Qt's JSON rules (`qjsonparser.cpp`, `qjsonwriter.cpp`, `qlocale_tools.cpp`, Qt 6.12) | LGPL-3.0/GPL | Not copied: `argus-api::qjson` is written from scratch to behave the same, and checked against Qt itself |
 
 ## 3. The order
 
@@ -66,7 +67,8 @@ Protocol and device logic first, with the CLI as the proof surface; the UI last.
    always required, same wire format, `docs/SARINA_API.md` stays the contract), the event log. CLI parity with
    `qFlipper-cli chymaera ...`, so Sarina's clients see no change.
    *Started 2026-11-12: capture pull and pull-all into the shared datastore (`crates/argus-capture`,
-   `argus-cli capture pull PATH | capture pull-all`).*
+   `argus-cli capture pull PATH | capture pull-all`). Then the control API server, the event log, pcap
+   export and `chymaera serve|parse|import|selftest` (`crates/argus-api`, `argus-cli chymaera ...`).*
 4. **Writes, behind a confirmation.** Write, mkdir, rename, remove, restore, app installs, date/time set, reboot.
    Nothing reachable from the Sarina API transmits, flashes or changes the device without my approval in the app.
 5. **Firmware update over the updater** (package upload plus `SystemUpdateRequest`), factory reset (`erase`).
@@ -122,6 +124,25 @@ Qt build. Result on 2026-11-12: same files, same bytes, same storage requests in
 also probes the device first (protobuf version, `devinfo`, storage info, `/ext/Manifest`, reads and **sets the
 clock**) and starts the screen stream and a status screen; the Rust CLI does none of that.
 
+**The Sarina control API against the C++ server.** The wire format is the contract, so it is proven three
+ways. (1) `crates/argus-api/tests/qt_json.rs` feeds 4000 generated request lines per seed (numbers at
+every edge, escapes, lone surrogates, invalid UTF-8, repeated keys, deep nesting, then cut, changed or
+padded) to a program built from Qt's own JSON code (`tests/qt-oracle/json_oracle.cpp`) and to the Rust
+`qjson`, and requires the same error text, the same compact and indented output, the same `toInt`/
+`toString` reads and the same `id` echo: 20 000 lines over five seeds agreed, covering all twelve parse
+errors. (2) `crates/argus-api/compare-api.sh` runs `qFlipper-cli chymaera serve` and `argus-cli chymaera
+serve`, each with its own copy of the same files, an old-schema datastore and a capture library, sends
+both the 71 recorded requests in `tests/fixtures/api_requests.txt` and compares the answers (times, port
+and folders normalised), the datastore rows and events, the token file's life, the port argument, and
+`chymaera parse|import|selftest`: 36 checks. It runs in a private network namespace (`unshare -rn`)
+whose only interface is its own loopback, so it can never reach the API I run; in a CI container without
+user namespaces it uses that container's loopback. (3) The C++ answers are kept in
+`tests/fixtures/api_responses.txt`; `tests/api.rs` replays the requests against the Rust bridge in
+process, so every CI run of argus-tools checks them without Qt, and the Linux workflow checks the C++
+server still gives exactly those answers. The pcap writer is compared the same way with the C++
+`PcapExporter` (`tests/pcap.rs`: both formats, five link types, times before 1970, packets past the snap
+length).
+
 ## 5. Status (2026-11-12)
 
 In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only argus-tools, as the Qt build expects):
@@ -144,6 +165,13 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   against `argus-cli capture pull-all`: the same 26 capture rows (kind, name, path, size, meta, sha256), the same
   requests, neither touches `/ext/u2f` or an `assets` file, and each app finds nothing new in the datastore the
   other filled. 40 checks in nine scenarios.
+- The control API (2026-11-12): `crates/argus-api` (`qjson`: JSON as Qt reads and writes it; `eventlog`:
+  the ring of 5000 for `log.tail`, persisted; `bridge`: every command; `server`: loopback TCP, the token,
+  one thread serving every connection in turn as the C++ event loop does; `pcap`). `argus-cli chymaera
+  serve [port] [token] | parse FILE | import FILE | selftest` print the C++ CLI's text. The datastore
+  (`argus-capture::store`) gained sessions, events within a session, `capture.list` rows with their NULLs
+  and the event count. `compare-api.sh` 36/36; `chymaera selftest` 13/13 (Rust, no port opened) and 17/17
+  (C++).
 - Tests: 77 in the new crates (frames, paths, schema, nanopb fixtures, session and reads against the fake with
   every fault, hostile names, the CLI binary over a socket and a pseudo-terminal), all green; argus-tools' own
   tests unchanged; `qFlipper-cli chymaera selftest` 11/11 with the hook built in.
@@ -163,6 +191,18 @@ Differences from the C++ app found so far, all on purpose or harmless:
 - **Bytes glued to the `start_rpc_session` echo** are kept as RPC data; the C++ app would discard them and time out.
 - **Control characters** (including DEL and the C1 range) in anything printed are escaped, so a file name on the
   device cannot drive the terminal.
+- **The API's request buffer.** The C++ server refused a client once one read held over 1 MiB, even when it was
+  many complete short requests; the Rust server answers the complete lines first and refuses only an unfinished
+  line over 1 MiB. It also drops a client that leaves over 16 MiB of answers unread, and takes at most 1000
+  clients at once (the C++ server had no limits there).
+- **The runtime folder for the token** must be mine and 0700 (`$XDG_RUNTIME_DIR`, else `/run/user/UID`); the Rust
+  server never falls back to a folder under `/tmp` as Qt can.
+- **Kept on purpose, in both:** a lone UTF-16 surrogate in the `token` is dropped before the comparison (Qt's
+  `toUtf8`; the token is still needed), and `capture.list` with a negative `limit` returns every row (SQLite's
+  rule).
+- **`chymaera watch`** (device events) is not ported yet, and the Rust `serve`, like the C++ one, has no device:
+  `device.status` says not connected and `capture.pull`/`pullAll` are refused. The Rust selftest checks the Rust
+  pieces in process; the archive and name checks of the C++ selftest are flipper-rpc's tests.
 
 Found in the C++ app by running it against the fake, and **fixed in both versions** on 2026-11-12 (a bug the
 port finds is fixed in the C++ too). `compare-cli.sh` has a case for each, and both apps now agree on all of them:
@@ -188,6 +228,26 @@ port finds is fixed in the C++ too). `compare-cli.sh` has a case for each, and b
   download refuses an existing local folder instead of deleting it. Case: `hostile`.
 - **An empty tree hung backup and directory download** (they waited for a last file that never came); they now go on.
 
+Found while porting the control API, and **fixed in both versions** on 2026-11-12. `compare-api.sh` has a case for
+each:
+
+- **A second server replaced the running one's token.** Started without a token, the server wrote a new token
+  file *before* taking the port, so starting `chymaera serve` while the GUI's server held 44700 overwrote the
+  token file and then failed: Sarina's clients could no longer reach the running server. The port is now taken
+  first.
+- **Ctrl+C left the token file behind.** `serve` died on the signal; it now stops cleanly and removes the file.
+- **`capture.import` read any local path.** A FIFO hung the app (forever, the API with it), `/dev/zero` never
+  ended, a folder was recorded as a capture, and because the generic parser stores every `Key: Value` line, a
+  caller holding only the token could read other files of mine through `capture.list`. Only regular files are
+  read now (also by `chymaera parse`), a file over 64 MiB is kept unparsed, and over the API only capture
+  files (`.nfc .sub .rfid .ir .ibtn .pcap .pcapng`) are taken.
+- **NULL was sent as `""`.** `capture.list` gave `session_id`, `sha256` and `local_path` as empty strings where
+  docs/SARINA_API.md says null (Qt's SQLite driver hands NULL out as a null string). Now null.
+- **`serve`'s port argument** wrapped (70000 became 4464) and a non-number silently meant 44700. Both are now
+  refused.
+- **"no token"** was logged and printed while a token was required (the one written to the file). It now says
+  where the token was written.
+
 A regression of my own, caught by porting the capture sync: once `GetFileTreeOperation` left unsafe names out,
 the C++ capture pull stopped counting them as failed (as `stagedPath` used to). `CaptureSync` now counts every
 refused name as failed again, and the Rust pull does the same.
@@ -201,10 +261,10 @@ failed, and does not read `devinfo` or start the screen.
 
 ## Resume here
 
-1. The rest of phase 3: the Sarina control API server in Rust (loopback, token always required, the wire format of
-   `docs/SARINA_API.md`; the C++ server and Sarina's client tests are the comparison), then `chymaera
-   parse|import|watch|serve|selftest` parity, the event log, pcap export and the screen streamer (drop frames that are
-   not 1024 bytes, as the C++ now does).
+1. The rest of phase 3: `chymaera watch` and a device in the Rust `serve` (`argus-cli --port DEV chymaera serve`:
+   `device.status` and asynchronous `capture.pull`/`pullAll` as the GUI's server has them; the fake can stand in
+   for the device, and `compare-api.sh` can then run both against it), and the screen streamer (drop frames that
+   are not 1024 bytes, as the C++ now does).
 2. One Flipper-format parser: argus-tools' `flipperfile.rs` (values cut at 512 characters, for the capture
    library) and `argus-capture::meta` (exact C++ parity) should become one module with both views.
 3. `restore` needs writes (phase 4); then the fake can check each app's restore of the other's backup.

@@ -12,6 +12,12 @@ FlipperFileFormat::FlipperFileFormat():
 
 bool FlipperFileFormat::loadFromFile(const QString &path)
 {
+    // Only a regular file, and not a huge one: a FIFO would block here and /dev/zero would never end.
+    const QFileInfo info(path);
+    if(!info.isFile() || info.size() > MaxFileSize) {
+        m_lastError = QStringLiteral("Not a capture file: %1").arg(path);
+        return false;
+    }
     QFile f(path);
     if(!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
         m_lastError = QStringLiteral("Cannot open %1: %2").arg(path, f.errorString());

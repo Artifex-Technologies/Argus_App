@@ -136,7 +136,10 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
   takes only those capture folders (or paths inside them). v1.3 (2026-11-09) added
   **`capture.library`** and **`capture.explain`**: read-only views of Argus's capture library
   (header facts, tags, where seen; never payloads or local paths). Everything in the API remains
-  read/observe + light control; nothing transmits, flashes, or mutates device state.
+  read/observe + light control; nothing transmits, flashes, or mutates device state. Since 2026-11-12
+  `capture.import` over the API takes only capture files (`.nfc .sub .rfid .ir .ibtn .pcap .pcapng`,
+  regular files), and `capture.list` sends null (not `""`) for NULL fields, as the spec always said.
+  `argus-cli chymaera serve` (Rust) is the same server, byte for byte.
 - **argus-tools CLI (JSON):** `argus-tools/` (Rust) is the logic behind Argus's apps, snapshots,
   capture library and Limbo rebuilds; one JSON object per command on stdout. Its data lives in
   `~/.local/share/argus/` (`snapshots/`, `captures/`, `apps/`). Owner: this repo. Not a contract
@@ -148,6 +151,23 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 - **Shared endpoints/ports:** `127.0.0.1:44700` (Sarina control API, when enabled).
 
 ### Coordination Log (newest first)
+
+### 2026-11-12 — The Sarina control API in Rust (`argus-cli chymaera serve`), and six fixes in both versions
+- New `argus-tools/crates/argus-api`: the server (loopback, token, NDJSON), every command, the event log, pcap export,
+  and `qjson`, JSON exactly as Qt reads and writes it. `argus-cli chymaera serve|parse|import|selftest` print what
+  `qFlipper-cli chymaera ...` prints. Proof (docs/RUST_PORT.md section 4): Qt's own JSON code against `qjson` (20 000
+  generated lines), both servers on the same 71 recorded requests in a private network namespace (`compare-api.sh`,
+  36 checks, also in `linux.yml`), and those C++ answers replayed against the Rust code in `argus-tools.yml`.
+- **Fixed in both (C++ and Rust):** a server that could not take the port overwrote the running server's token file
+  (`sarinaserver.cpp` now listens first); `serve` left its token file after Ctrl+C/SIGTERM; `capture.import` read any
+  local path (a FIFO hung the app, `/dev/zero` never ended, folders were recorded, and the generic parser handed any
+  file's `Key: Value` lines to a token holder): regular files only everywhere, 64 MiB parse limit, capture suffixes
+  only over the API; `capture.list` sent `""` for NULL; `serve 70000` listened on 4464 and `serve abc` on 44700; "no
+  token" was logged while a token was required.
+- **@Sarina:** two visible changes. `capture.import` refuses non-capture files with `only capture files may be
+  imported: .nfc, .sub, .rfid, .ir, .ibtn, .pcap, .pcapng`, and `capture.list` rows carry null where they carried `""`
+  (`session_id` outside a session, `sha256`/`local_path` on rows from before v1.2). Everything else is unchanged, byte
+  for byte; `docs/SARINA_API.md` says so.
 
 ### 2026-11-12 — Rust capture pull into the shared datastore (`argus-cli capture pull|pull-all`)
 - New `argus-tools/crates/argus-capture`: the datastore (same SQLite file, schema and migrations as the C++ app), the

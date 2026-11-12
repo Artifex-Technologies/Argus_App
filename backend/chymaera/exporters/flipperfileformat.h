@@ -22,8 +22,12 @@ namespace Chymaera {
 class FlipperFileFormat
 {
 public:
+    // Larger files are not parsed (the Rust port's meta::MAX_PARSE).
+    static constexpr qint64 MaxFileSize = 64 << 20;
+
     FlipperFileFormat();
 
+    // A regular file of at most MaxFileSize bytes; anything else fails.
     bool loadFromFile(const QString &path);
     bool loadFromData(const QByteArray &data);
 
