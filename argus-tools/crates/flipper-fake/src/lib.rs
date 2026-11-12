@@ -10,12 +10,16 @@
 //!
 //! Faults ([`Fault`]) make it misbehave on the first RPC request, for negative tests.
 
+use std::cell::RefCell;
 use std::io::{self, Read, Write};
 
 use flipper_rpc::frame::{encode_frame, FrameDecoder};
 use flipper_rpc::proto::pb::main::Content;
 use flipper_rpc::proto::pb::{CommandStatus, Empty, Main};
 use flipper_rpc::proto::{pb_gui, pb_property, pb_storage, pb_system};
+
+pub mod archives;
+pub mod storage;
 
 /// Received bytes kept for the transcript.
 const MAX_RECORD: usize = 1 << 20;
@@ -94,6 +98,9 @@ pub struct FakeFlipper {
     pub contents: Vec<(String, Vec<u8>)>,
     /// Frames sent after a screen stream starts ([`screen_frame`] 0, 1, ...).
     pub screen_frames: usize,
+    /// The storage as clients change it: made from `nodes` and `contents` on the first
+    /// request, then kept across sessions (as a device keeps its files across reconnects).
+    pub live: RefCell<Option<storage::Storage>>,
 }
 
 /// What passed over the connection.
@@ -156,6 +163,39 @@ impl FakeFlipper {
     /// A file's bytes: given in [`FakeFlipper::contents`], or [`Node::content`]'s pattern.
     pub fn data_of(&self, n: &Node) -> Vec<u8> {
         self.contents.iter().find(|(p, _)| *p == n.path).map(|(_, d)| d.clone()).unwrap_or_else(|| n.content())
+    }
+
+    /// Runs `f` on the live storage, made from `nodes` and `contents` the first time.
+    pub fn with_storage<R>(&self, f: impl FnOnce(&mut storage::Storage) -> R) -> R {
+        let mut live = self.live.borrow_mut();
+        let s = live.get_or_insert_with(|| storage::Storage::new(&self.nodes, |n| self.data_of(n)));
+        f(s)
+    }
+
+    /// The storage as it is now (see [`storage::Storage::dump`]).
+    pub fn dump(&self) -> String {
+        self.with_storage(|s| s.dump())
+    }
+
+    /// [`FakeFlipper::standard`] with `/int` changed since a backup of it was made: one file
+    /// rewritten, one removed, one added. A restore must bring the first two back and leave the
+    /// added one alone.
+    pub fn with_changed_int(mut self) -> FakeFlipper {
+        self.nodes.retain(|n| n.path != "/int/sub/deep.txt");
+        if let Some(n) = self.nodes.iter_mut().find(|n| n.path == "/int/favorites.txt") {
+            n.size = 20;
+        }
+        self.contents.push(("/int/favorites.txt".into(), b"changed since backup".to_vec()));
+        self.nodes.push(Node { path: "/int/extra.txt".into(), dir: false, size: 9 });
+        self
+    }
+
+    /// [`FakeFlipper::standard`] where `/int/sub` is a file, not a folder: a backup with the
+    /// folder cannot be restored over it, and must be refused before anything is written.
+    pub fn with_int_conflict(mut self) -> FakeFlipper {
+        self.nodes.retain(|n| !n.path.starts_with("/int/sub"));
+        self.nodes.push(Node { path: "/int/sub".into(), dir: false, size: 3 });
+        self
     }
 
     /// A made-up device on Argus firmware with a few folders. No real device's names or
@@ -231,6 +271,7 @@ impl FakeFlipper {
             hostile: Vec::new(),
             contents: Vec::new(),
             screen_frames: 1,
+            live: RefCell::new(None),
         }
     }
 
@@ -269,6 +310,7 @@ impl FakeFlipper {
         }
         io.flush()?;
 
+        self.with_storage(|s| s.end_session());
         let mut decoder = FrameDecoder::new();
         let mut chunk = [0u8; 4096];
         let mut first = true;
@@ -374,8 +416,12 @@ impl FakeFlipper {
                     send(io, ok(Content::SystemDeviceInfoResponse(resp), i + 1 < n))?;
                 }
             }
-            Some(Content::StorageListRequest(r)) => self.list(io, id, &r.path)?,
+            Some(Content::StorageListRequest(r)) => {
+                self.storage_request(io, |_| ())?;
+                self.list(io, id, &r.path)?
+            }
             Some(Content::StorageInfoRequest(r)) => {
+                self.storage_request(io, |_| ())?;
                 if r.path == "/ext" && !self.sd_card {
                     send(io, error(CommandStatus::ErrorStorageNotReady))?;
                 } else if r.path == "/ext" || r.path == "/int" {
@@ -385,49 +431,52 @@ impl FakeFlipper {
                     send(io, error(CommandStatus::ErrorStorageInvalidParameter))?;
                 }
             }
-            Some(Content::StorageStatRequest(r)) => match self.nodes.iter().find(|n| n.path == r.path) {
+            Some(Content::StorageStatRequest(r)) => match self.storage_request(io, |s| s.find(&r.path).cloned())? {
                 Some(n) => {
                     let file = pb_storage::File { r#type: n.dir as i32, size: n.size, ..Default::default() };
                     send(io, ok(Content::StorageStatResponse(pb_storage::StatResponse { file: Some(file) }), false))?;
                 }
                 None => send(io, error(CommandStatus::ErrorStorageNotExist))?,
             },
-            Some(Content::StorageReadRequest(r)) => match self.nodes.iter().find(|n| n.path == r.path && !n.dir) {
-                None => send(io, error(CommandStatus::ErrorStorageNotExist))?,
-                Some(n) => {
-                    let mut data = self.data_of(n);
-                    match self.fault {
-                        Fault::ShortRead if !data.is_empty() => {
-                            data.pop();
+            Some(Content::StorageReadRequest(r)) => {
+                match self.storage_request(io, |s| s.find(&r.path).filter(|n| !n.dir).map(|n| s.data(&n.path)))? {
+                    None => send(io, error(CommandStatus::ErrorStorageNotExist))?,
+                    Some(mut data) => {
+                        match self.fault {
+                            Fault::ShortRead if !data.is_empty() => {
+                                data.pop();
+                            }
+                            Fault::LongRead => data.push(0),
+                            _ => {}
                         }
-                        Fault::LongRead => data.push(0),
-                        _ => {}
-                    }
-                    // As the firmware: 512 bytes per frame, has_next while bytes are left; an
-                    // empty file is one frame with empty data.
-                    let read = |chunk: &[u8], has_next: bool| {
-                        let file = pb_storage::File { data: chunk.to_vec(), ..Default::default() };
-                        ok(Content::StorageReadResponse(pb_storage::ReadResponse { file: Some(file) }), has_next)
-                    };
-                    if data.is_empty() && self.fault == Fault::OmitEmptyData {
-                        send(io, read(&[], false))?;
-                    } else if data.is_empty() {
-                        send_raw(io, &empty_file_read_response(id))?;
-                    }
-                    let mut chunks = data.chunks(512).peekable();
-                    while let Some(c) = chunks.next() {
-                        send(io, read(c, chunks.peek().is_some()))?;
+                        // As the firmware: 512 bytes per frame, has_next while bytes are left; an
+                        // empty file is one frame with empty data.
+                        let read = |chunk: &[u8], has_next: bool| {
+                            let file = pb_storage::File { data: chunk.to_vec(), ..Default::default() };
+                            ok(Content::StorageReadResponse(pb_storage::ReadResponse { file: Some(file) }), has_next)
+                        };
+                        if data.is_empty() && self.fault == Fault::OmitEmptyData {
+                            send(io, read(&[], false))?;
+                        } else if data.is_empty() {
+                            send_raw(io, &empty_file_read_response(id))?;
+                        }
+                        let mut chunks = data.chunks(512).peekable();
+                        while let Some(c) = chunks.next() {
+                            send(io, read(c, chunks.peek().is_some()))?;
+                        }
                     }
                 }
-            },
-            Some(Content::StorageMd5sumRequest(r)) => match self.nodes.iter().find(|n| n.path == r.path && !n.dir) {
-                None => send(io, error(CommandStatus::ErrorStorageNotExist))?,
-                Some(n) => {
-                    use md5::Digest;
-                    let md5sum: String = md5::Md5::digest(self.data_of(n)).iter().map(|b| format!("{b:02x}")).collect();
-                    send(io, ok(Content::StorageMd5sumResponse(pb_storage::Md5sumResponse { md5sum }), false))?;
+            }
+            Some(Content::StorageMd5sumRequest(r)) => {
+                match self.storage_request(io, |s| s.find(&r.path).filter(|n| !n.dir).map(|n| s.data(&n.path)))? {
+                    None => send(io, error(CommandStatus::ErrorStorageNotExist))?,
+                    Some(data) => {
+                        use md5::Digest;
+                        let md5sum: String = md5::Md5::digest(data).iter().map(|b| format!("{b:02x}")).collect();
+                        send(io, ok(Content::StorageMd5sumResponse(pb_storage::Md5sumResponse { md5sum }), false))?;
+                    }
                 }
-            },
+            }
             Some(Content::SystemGetDatetimeRequest(_)) => {
                 let (year, month, day, hour, minute, second, weekday) = FAKE_DATETIME;
                 let datetime = pb_system::DateTime { hour, minute, second, day, month, year, weekday };
@@ -460,9 +509,47 @@ impl FakeFlipper {
             }
             // Frames the host draws on the virtual display get no answer from the firmware.
             Some(Content::GuiScreenFrame(_)) => {}
+            Some(Content::StorageMkdirRequest(r)) => answer_all(io, self.with_storage(|s| s.mkdir(id, &r.path)))?,
+            Some(Content::StorageDeleteRequest(r)) => answer_all(io, self.with_storage(|s| s.remove(id, &r.path, r.recursive)))?,
+            Some(Content::StorageRenameRequest(r)) => answer_all(io, self.with_storage(|s| s.rename(id, &r.old_path, &r.new_path)))?,
+            Some(Content::StorageWriteRequest(r)) => {
+                let data = r.file.as_ref().map(|f| f.data.clone()).unwrap_or_default();
+                answer_all(io, self.with_storage(|s| s.write(id, &r.path, &data, req.has_next)))?
+            }
+            // As the firmware: a ping with has_next is refused, otherwise its data comes back.
+            Some(Content::SystemPingRequest(r)) => {
+                if req.has_next {
+                    send(io, error(CommandStatus::ErrorInvalidParameters))?;
+                } else {
+                    send(io, ok(Content::SystemPingResponse(pb_system::PingResponse { data: r.data.clone() }), false))?;
+                }
+            }
+            // The firmware reboots without answering: the USB port goes away, which ends the
+            // session here. A factory reset sets the flag that formats /int on the next boot,
+            // then reboots the same way. Other reboot modes are refused.
+            Some(Content::SystemRebootRequest(r)) => {
+                if pb_system::reboot_request::RebootMode::try_from(r.mode).is_err() {
+                    send(io, error(CommandStatus::ErrorInvalidParameters))?;
+                } else {
+                    self.with_storage(|s| s.end_session());
+                    return Ok(false);
+                }
+            }
+            Some(Content::SystemFactoryResetRequest(_)) => {
+                self.with_storage(|s| s.factory_reset());
+                return Ok(false);
+            }
             _ => send(io, error(CommandStatus::ErrorNotImplemented))?,
         }
         Ok(true)
+    }
+
+    /// A storage request other than a write: like the firmware, it first ends a write in
+    /// progress (answering that write "interrupted"), then runs `f` on the storage.
+    fn storage_request<R>(&self, io: &mut impl Write, f: impl FnOnce(&storage::Storage) -> R) -> io::Result<R> {
+        let (interrupted, r) = self.with_storage(|s| (s.reset(true), f(s)));
+        answer_all(io, interrupted.into_iter().collect())?;
+        Ok(r)
     }
 
     fn list(&self, io: &mut impl Write, id: u32, path: &str) -> io::Result<()> {
@@ -478,7 +565,8 @@ impl FakeFlipper {
             let files = ["any", "int", "ext"].iter().map(|n| file(n, true, 0)).collect();
             return send(io, frame(files, false));
         }
-        if !self.nodes.iter().any(|n| n.path == path && n.dir) {
+        let nodes = self.with_storage(|s| s.nodes.clone());
+        if !nodes.iter().any(|n| n.path == path && n.dir) {
             let status = CommandStatus::ErrorStorageNotExist as i32;
             return send(
                 io,
@@ -486,8 +574,7 @@ impl FakeFlipper {
             );
         }
         let prefix = format!("{path}/");
-        let children: Vec<pb_storage::File> = self
-            .nodes
+        let children: Vec<pb_storage::File> = nodes
             .iter()
             .filter_map(|n| n.path.strip_prefix(&prefix).filter(|rest| !rest.contains('/')).map(|name| (n, name)))
             .filter(|(_, name)| name.is_ascii())
@@ -517,6 +604,19 @@ pub fn describe(m: &Main) -> String {
         Some(Content::StorageInfoRequest(r)) => r.path.clone(),
         Some(Content::StorageMd5sumRequest(r)) => r.path.clone(),
         Some(Content::PropertyGetRequest(r)) => r.key.clone(),
+        Some(Content::StorageMkdirRequest(r)) => r.path.clone(),
+        Some(Content::StorageDeleteRequest(r)) => format!("{}{}", r.path, if r.recursive { " recursive" } else { "" }),
+        Some(Content::StorageRenameRequest(r)) => format!("{} -> {}", r.old_path, r.new_path),
+        Some(Content::StorageWriteRequest(r)) => {
+            let data = r.file.as_ref().map(|f| f.data.as_slice()).unwrap_or_default();
+            use md5::Digest;
+            let sum: String = md5::Md5::digest(data).iter().take(4).map(|b| format!("{b:02x}")).collect();
+            let file = if r.file.is_some() { format!("{} bytes {sum}", data.len()) } else { "no file".into() };
+            format!("{} {file}{}", r.path, if m.has_next { " next" } else { "" })
+        }
+        Some(Content::SystemPingRequest(r)) => format!("{} bytes", r.data.len()),
+        Some(Content::SystemRebootRequest(r)) => format!("mode {}", r.mode),
+        Some(Content::SystemUpdateRequest(r)) => r.update_manifest.clone(),
         _ => String::new(),
     };
     let name = match &m.content {
@@ -559,6 +659,14 @@ pub fn empty_file_read_response(id: u32) -> Vec<u8> {
 fn send_raw(io: &mut impl Write, frame: &[u8]) -> io::Result<()> {
     io.write_all(frame)?;
     io.flush()
+}
+
+/// Sends storage answers: empty content with the status, as `rpc_send_and_release_empty`.
+fn answer_all(io: &mut impl Write, answers: Vec<storage::Answer>) -> io::Result<()> {
+    for (id, status) in answers {
+        send(io, Main { command_id: id, command_status: status as i32, content: Some(Content::Empty(Empty {})), ..Default::default() })?;
+    }
+    Ok(())
 }
 
 fn send(io: &mut impl Write, msg: Main) -> io::Result<()> {

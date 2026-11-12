@@ -12,11 +12,11 @@ prost = "0.14"
 md-5 = "0.10"
 serialport = { version = "4.10", default-features = false }
 nix = { version = "0.26", default-features = false, features = ["poll"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [[bin]]
 name = "flipper-fake"
 path = "src/main.rs"
 
 [dev-dependencies]
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = { version = "0.4", default-features = false }

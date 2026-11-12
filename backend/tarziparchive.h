@@ -15,6 +15,8 @@ class TarZipArchive : public QObject, public Failable
 
 public:
     TarZipArchive(QFile *inputFile, QObject *parent = nullptr);
+    // Refuses an archive whose tar is larger than maxTarSize once uncompressed.
+    TarZipArchive(QFile *inputFile, qint64 maxTarSize, QObject *parent = nullptr);
     TarZipArchive(const QDir &inputDir, QFile *outputFile, QObject *parent = nullptr);
     ~TarZipArchive();
 

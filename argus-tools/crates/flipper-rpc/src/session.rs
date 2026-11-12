@@ -176,16 +176,31 @@ impl<T: Transport> Session<T> {
     /// Writes one frame per content, all with one new command id (the C++ storage read sends
     /// its stat and read requests that way). Returns the id.
     pub fn send(&mut self, contents: Vec<Content>) -> Result<u32, RpcError> {
+        let id = self.new_id()?;
+        self.send_frames(id, contents.into_iter().map(|c| (c, false)).collect())?;
+        Ok(id)
+    }
+
+    /// A fresh command id for a request sent with [`Session::send_frames`].
+    pub fn new_id(&mut self) -> Result<u32, RpcError> {
         if self.broken {
             return Err(RpcError::Broken);
         }
-        let id = self.next_id();
+        Ok(self.next_id())
+    }
+
+    /// Writes one frame per `(content, has_next)`, all with command id `id` (a file write sends
+    /// its chunks this way, with `has_next` on all but the last).
+    pub fn send_frames(&mut self, id: u32, frames: Vec<(Content, bool)>) -> Result<(), RpcError> {
+        if self.broken {
+            return Err(RpcError::Broken);
+        }
         let mut bytes = Vec::new();
-        for content in contents {
-            bytes.extend(encode_frame(&Main { command_id: id, content: Some(content), ..Default::default() })?);
+        for (content, has_next) in frames {
+            bytes.extend(encode_frame(&Main { command_id: id, has_next, content: Some(content), ..Default::default() })?);
         }
         let r = self.io.write_all(&bytes).and_then(|_| self.io.flush()).map_err(RpcError::Io);
-        self.check(r).map(|_| id)
+        self.check(r)
     }
 
     /// Hands every OK response with `id` to `on_response` until it returns `true` (done).
@@ -247,6 +262,28 @@ impl<T: Transport> Session<T> {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) if is_timeout(&e) => return Err(RpcError::Timeout("a response")),
                 Err(e) => return Err(RpcError::Io(e)),
+            }
+        }
+    }
+
+    /// After a request the device answers by leaving (reboot, factory reset): waits up to
+    /// `timeout` for the connection to end, ignoring anything still sent. True when it ended.
+    /// The session is over either way.
+    pub fn wait_until_gone(&mut self, timeout: std::time::Duration) -> bool {
+        self.broken = true;
+        let deadline = std::time::Instant::now() + timeout;
+        let mut chunk = [0u8; 4096];
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() || self.io.set_read_timeout(left.max(std::time::Duration::from_millis(1))).is_err() {
+                return false;
+            }
+            match self.io.read(&mut chunk) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if is_timeout(&e) => return false,
+                Err(_) => return true,
             }
         }
     }

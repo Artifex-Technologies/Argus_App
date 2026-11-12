@@ -1,30 +1,38 @@
 #include "userrestoreoperation.h"
 
 #include <QFile>
-#include <QDirIterator>
+#include <QBuffer>
 
 #include "flipperzero/devicestate.h"
 #include "flipperzero/protobufsession.h"
 #include "flipperzero/rpc/storagemkdiroperation.h"
 #include "flipperzero/rpc/storagewriteoperation.h"
-#include "flipperzero/rpc/storageremoveoperation.h"
 
-#include "tarzipuncompressor.h"
-#include "tempdirectories.h"
+#include "getfiletreeoperation.h"
+#include "tarziparchive.h"
+#include "tararchive.h"
 
 using namespace Flipper;
 using namespace Zero;
 
+// The restore checks the whole backup before anything is written, lists /int on the device,
+// refuses a backup whose files are folders there (or the other way round), makes the missing
+// folders and writes every file. Files on the device that are not in the backup stay.
+//
+// Until 2026-11-12 it unpacked the archive into a temporary folder without checking names (an
+// entry "int/../../x" was written outside it; the folder's name came from the device), removed
+// every path of the backup from the device without `recursive`, /int itself first, and then
+// made /int: on current firmware /int is an alias of /ext/.int, so the first step failed while
+// /int held anything and the second always did. Any top-level folder of the archive, not only
+// int/, was removed and written on the device. docs/RUST_PORT.md has the details; the Rust port
+// (flipper_rpc::restore) does the same as this.
+
 UserRestoreOperation::UserRestoreOperation(ProtobufSession *rpc, DeviceState *deviceState, const QUrl &backupUrl, QObject *parent):
     AbstractUtilityOperation(rpc, deviceState, parent),
     m_backupUrl(backupUrl),
-    m_tempDir(QStringLiteral("%1/%2-backup-XXXXXX").arg(globalTempDirs->root().absolutePath(), deviceState->deviceInfo().name)),
-    m_workDir(m_tempDir.path()),
-    m_remoteDirName(QByteArrayLiteral("/int"))
-{
-    m_workDir.setFilter(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden);
-    m_workDir.setSorting(QDir::Name | QDir::DirsFirst);
-}
+    m_remoteDirName(QByteArrayLiteral("/int")),
+    m_archive(nullptr)
+{}
 
 const QString UserRestoreOperation::description() const
 {
@@ -34,116 +42,193 @@ const QString UserRestoreOperation::description() const
 void UserRestoreOperation::nextStateLogic()
 {
     if(operationState() == Ready) {
-        setOperationState(UncompressingArchive);
-        uncompressArchive();
+        setOperationState(ReadingArchive);
+        readArchive();
 
-    } else if(operationState() == UncompressingArchive) {
-        setOperationState(State::ReadingBackupDir);
-        readBackupDir();
+    } else if(operationState() == ReadingArchive) {
+        setOperationState(ReadingDeviceTree);
+        readDeviceTree();
 
-    } else if(operationState() == State::ReadingBackupDir) {
-        setOperationState(State::DeletingFiles);
-        deleteFiles();
-
-    } else if(operationState() == State::DeletingFiles) {
-        setOperationState(State::WritingFiles);
+    } else if(operationState() == ReadingDeviceTree) {
+        setOperationState(WritingFiles);
         writeFiles();
 
-    } else if(operationState() == State::WritingFiles) {
+    } else if(operationState() == WritingFiles) {
         finish();
     }
 }
 
-void UserRestoreOperation::uncompressArchive()
+QString UserRestoreOperation::checkBackup(FileNode *root, FileNode::FileInfoList &entries)
 {
-    auto *tarZipFile = new QFile(m_backupUrl.toLocalFile(), this);
-    auto *uncompressor = new TarZipUncompressor(tarZipFile, m_workDir, this);
+    entries.clear();
 
-    if(uncompressor->isError()) {
-        finishWithError(uncompressor->error(), uncompressor->errorString());
+    for(const auto &top : root->toPreOrderList()) {
+        if(top.absolutePath.isEmpty()) {
+            continue;
+        } else if(!top.absolutePath.startsWith(QStringLiteral("int/")) && top.absolutePath != QStringLiteral("int")) {
+            return QStringLiteral("Everything in a backup must be in its int/ folder");
+        }
+    }
+
+    auto *intNode = root->find(QStringLiteral("int"));
+    if(!intNode || intNode->type() != FileNode::Type::Directory) {
+        return QStringLiteral("No int/ folder in the archive");
+    }
+
+    qint64 total = 0;
+    int count = 0;
+
+    for(const auto &info : intNode->toPreOrderList()) {
+        if(++count > MaxEntries) {
+            return QStringLiteral("More than %1 entries").arg(MaxEntries);
+        }
+
+        for(const auto &c : info.absolutePath) {
+            if(c.unicode() > 0x7f) {
+                return QStringLiteral("The device takes only ASCII names: %1").arg(info.absolutePath);
+            }
+        }
+
+        if(info.type == FileNode::Type::RegularFile) {
+            const auto size = info.userData.value<TarArchive::FileInfo>().size;
+
+            if(size > MaxFileSize) {
+                return QStringLiteral("%1 is %2 bytes, more than %3").arg(info.absolutePath).arg(size).arg(MaxFileSize);
+            }
+
+            total += size;
+
+            if(total > MaxTotalSize) {
+                return QStringLiteral("More than %1 bytes of files").arg(MaxTotalSize);
+            }
+        }
+
+        if(info.absolutePath != QStringLiteral("int")) {
+            entries.append(info);
+        }
+    }
+
+    return QString();
+}
+
+void UserRestoreOperation::readArchive()
+{
+    deviceState()->setStatusString(tr("Checking backup..."));
+
+    auto *file = new QFile(m_backupUrl.toLocalFile(), this);
+    const QFileInfo fileInfo(*file);
+
+    // A FIFO or a device would hang the read or never end.
+    if(!fileInfo.isFile()) {
+        finishWithError(BackendError::DiskError, QStringLiteral("Not a regular file: %1").arg(file->fileName()));
         return;
     }
 
-    connect(uncompressor, &TarZipUncompressor::finished, this, [=]() {
-        if(uncompressor->isError()) {
-            finishWithError(uncompressor->error(), uncompressor->errorString());
+    m_archive = new TarZipArchive(file, MaxTarSize, this);
+
+    if(m_archive->isError()) {
+        finishWithError(BackendError::DataError, m_archive->errorString());
+        return;
+    }
+
+    connect(m_archive, &TarZipArchive::ready, this, [=]() {
+        if(m_archive->isError() || !m_archive->archiveIndex()) {
+            finishWithError(BackendError::DataError, QStringLiteral("Backup refused: %1").arg(m_archive->errorString()));
+            return;
+        }
+
+        const auto why = checkBackup(m_archive->archiveIndex()->root(), m_entries);
+
+        if(!why.isEmpty()) {
+            finishWithError(BackendError::DataError, QStringLiteral("Backup refused: %1").arg(why));
         } else {
             advanceOperationState();
         }
     });
 }
 
-void UserRestoreOperation::readBackupDir()
+void UserRestoreOperation::readDeviceTree()
 {
-    if(!m_workDir.exists(m_remoteDirName.mid(1))) {
-        finishWithError(BackendError::DiskError, QStringLiteral("No matching backup directory"));
-        return;
-    }
+    auto *operation = new GetFileTreeOperation(rpc(), deviceState(), m_remoteDirName, this);
 
-    QDirIterator it(m_workDir, QDirIterator::Subdirectories);
+    connect(operation, &AbstractOperation::finished, this, [=]() {
+        if(operation->isError()) {
+            finishWithError(BackendError::OperationError, operation->errorString());
+            operation->deleteLater();
+            return;
+        }
 
-    while(it.hasNext()) {
-        m_files.append(QFileInfo(it.next()));
-    }
+        for(const auto &info : operation->files()) {
+            m_deviceTree.insert(info.absolutePath, info.type == FileType::Directory);
+        }
 
-    if(m_files.isEmpty()) {
-        finishWithError(BackendError::DiskError, QStringLiteral("Backup directory is empty"));
-    } else {
-        advanceOperationState();
-    }
-}
+        operation->deleteLater();
 
-void UserRestoreOperation::deleteFiles()
-{
-    deviceState()->setStatusString(tr("Cleaning up..."));
+        // A file in the backup that is a folder on the device, or the other way round, cannot be
+        // restored: refuse it before anything is written.
+        for(const auto &entry : qAsConst(m_entries)) {
+            const auto path = QByteArrayLiteral("/") + entry.absolutePath.toLatin1();
+            const auto isDir = entry.type == FileNode::Type::Directory;
 
-    auto numFiles = m_files.size();
-    for(const auto &fileInfo : qAsConst(m_files)) {
-        const auto filePath = QByteArrayLiteral("/") + m_workDir.relativeFilePath(fileInfo.absoluteFilePath()).toLocal8Bit();
-        const auto isLastFile = (--numFiles == 0);
-
-        auto *op = rpc()->storageRemove(filePath);
-        connect(op, &AbstractOperation::finished, this, [=]() {
-            if(op->isError()) {
-                finishWithError(BackendError::OperationError, op->errorString());
-            } else if(isLastFile) {
-                advanceOperationState();
+            if(m_deviceTree.contains(path) && m_deviceTree.value(path) != isDir) {
+                finishWithError(BackendError::OperationError, QStringLiteral("%1 is a %2 on the device and a %3 in the backup; nothing was written")
+                                .arg(QString(path), isDir ? QStringLiteral("file") : QStringLiteral("folder"), isDir ? QStringLiteral("folder") : QStringLiteral("file")));
+                return;
             }
-        });
-    }
+        }
+
+        advanceOperationState();
+    });
+
+    operation->start();
 }
 
 void UserRestoreOperation::writeFiles()
 {
     deviceState()->setStatusString(tr("Restoring backup..."));
 
-    auto numFiles = m_files.size();
+    QList<AbstractOperation*> operations;
 
-    for(const auto &fileInfo: qAsConst(m_files)) {
-        const auto filePath = QByteArrayLiteral("/") + m_workDir.relativeFilePath(fileInfo.absoluteFilePath()).toLocal8Bit();
-        const auto isLastFile = (--numFiles == 0);
+    for(const auto &entry : qAsConst(m_entries)) {
+        const auto path = QByteArrayLiteral("/") + entry.absolutePath.toLatin1();
 
-        AbstractOperation *op;
+        if(entry.type == FileNode::Type::Directory) {
+            if(!m_deviceTree.contains(path)) {
+                operations.append(rpc()->storageMkdir(path));
+            }
 
-        if(fileInfo.isFile()) {
-            auto *file = new QFile(fileInfo.absoluteFilePath(), this);
-
-            op = rpc()->storageWrite(filePath, file);
-            connect(op, &AbstractOperation::finished, this, [=]() {
-                file->deleteLater();
-            });
-
-        } else if(fileInfo.isDir()) {
-            op = rpc()->storageMkdir(filePath);
         } else {
-            finishWithError(BackendError::UnknownError, QStringLiteral("Expected a file or a directory"));
-            return;
+            const auto data = m_archive->archiveIndex()->fileData(entry.absolutePath);
+            const auto expected = entry.userData.value<TarArchive::FileInfo>().size;
+
+            if(data.size() != expected) {
+                finishWithError(BackendError::DataError, QStringLiteral("Cannot read %1 from the backup").arg(entry.absolutePath));
+                return;
+            }
+
+            auto *buffer = new QBuffer(this);
+            buffer->setData(data);
+
+            auto *op = rpc()->storageWrite(path, buffer);
+            connect(op, &AbstractOperation::finished, buffer, &QObject::deleteLater);
+            operations.append(op);
         }
+    }
+
+    if(operations.isEmpty()) {
+        advanceOperationState();
+        return;
+    }
+
+    auto remaining = operations.size();
+
+    for(auto *op : qAsConst(operations)) {
+        const auto isLast = (--remaining == 0);
 
         connect(op, &AbstractOperation::finished, this, [=]() {
             if(op->isError()) {
                 finishWithError(BackendError::OperationError, op->errorString());
-            } else if(isLastFile) {
+            } else if(isLast) {
                 advanceOperationState();
             }
 

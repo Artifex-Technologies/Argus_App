@@ -25,6 +25,13 @@ fn req(id: u32, content: Content) -> Main {
     Main { command_id: id, content: Some(content), ..Default::default() }
 }
 
+/// A write frame the way `flipper_rpc::write::write_frames` builds it.
+fn write(id: u32, data: &[u8], has_next: bool) -> Main {
+    let frames = flipper_rpc::write::write_frames("/int/favorites.txt", data);
+    let (content, _) = frames.into_iter().next().flatten().expect("one chunk");
+    Main { command_id: id, has_next, content: Some(content), ..Default::default() }
+}
+
 fn decode_one(bytes: &[u8]) -> Main {
     let mut d = FrameDecoder::new();
     d.push(bytes).unwrap();
@@ -57,6 +64,42 @@ fn requests_are_byte_identical_to_the_cpp_app() {
         ("req_protobuf_version_idmax", req(u32::MAX, Content::SystemProtobufVersionRequest(pb_system::ProtobufVersionRequest {}))),
         ("req_read_pair_stat", req(13, Content::StorageStatRequest(pb_storage::StatRequest { path: path("/int/favorites.txt") }))),
         ("req_read_pair_read", req(13, Content::StorageReadRequest(pb_storage::ReadRequest { path: path("/int/favorites.txt") }))),
+        ("req_write_chunk_next", write(20, b"hello", true)),
+        ("req_write_chunk_last", write(20, b"!", false)),
+        ("req_write_empty_file", write(21, b"", false)),
+        ("req_ping_empty", req(20, Content::SystemPingRequest(pb_system::PingRequest { data: Vec::new() }))),
+        ("req_mkdir_sub", req(22, Content::StorageMkdirRequest(pb_storage::MkdirRequest { path: path("/int/sub") }))),
+        ("req_delete_sub", req(23, Content::StorageDeleteRequest(pb_storage::DeleteRequest { path: path("/int/sub"), recursive: false }))),
+        (
+            "req_delete_sub_recursive",
+            req(24, Content::StorageDeleteRequest(pb_storage::DeleteRequest { path: path("/int/sub"), recursive: true })),
+        ),
+        (
+            "req_rename",
+            req(
+                25,
+                Content::StorageRenameRequest(pb_storage::RenameRequest {
+                    old_path: path("/int/favorites.txt"),
+                    new_path: path("/int/renamed.txt"),
+                }),
+            ),
+        ),
+        (
+            "req_reboot_os",
+            req(26, Content::SystemRebootRequest(pb_system::RebootRequest { mode: pb_system::reboot_request::RebootMode::Os as i32 })),
+        ),
+        (
+            "req_reboot_update",
+            req(27, Content::SystemRebootRequest(pb_system::RebootRequest { mode: pb_system::reboot_request::RebootMode::Update as i32 })),
+        ),
+        ("req_factory_reset", req(28, Content::SystemFactoryResetRequest(pb_system::FactoryResetRequest {}))),
+        (
+            "req_update",
+            req(
+                29,
+                Content::SystemUpdateRequest(pb_system::UpdateRequest { update_manifest: path("/ext/update/f7-update-test/update.fuf") }),
+            ),
+        ),
     ];
     for (name, msg) in cases {
         let want = f.get(name).unwrap_or_else(|| panic!("fixture {name} missing"));
@@ -166,5 +209,5 @@ fn empty_file_read_differs_on_the_wire_but_not_in_meaning() {
 #[test]
 fn every_fixture_is_covered() {
     let f = fixtures();
-    assert_eq!(f.len(), 30, "a frame was added to driver.c; add it to these tests");
+    assert_eq!(f.len(), 42, "a frame was added to driver.c; add it to these tests");
 }

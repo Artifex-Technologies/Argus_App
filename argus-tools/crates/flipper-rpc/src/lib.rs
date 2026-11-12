@@ -9,15 +9,20 @@
 //! - [`transfer`]: file trees, pulling files and folders, and the `/int` backup, with every
 //!   device-supplied name checked before it touches the local disk.
 //! - [`screen`]: the device's screen as a stream of frames (frames of the wrong length dropped).
+//! - [`write`]: operations that change the device (write, mkdir, remove, rename, reboot,
+//!   factory reset); callers ask the user first.
+//! - [`restore`]: reading a backup with every entry checked, and restoring it to `/int`.
 //! - [`transport`]: serial port or Unix socket. Nothing here searches for or opens a device on
 //!   its own; callers name the port.
 
 pub mod frame;
 pub mod ops;
+pub mod restore;
 pub mod screen;
 pub mod session;
 pub mod transfer;
 pub mod transport;
+pub mod write;
 
 pub use session::{RpcError, Session};
 

@@ -18,7 +18,8 @@ using namespace Zero;
 UserBackupOperation::UserBackupOperation(ProtobufSession *rpc, DeviceState *deviceState, const QUrl &backupUrl, QObject *parent):
     AbstractUtilityOperation(rpc, deviceState, parent),
     m_backupUrl(backupUrl),
-    m_tempDir(QStringLiteral("%1/%2-backup-XXXXXX").arg(globalTempDirs->root().absolutePath(), deviceState->deviceInfo().name)),
+    // Not named after the device: its name comes from the device and could hold "/" or "..".
+    m_tempDir(QStringLiteral("%1/backup-XXXXXX").arg(globalTempDirs->root().absolutePath())),
     m_workDir(m_tempDir.path()),
     m_deviceDirName(QByteArrayLiteral("/int"))
 {

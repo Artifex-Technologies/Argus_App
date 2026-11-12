@@ -4,6 +4,8 @@
 #include "flipperzero/protobufsession.h"
 #include "flipperzero/rpc/systemrebootoperation.h"
 
+#include "testhooks.h"
+
 using namespace Flipper;
 using namespace Zero;
 
@@ -55,6 +57,10 @@ void RestartOperation::rebootDevice()
     connect(operation, &AbstractOperation::finished, this, [=]() {
         if(operation->isError()) {
             finishWithError(operation->error(), operation->errorString());
+        } else if(Argus::isTestSerialPort()) {
+            // Test hook (testhooks.h): a pseudo-terminal has no USB to come back on; the restart
+            // is done once the request is sent.
+            advanceOperationState();
         }
     });
 

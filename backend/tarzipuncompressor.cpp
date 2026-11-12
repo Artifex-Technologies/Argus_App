@@ -18,6 +18,14 @@ TarZipUncompressor::TarZipUncompressor(QFile *tarZipFile, const QDir &targetDir,
 
 void TarZipUncompressor::onArchiveReady()
 {
+    // A gzip or tar error leaves no index (or a partial one): extract nothing.
+    if(m_tarZipArchive->isError() || !m_tarZipArchive->archiveIndex()) {
+        setError(m_tarZipArchive->isError() ? m_tarZipArchive->error() : BackendError::DataError,
+                 m_tarZipArchive->isError() ? m_tarZipArchive->errorString() : QStringLiteral("No archive index"));
+        emit finished();
+        return;
+    }
+
     auto *watcher = new QFutureWatcher<void>(this);
 
     connect(watcher, &QFutureWatcherBase::finished, this, &TarZipUncompressor::finished);

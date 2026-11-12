@@ -4,8 +4,9 @@
 //! 1 device or protocol error, 2 usage error.
 //!
 //! It never looks for devices: the Flipper's serial port (`--port`) or a socket carrying its
-//! byte stream (`--socket`) must be named. Nothing it does writes to the device; `pull` and
-//! `backup` write only new local files (they never overwrite).
+//! byte stream (`--socket`) must be named. Commands that change the device (`mkdir`, `rm`, `mv`,
+//! `push`, `restore`, `reboot`, `erase`) do nothing without `--yes`; `pull` and `backup` write
+//! only new local files (they never overwrite).
 
 mod chymaera;
 
@@ -19,6 +20,9 @@ use flipper_rpc::ops::{Entry, InfoSource};
 use flipper_rpc::transfer::Limits;
 use flipper_rpc::transport::{SerialTransport, Transport};
 use flipper_rpc::{RpcError, Session};
+
+/// How long a reboot or factory reset waits for the device to leave the port (`"gone"`).
+const GONE_WAIT: Duration = Duration::from_secs(5);
 
 const APP_VERSION: &str = include_str!("../../../../VERSION").trim_ascii();
 
@@ -42,7 +46,18 @@ const HELP: &str = "argus-cli — talk to a Flipper Zero over RPC (JSON on stdou
                      with --port/--socket, if any: see argus-cli chymaera)
   version | help
 
-  All commands only read from the device. Names the device lists that could lead outside
+  These change the device and do nothing without --yes (exit 2, nothing opened):
+  mkdir PATH         make a folder
+  rm PATH            remove a file or an empty folder (--recursive: a folder and all in it)
+  mv OLD NEW         rename or move
+  push FILE PATH     write a local file to the device (replacing PATH)
+  restore FILE       restore a backup of /int (from backup, or the C++ app's), then reboot;
+                     the archive is checked whole first, before the port is opened: without
+                     --yes only that check runs
+  reboot             restart the device
+  erase              factory reset: the device formats /int and restarts
+
+  The other commands only read from the device. Names the device lists that could lead outside
   DEST (.., /, \\, NUL, control characters) are refused and listed under \"refused\".
 
   --port DEVICE   the Flipper's serial port, e.g. /dev/ttyACM0 (never guessed)
@@ -63,11 +78,21 @@ struct Cmd {
     datastore: Option<PathBuf>,
     timeout: Duration,
     frames: usize,
+    yes: bool,
+    recursive: bool,
     words: Vec<String>,
 }
 
 fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
-    let mut cmd = Cmd { target: None, datastore: None, timeout: Duration::from_millis(5000), frames: 1, words: Vec::new() };
+    let mut cmd = Cmd {
+        target: None,
+        datastore: None,
+        timeout: Duration::from_millis(5000),
+        frames: 1,
+        yes: false,
+        recursive: false,
+        words: Vec::new(),
+    };
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| Usage(format!("{name} needs a value")));
@@ -80,6 +105,8 @@ fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
                 cmd.target = Some(if a == "--port" { Target::Port(p) } else { Target::Socket(p) });
             }
             "--datastore" => cmd.datastore = Some(PathBuf::from(value("--datastore")?)),
+            "--yes" => cmd.yes = true,
+            "--recursive" => cmd.recursive = true,
             "--frames" => {
                 let n: usize = value("--frames")?.parse().map_err(|_| Usage("--frames takes a number".into()))?;
                 if !(1..=flipper_rpc::screen::MAX_FRAMES).contains(&n) {
@@ -149,10 +176,83 @@ fn open(target: &Target, timeout: Duration) -> Result<Box<dyn Transport>, RpcErr
     }
 }
 
+/// A local file to read: a regular file (a FIFO or device would hang or never end), at most
+/// `max` bytes.
+fn read_local(path: &Path, max: u64) -> Result<Vec<u8>, RpcError> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path).map_err(|e| RpcError::Local(format!("{}: {e}", path.display())))?;
+    if !meta.is_file() {
+        return Err(RpcError::Local(format!("{} is not a regular file", path.display())));
+    }
+    let mut data = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(max + 1).read_to_end(&mut data))
+        .map_err(|e| RpcError::Local(format!("{}: {e}", path.display())))?;
+    if data.len() as u64 > max {
+        return Err(RpcError::Local(format!("{} is larger than {max} bytes", path.display())));
+    }
+    Ok(data)
+}
+
+/// Reads and checks a backup without opening the device.
+fn check_backup(path: &Path) -> Result<flipper_rpc::restore::BackupArchive, (String, String)> {
+    let meta = std::fs::metadata(path).map_err(|e| ("local".to_string(), format!("{}: {e}", path.display())))?;
+    if !meta.is_file() {
+        return Err(("local".into(), format!("{} is not a regular file", path.display())));
+    }
+    let f = std::fs::File::open(path).map_err(|e| ("local".to_string(), format!("{}: {e}", path.display())))?;
+    flipper_rpc::restore::read_backup(std::io::BufReader::new(f), &flipper_rpc::restore::ArchiveLimits::default())
+        .map_err(|e| ("archive".to_string(), e.to_string()))
+}
+
 fn run(cmd: &Cmd) -> Result<Value, RpcError> {
     let target = cmd.target.as_ref().expect("checked by main");
+    // read before the port is opened, so a bad local file changes nothing on the device
+    let pushed = match cmd.words.as_slice() {
+        [c, local, _] if c == "push" => Some(read_local(Path::new(local), flipper_rpc::write::MAX_WRITE as u64)?),
+        _ => None,
+    };
+    let archive = match cmd.words.as_slice() {
+        [c, file] if c == "restore" => Some(check_backup(Path::new(file)).map_err(|(_, m)| RpcError::Invalid(m))?),
+        _ => None,
+    };
     let mut s = Session::start(open(target, cmd.timeout)?, cmd.timeout)?;
     match cmd.words[0].as_str() {
+        "mkdir" => {
+            s.storage_mkdir(&cmd.words[1])?;
+            Ok(json!({"ok": true, "command": "mkdir", "path": cmd.words[1]}))
+        }
+        "rm" => {
+            s.storage_remove(&cmd.words[1], cmd.recursive)?;
+            Ok(json!({"ok": true, "command": "rm", "path": cmd.words[1], "recursive": cmd.recursive}))
+        }
+        "mv" => {
+            s.storage_rename(&cmd.words[1], &cmd.words[2])?;
+            Ok(json!({"ok": true, "command": "mv", "from": cmd.words[1], "to": cmd.words[2]}))
+        }
+        "push" => {
+            let data = pushed.expect("read above");
+            s.storage_write(&cmd.words[2], &data)?;
+            Ok(json!({"ok": true, "command": "push", "path": cmd.words[2], "bytes": data.len()}))
+        }
+        "restore" => {
+            let r = s.restore(&archive.expect("checked above"))?;
+            // as the C++ app: the device restarts so that it loads the restored settings
+            s.system_reboot(flipper_rpc::write::RebootMode::Os)?;
+            let gone = s.wait_until_gone(GONE_WAIT);
+            Ok(json!({
+                "ok": true, "command": "restore", "file": cmd.words[1], "dirs_made": r.dirs_made,
+                "dirs_kept": r.dirs_kept, "files": r.files, "bytes": r.bytes, "rebooted": true, "gone": gone,
+            }))
+        }
+        "reboot" => {
+            s.system_reboot(flipper_rpc::write::RebootMode::Os)?;
+            Ok(json!({"ok": true, "command": "reboot", "gone": s.wait_until_gone(GONE_WAIT)}))
+        }
+        "erase" => {
+            s.factory_reset()?;
+            Ok(json!({"ok": true, "command": "erase", "gone": s.wait_until_gone(GONE_WAIT)}))
+        }
         "info" => {
             let version = s.protobuf_version()?;
             let (source, pairs) = s.device_info(version)?;
@@ -292,6 +392,27 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         ["info"] | ["date"] | ["ls" | "stat" | "df" | "md5", _] | ["pull", _, _] | ["backup", _] => {}
+        ["restore", file] => {
+            // the archive is checked first, with or without --yes; the port is not opened yet
+            match check_backup(Path::new(file)) {
+                Err((code, m)) => return fail(&code, m, 1),
+                Ok(a) if !cmd.yes => {
+                    print(json!({
+                        "ok": false, "command": "restore", "file": file, "checked": true,
+                        "files": a.files(), "dirs": a.dirs(), "bytes": a.bytes(),
+                        "error": {"code": "confirm", "message": "the backup is fine; restoring it changes the device: run again with --yes"},
+                    }));
+                    return ExitCode::from(2);
+                }
+                Ok(_) => {}
+            }
+        }
+        ["mkdir" | "rm", _] | ["mv" | "push", _, _] | ["reboot"] | ["erase"] if !cmd.yes => {
+            return fail("confirm", format!("{} changes the device; run again with --yes", words[0]), 2)
+        }
+        ["mkdir" | "rm", _] | ["mv" | "push", _, _] | ["reboot"] | ["erase"] => {}
+        ["mkdir" | "rm" | "restore"] => return fail("usage", format!("{} needs a path", words[0]), 2),
+        ["mv" | "push", ..] => return fail("usage", format!("{} needs two paths", words[0]), 2),
         ["screen", dir] if Path::new(dir).exists() => return fail("exists", format!("{dir} exists"), 1),
         ["screen", _] => {}
         ["screen"] => return fail("usage", "screen needs a new local folder".into(), 2),

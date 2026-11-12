@@ -9,16 +9,17 @@
 #include "tempdirectories.h"
 
 TarZipArchive::TarZipArchive(QFile *inputFile, QObject *parent):
+    TarZipArchive(inputFile, GZipUncompressor::DefaultMaxOutput, parent)
+{}
+
+TarZipArchive::TarZipArchive(QFile *inputFile, qint64 maxTarSize, QObject *parent):
     QObject(parent),
+    // The tar goes to a new file in the app's temporary folder. It used to be "<base name>.tar"
+    // next to the input, which replaced (and on destruction deleted) a file of that name there.
+    m_tarFile(globalTempDirs->createTempFile(this)),
     m_tarArchive(nullptr)
 {
-    const QFileInfo tzFileInfo(*inputFile);
-    const auto tzFileDir = tzFileInfo.absoluteDir();
-    const auto fileName = tzFileInfo.baseName() + QStringLiteral(".tar");
-
-    m_tarFile = new QFile(tzFileDir.absoluteFilePath(fileName), this);
-
-    auto *uncompressor = new GZipUncompressor(inputFile, m_tarFile, this);
+    auto *uncompressor = new GZipUncompressor(inputFile, m_tarFile, maxTarSize, this);
 
     if(uncompressor->isError()) {
         setError(uncompressor->error(), QStringLiteral("Failed to uncompress *tar.gz file: %1").arg(uncompressor->errorString()));

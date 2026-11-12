@@ -1,7 +1,8 @@
 #!/bin/sh
 # Runs the C++ qFlipper-cli and the Rust argus-cli against the same fake Flipper on a
-# pseudo-terminal and compares them: exit status, the archives they produce, and the RPC requests
-# they send (decoded by the fake). docs/RUST_PORT.md, section 4.
+# pseudo-terminal and compares them: exit status, the archives they produce, the RPC requests
+# they send (decoded by the fake) and, for restores and the factory reset, the fake's storage
+# afterwards (every file's size and MD5). docs/RUST_PORT.md, section 4.
 #
 #   sh compare-cli.sh QFLIPPER_CLI ARGUS_CLI FLIPPER_FAKE OUTDIR
 #
@@ -175,6 +176,110 @@ for side in cpp rs; do
     # no request file at all: the CLI never opened the port
     ! [ -f "$out/outside-$side/requests.txt" ] || ! grep -q 'StorageReadRequest\|StorageListRequest /int' "$out/outside-$side/requests.txt"
     check "outside: $side read nothing from /int" $?
+done
+
+# ---- restore and factory reset (phase 4: they change the fake's storage) ----
+# dumps of the fake's storage: d PATH | f PATH SIZE MD5, sorted
+"$fake" --print-dump > "$out/standard.dump"
+"$fake" --print-dump --changed-int > "$out/changed.dump"
+"$fake" --print-dump --int-conflict > "$out/conflict.dump"
+"$fake" --write-archives "$out/archives" || { echo "fake could not write the test archives" >&2; exit 1; }
+
+# wait_fake: the client has exited; give the fake a moment to finish, then end it (an app that
+# refused before opening the port leaves it waiting for a client)
+wait_fake() {
+    i=0
+    while kill -0 "$fake_pid" 2>/dev/null && [ $i -lt 30 ]; do i=$((i + 1)); timeout 0.1 tail -f /dev/null; done
+    kill "$fake_pid" 2>/dev/null
+    stop_fake
+}
+
+# run_change NAME SIDE START COMMAND...: one run of a command that changes the device, from a
+# fresh fake started with START (none, --changed-int or --int-conflict); its storage is dumped at the end
+run_change() {
+    name=$1 side=$2 start=$3; shift 3
+    d="$out/$name-$side"
+    if [ "$start" = none ]; then start=; fi
+    if [ "$side" = cpp ]; then
+        start_fake "$d" 2 --dump "$d/dump.txt" $start
+        mkdir -p "$d/tmp"
+        TMPDIR="$d/tmp" ARGUS_TEST_SERIAL_PORT=$port timeout 90 "$cpp" "$@" > "$d/stdout.txt" 2> "$d/stderr.txt" < /dev/null
+    else
+        start_fake "$d" 1 --dump "$d/dump.txt" $start
+        timeout 90 "$rs" --port "$port" "$@" --yes > "$d/stdout.txt" 2> "$d/stderr.txt" < /dev/null
+    fi
+    echo $? > "$d/exit.txt"
+    wait_fake
+}
+
+changes() { # changes NAME-SIDE: the requests of the work that change the device
+    [ -f "$out/$1/requests.txt" ] || return 0
+    storage_requests "$1" | grep 'Storage\(Write\|Mkdir\|Delete\|Rename\)Request\|SystemRebootRequest\|SystemFactoryResetRequest'
+}
+
+same_restore() { # same_restore NAME START_DUMP: both exit 0, same storage afterwards, same requests
+    name=$1
+    check "$name: C++ exit 0" "$(test "$(exit_of "$name-cpp")" = 0; echo $?)"
+    check "$name: Rust exit 0" "$(test "$(exit_of "$name-rs")" = 0; echo $?)"
+    check "$name: the same bytes on the fake afterwards" "$(cmp -s "$out/$name-cpp/dump.txt" "$out/$name-rs/dump.txt"; echo $?)"
+    storage_requests "$name-cpp" > "$out/$name-cpp/storage.txt"
+    storage_requests "$name-rs" > "$out/$name-rs/storage.txt"
+    diff "$out/$name-cpp/storage.txt" "$out/$name-rs/storage.txt" > "$out/$name-requests.diff"
+    check "$name: same requests in the same order ($(grep -c 'Write' "$out/$name-rs/storage.txt") write frames, $(grep -c 'Ping' "$out/$name-rs/storage.txt") pings)" $?
+}
+
+echo "== restore: each app restores its own backup and the other's onto a changed /int"
+for from in cpp rs; do
+    run_change "restore-$from" cpp --changed-int restore "$out/backup-$from/backup.tgz"
+    run_change "restore-$from" rs --changed-int restore "$out/backup-$from/backup.tgz"
+    same_restore "restore-$from"
+done
+check "restore: both backups leave the same bytes" "$(cmp -s "$out/restore-cpp-cpp/dump.txt" "$out/restore-rs-rs/dump.txt"; echo $?)"
+grep -v '^f /int/extra.txt ' "$out/restore-cpp-rs/dump.txt" > "$out/restored-without-extra.dump"
+check "restore: /int is back as backed up, the file added since stays" \
+    "$(cmp -s "$out/restored-without-extra.dump" "$out/standard.dump" && grep -q '^f /int/extra.txt ' "$out/restore-cpp-rs/dump.txt"; echo $?)"
+
+for good in old-format record-padding large-file; do
+    echo "== restore: $good"
+    run_change "good-$good" cpp --changed-int restore "$out/archives/good-$good.tgz"
+    run_change "good-$good" rs --changed-int restore "$out/archives/good-$good.tgz"
+    same_restore "good-$good"
+done
+
+echo "== restore over a file where the backup has a folder (/int/sub): refused before writing"
+run_change conflict cpp --int-conflict restore "$out/backup-rs/backup.tgz"
+run_change conflict rs --int-conflict restore "$out/backup-cpp/backup.tgz"
+for side in cpp rs; do
+    check "conflict: $side refuses (exit $(exit_of "conflict-$side")), writes nothing, the storage is unchanged" \
+        "$(test "$(exit_of "conflict-$side")" != 0 && test -z "$(changes "conflict-$side")" && cmp -s "$out/conflict-$side/dump.txt" "$out/conflict.dump"; echo $?)"
+done
+
+echo "== hostile archives: both apps refuse each before writing anything"
+{ cut -f1 "$out/archives/hostile.txt" | sed 's/^/hostile-/'; echo bomb; } > "$out/archives/refuse.txt"
+while read -r a; do
+    run_change "$a" cpp --changed-int restore "$out/archives/$a.tgz"
+    run_change "$a" rs --changed-int restore "$out/archives/$a.tgz"
+    check "$a: both refuse (C++ exit $(exit_of "$a-cpp"), Rust exit $(exit_of "$a-rs"))" \
+        "$(test "$(exit_of "$a-cpp")" != 0 && test "$(exit_of "$a-rs")" = 1; echo $?)"
+    # the Rust CLI checks the archive before it opens the port: the fake never saw it
+    check "$a: nothing written (C++: no change requests, storage unchanged; Rust: port never opened)" \
+        "$(test -z "$(changes "$a-cpp")" && cmp -s "$out/$a-cpp/dump.txt" "$out/changed.dump" && test ! -e "$out/$a-rs/requests.txt"; echo $?)"
+done < "$out/archives/refuse.txt"
+check "hostile: no file was written outside its folder (no escaped.txt anywhere under $out)" "$(test -z "$(find "$out" -name escaped.txt)"; echo $?)"
+
+echo "== factory reset (qFlipper-cli erase | argus-cli erase --yes)"
+run_change erase cpp none erase
+run_change erase rs none erase
+same_restore erase
+check "erase: /int is empty afterwards" "$(! grep -q '^[df] /int/' "$out/erase-rs/dump.txt"; echo $?)"
+
+echo "== nothing changes the device without --yes (argus-cli)"
+for c in "restore $out/backup-cpp/backup.tgz" "erase" "reboot" "mkdir /int/x" "rm /int/favorites.txt" "mv /int/a /int/b" "push $out/standard.dump /int/x"; do
+    # shellcheck disable=SC2086
+    "$rs" --port "$out/no-such-port" $c > "$out/confirm.out" 2>&1
+    code=$?
+    check "argus-cli $(echo "$c" | cut -d' ' -f1) without --yes: exit $code (2), the port is not opened" \
+        "$(test $code -eq 2 && grep -q '"confirm"' "$out/confirm.out"; echo $?)"
 done
 
 echo "== results in $out"

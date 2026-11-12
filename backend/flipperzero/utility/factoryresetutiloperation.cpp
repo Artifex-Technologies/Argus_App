@@ -4,6 +4,8 @@
 #include "flipperzero/protobufsession.h"
 #include "flipperzero/rpc/systemfactoryresetoperation.h"
 
+#include "testhooks.h"
+
 using namespace Flipper;
 using namespace Zero;
 
@@ -47,6 +49,11 @@ void FactoryResetUtilOperation::resetDevice()
     connect(operation, &AbstractOperation::finished, this, [=]() {
         if(operation->isError()) {
             finishWithError(operation->error(), operation->errorString());
+        } else if(Argus::isTestSerialPort()) {
+            // Test hook (testhooks.h): a pseudo-terminal has no USB to come back on; the reset
+            // is done once the request is sent.
+            disconnect(deviceState(), &DeviceState::isOnlineChanged, this, &FactoryResetUtilOperation::onDeviceOnlineChanged);
+            advanceOperationState();
         }
     });
 }

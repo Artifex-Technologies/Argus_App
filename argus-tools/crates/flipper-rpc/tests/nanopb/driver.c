@@ -121,6 +121,64 @@ int main(void)
     m = request(4294967295u, PB_Main_system_protobuf_version_request_tag, false);
     emit("req_protobuf_version_idmax", &m);
 
+    /* ---- requests that change the device (phase 4), as the plugin's request classes ---- */
+    char favorites[] = "/int/favorites.txt", sub[] = "/int/sub", renamed[] = "/int/renamed.txt",
+         manifest_path[] = "/ext/update/f7-update-test/update.fuf";
+    /* StorageWriteRequest: has_file only when the chunk is not empty */
+    m = request(20, PB_Main_storage_write_request_tag, true);
+    m.content.storage_write_request.path = favorites;
+    m.content.storage_write_request.has_file = true;
+    m.content.storage_write_request.file.data = bytes("hello", 5);
+    emit("req_write_chunk_next", &m);
+    free(m.content.storage_write_request.file.data);
+
+    m = request(20, PB_Main_storage_write_request_tag, false);
+    m.content.storage_write_request.path = favorites;
+    m.content.storage_write_request.has_file = true;
+    m.content.storage_write_request.file.data = bytes("!", 1);
+    emit("req_write_chunk_last", &m);
+    free(m.content.storage_write_request.file.data);
+
+    m = request(21, PB_Main_storage_write_request_tag, false);
+    m.content.storage_write_request.path = favorites;
+    emit("req_write_empty_file", &m);
+
+    m = request(20, PB_Main_system_ping_request_tag, false);
+    emit("req_ping_empty", &m);
+
+    m = request(22, PB_Main_storage_mkdir_request_tag, false);
+    m.content.storage_mkdir_request.path = sub;
+    emit("req_mkdir_sub", &m);
+
+    m = request(23, PB_Main_storage_delete_request_tag, false);
+    m.content.storage_delete_request.path = sub;
+    emit("req_delete_sub", &m);
+
+    m = request(24, PB_Main_storage_delete_request_tag, false);
+    m.content.storage_delete_request.path = sub;
+    m.content.storage_delete_request.recursive = true;
+    emit("req_delete_sub_recursive", &m);
+
+    m = request(25, PB_Main_storage_rename_request_tag, false);
+    m.content.storage_rename_request.old_path = favorites;
+    m.content.storage_rename_request.new_path = renamed;
+    emit("req_rename", &m);
+
+    m = request(26, PB_Main_system_reboot_request_tag, false);
+    m.content.system_reboot_request.mode = PB_System_RebootRequest_RebootMode_OS;
+    emit("req_reboot_os", &m);
+
+    m = request(27, PB_Main_system_reboot_request_tag, false);
+    m.content.system_reboot_request.mode = PB_System_RebootRequest_RebootMode_UPDATE;
+    emit("req_reboot_update", &m);
+
+    m = request(28, PB_Main_system_factory_reset_request_tag, false);
+    emit("req_factory_reset", &m);
+
+    m = request(29, PB_Main_system_update_request_tag, false);
+    m.content.system_update_request.update_manifest = manifest_path;
+    emit("req_update", &m);
+
     /* ---- responses, as the firmware fills them ---- */
     m = response(1, PB_Main_system_protobuf_version_response_tag, false, PB_CommandStatus_OK);
     m.content.system_protobuf_version_response.major = 0;
