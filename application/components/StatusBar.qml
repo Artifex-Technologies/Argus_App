@@ -41,7 +41,9 @@ Rectangle {
 
                   Backend.backendState === ApplicationBackend.WaitingForDevices ? qsTr("Waiting for devices ...") :
                   Backend.backendState > ApplicationBackend.ScreenStreaming && Backend.backendState < ApplicationBackend.Finished ? qsTr("Do not unplug the device ...") :
-                  Backend.backendState === ApplicationBackend.Finished ? qsTr("Operation has finished successfully.") :
+                  Backend.backendState === ApplicationBackend.Finished ?
+                      (Backend.deviceState && Backend.deviceState.warningString.length > 0 ? qsTr("Operation has finished, but not all of it: see the warning.") :
+                                                                                             qsTr("Operation has finished successfully.")) :
                   Backend.firmwareUpdateState === ApplicationBackend.ErrorOccured ? qsTr("Cannot connect to update server") :
                   Backend.firmwareUpdateState === ApplicationBackend.Checking ? qsTr("Checking for firmware updates...") : qsTr("Ready.")
 

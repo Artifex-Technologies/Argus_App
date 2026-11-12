@@ -21,7 +21,7 @@ Line counts are `.cpp`/`.h`/`.c`/`.qml` lines (2026-11-12), without the submodul
 | `backend/flipperzero/toplevel/` | 1 575 | Whole flows: full update, repair, factory reset, firmware/radio install, settings backup/restore | Yes, flashes | Late phases, behind confirmation |
 | `backend/flipperzero/recovery*` + `dfu/` | 735 + 2 904 | Recovery mode: DfuSe file format, STM32WB55 option bytes, FUS and radio stack, libusb and WinUSB backends | USB DFU (VID 0483, PID DF11) | **nusb** (pure Rust USB); DfuSe parser in pure Rust |
 | `backend/flipperzero/` (rest) | ~4 200 | Device state model, screen streamer, virtual display, file manager, manifests (assets, radio), factory info | Yes | Mostly logic; ported with the phases that need it |
-| `backend/` (top level) | 4 731 | Device registry (USB hot-plug by VID/PID), serial finder, update registries (download `directory.json` from Flipper's update server), tar/gzip, preferences, logger, region info | USB enumeration; HTTPS | `nusb` hot-plug, `tar`/`flate2` (already in argus-tools), an HTTPS client with rustls |
+| `backend/` (top level) | 4 731 | Device registry (USB hot-plug by VID/PID), serial finder, update registries (download `directory.json` from Flipper's update server), tar/gzip, preferences, logger, region info | USB enumeration; HTTPS | `nusb` hot-plug, `tar`/`flate2` (already in argus-tools); the update directory, region bundle and HTTPS (rustls) ported (`flipper-updates`) |
 | `backend/chymaera/` (ours) | 2 744 | SQLite datastore, event log, pcap/pcapng exporter, `.nfc`/`.sub` parsers, capture pull with its allowlist, the Sarina control API server | Pull reads files | `rusqlite`, std `TcpListener` (loopback), argus-tools' parsers. Ported (`argus-capture`, `argus-api`), except `watch` and a device in `serve` |
 | `backend/argus/` (ours) | 1 837 | Bridge to argus-tools over QProcess, device storage for snapshots and installs | Reads/writes files | Disappears: argus-tools becomes a library call |
 | `argus-tools/` (ours, Rust already) | 3 862 + 1 260 tests | App extractor, compatibility, check-up, Limbo rebuilds, snapshots, capture library | No (works on listings and files) | It is the Rust side; the port's crates live in its workspace |
@@ -49,7 +49,7 @@ What talks to the device, by channel:
 | QtSingleApplication (`application/qtsingleapplication`) | BSD (Digia) | Not ported; a lock file or socket in Rust replaces it |
 | libwdi (`driver-tool/libwdi`) | LGPL-3.0 (`COPYING-LGPL`) | Windows only, not ported |
 | Fonts in `application/assets/fonts` (Born2bSporty, HaxrCorp 4089, ProggySquare, Share Tech, Share Tech Mono) | Check each when the UI is ported | Decided at the UI phase |
-| Rust crates added now | prost, prost-build (Apache-2.0); serialport (MPL-2.0); proptest (MIT/Apache-2.0); serde_json (MIT/Apache-2.0); rusqlite (MIT); libc (MIT/Apache-2.0); md-5 for tests (MIT/Apache-2.0) | All compatible with GPL-3.0 |
+| Rust crates added now | prost, prost-build (Apache-2.0); serialport (MPL-2.0); proptest (MIT/Apache-2.0); serde_json (MIT/Apache-2.0); rusqlite (MIT); libc (MIT/Apache-2.0); md-5 for tests (MIT/Apache-2.0); ureq (MIT/Apache-2.0), rustls and rustls-native-certs (Apache-2.0/ISC/MIT), ring (Apache-2.0 and ISC) for HTTPS | All compatible with GPL-3.0 |
 | Qt's JSON rules (`qjsonparser.cpp`, `qjsonwriter.cpp`, `qlocale_tools.cpp`, Qt 6.12) | LGPL-3.0/GPL | Not copied: `argus-api::qjson` is written from scratch to behave the same, and checked against Qt itself |
 
 ## 3. The order
@@ -90,6 +90,8 @@ Protocol and device logic first, with the CLI as the proof surface; the UI last.
    compared with the C++ `FullRepairOperation` across the chip's resets (`compare-repair.sh`); the resources install
    fixed in both.*
 7. **Update registry and region provisioning** (HTTPS with rustls, SHA-256 checked before anything is used).
+   *Done 2026-11-12 (`crates/flipper-updates`, `argus-cli updates|region`, the region step of `recovery repair|
+   legacy-update|finish`), proven against a local HTTPS stand-in only; compared with the C++ code; both fixed.*
 8. **The UI** in egui/eframe, window by window. When it covers what the QML does, the C++ goes (no dead code left).
 
 ## 4. How the port is proven without a device
@@ -214,6 +216,34 @@ requests in order and the files on the card afterwards (sizes and MD5). The C++ 
 pass (184 with the legacy update and the cases below); the bootloader requests are the same in the same order (450 in the main scenario, 1824 when the FUS never
 settles: 120 state reads each), so are the requests on the firmware, and both leave the same bytes on the chip and the
 card. No difference turned up in the bootloader part; the resources install had two bugs, fixed in both (section 5).
+**Region data** (phase 7): four more scenarios with a Flipper of region 1 (`flipper-fake --region 1`: devinfo and the
+OTP's factory information). The C++ app reads the region bundle from the folder through its test hook (the file
+`bundle`); argus-cli fetches it over HTTPS from `flipper-fake --update-server` on 127.0.0.1, trusting the run's own
+test CA through `SSL_CERT_FILE`. A bundle whose server saw DE; one where the server names no country (the C++ app in
+the C locale, argus-cli without `--country`: both use the default bands and send no country code); the legacy update
+(region data written, then `/int` restored); and a band of 200 dBm (both refuse the bundle and write no region data;
+the C++ app has put the resources on the card by then, argus-cli has not). Same requests on the firmware, same
+`/int/.region_data` byte for byte, and the servers saw nothing but the four bundle requests: 54 more checks, 238 in
+all, pass.
+
+**The update directory and region bundle against the C++ app's own.** `crates/flipper-updates/tests/qt-oracle` builds a
+program from the app's `updateregistry.cpp`, `flipperupdates.cpp`, `remotefilefetcher.cpp`, `regioninfo.cpp` and the
+plugin's `regiondata.cpp` (with nanopb; QtCore and QtNetwork, which it never uses for the network). `tests/qt_oracle.rs`
+feeds it and the Rust port 3000 generated directories per seed (channels, versions and files right, missing, of the
+wrong type; hashes of every length and case; URLs of every scheme; versions that are not numbers or overflow; repeated
+ids; cut short or not JSON) and 3000 region bundles, each with three fallback countries (band values at and past the
+firmware's limits, unknown band names, lists of the wrong type, server errors). Both must read the same channels in the
+same order, the same versions newest first, the same files and latest versions, and make the same `/int/.region_data`
+bytes, or both refuse. The fetcher's own checks (SHA-256 in either case, a size limit) are compared through its test
+hook. Five seeds agreed here (15 000 directories, 45 000 bundle readings). Against the C++ code before the fixes below,
+every directory differed (the oracle's read of a channel the directory lacks aborted the program) and 1284 of 3000
+bundles did. The Linux workflow runs it. `tests/fetch.rs` runs `flipper_updates::fetch` against
+`flipper_fake::update_server`: HTTPS on 127.0.0.1 with a CA made for the test (ECDSA P-256 with ring, the
+certificates written in DER by hand), never another host; directory, files and bundle come through, a file changed by
+one bit, an endless body, a length of 1 TB, a stall, a redirect to http or in a loop, a missing file and a server the
+client does not trust all end in an error within their limits. `argus-cli/tests/updates.rs` does the same for the CLI
+(trusting the test CA through `SSL_CERT_FILE`) and for `recovery finish` on a region-1 fake: the region data lands in
+`/int/.region_data`, and a bundle that cannot be fetched changes nothing on the device.
 
 **The C++ CLI against the same fake.** The C++ app finds a Flipper by USB VID/PID. A test-only hook
 (`backend/testhooks.h`) changes that only when `ARGUS_TEST_SERIAL_PORT` names a port: the registry then does not
@@ -385,6 +415,22 @@ In `argus-tools/` (now a Cargo workspace; `cargo build` there still builds only 
   table; OTP) and `flipper_dfu::recovery` (exit, boot mode, wireless status, start FUS, FUS delete/upgrade/start,
   firmware `.dfu`, wireless stack image below SFSA, option bytes from a file). The option bytes write tolerates the
   chip's reset after it (`Dfu::download_may_reset`); an error status before it is still an error.
+
+- Phase 7 (2026-11-12): `crates/flipper-updates`: `directory` (`directory.json` with Qt's JSON rules, now in its own
+  crate `qjson`, which argus-api re-exports), `region` (the bundle, the country's bands, the `PB_Region` bytes) and
+  `fetch` (ureq with rustls/ring and the system's roots from `rustls-native-certs`, which honours `SSL_CERT_FILE`;
+  https only, also after a redirect, at most 3 redirects, 20 s to connect and 10 min in all, no compression asked
+  for; the directory at most 16 MiB, the bundle 1 MiB, a file 64 MiB, refused past it, never cut; a file handed out
+  only once its SHA-256 matched). `argus-cli [--update-server URL] updates directory | updates fetch CHANNEL TYPE
+  TARGET FILE` and `[--country CC] region FILE` (no device; new files only, 0600). `recovery repair|legacy-update|
+  finish` now provision any region: for a device that is not of the development region the bundle is fetched before
+  anything changes on the firmware side (the legacy update: before the backup), and its data is written to
+  `/int/.region_data` after the resources, before `/int` is restored and the restart, as the C++ app does.
+  `flipper-fake --update-server DIR --ca-out FILE` is the local HTTPS stand-in; `--region N` sets the fake's region.
+  `compare-repair.sh` has four region scenarios (section 4).
+- The GUI shows the partial success (2026-11-12): the finish screen says "Done, with a warning" with
+  `DeviceState::warningString` under it (e.g. "repaired, but the radio stack was not installed: ..."), and the status
+  bar says the operation did not finish whole. Checked with qmllint; not yet seen on a screen.
 
 Differences from the C++ app found so far, all on purpose or harmless:
 
@@ -589,6 +635,36 @@ and `compare-repair.sh`'s `mismatch` scenario for the second:
   archive lacks was written as an empty file (after the device's copy had been removed), and one with another size or
   MD5 was written as it was, both under the manifest's claim. Now the bundle is refused before anything changes.
 
+Found while porting the update directory and region provisioning (phase 7), and **fixed in both versions** on
+2026-11-12. `flipper-updates/tests/qt_oracle.rs` covers each (with the C++ code itself), the unit tests in
+`directory.rs` and `region.rs` too:
+
+- **A file with an empty hash was never checked.** `RemoteFileFetcher` skipped the SHA-256 check when the directory's
+  `sha256` was empty (or not a string), so such a file was used as it came. A file now needs 64 hex digits (either case),
+  or the directory is invalid.
+- **Any URL Qt can open was followed.** A directory entry could name `http:`, `file:`, `data:` or `qrc:` URLs (a
+  `file:` URL reads a local file). Files and the fetcher now take only `https://` (Qt's redirect policy already refused
+  https to http; redirects are now at most 3).
+- **No limit on a download, and no time limit.** The directory went into memory whatever its size, files onto the disk;
+  a server that stalled hung the operation. The fetcher now stops past its limit (16 MiB for the directory, 1 MiB for the
+  region bundle, 64 MiB for a file; also from the announced length) and gives up after 10 minutes. The progress no
+  longer divides by an unknown length.
+- **A channel without versions, or one the directory lacks, crashed the app.** `ChannelInfo::latestVersion` read the
+  first of an empty list; `UpdateRegistry::latestVersion` hits that whenever the update channel in my preferences is
+  not in the directory (the oracle shows the abort). It now gives an empty version.
+- **Version numbers overflowed.** The parts were read into an `int` (100.0.0.0 wrapped), and `compare` subtracted,
+  which overflowed for a version that is not a number (a git hash on the dev channel) and gave `std::sort` an
+  inconsistent order (undefined behaviour). Parts are now 1 to 9 digits read into 64 bits, `compare` gives the sign,
+  and the sort is stable.
+- **A malformed entry left half a directory.** The channels before it stayed; now the whole directory is invalid.
+- **Region data could be wrong in several ways.** `RegionInfo` left its validity flags uninitialised when the reply
+  did not parse (a broken reply could read as valid); a band value that was not a whole number within `int` became 0;
+  `max_power` and `duty_cycle` were cut to 8 bits on the way to the firmware (200 dBm became -56); a band list naming a
+  band that does not exist gave an all-zero band; a name that is not a string became the empty name. Now the flags start
+  false, every band value must be a whole number in the firmware's range (start and end within 32 bits and `start <=
+  end`, power -128..127 dBm, duty cycle 0..100 %), and every name must be a string naming a band, or the bundle is
+  invalid.
+
 A regression of my own, caught by porting the capture sync: once `GetFileTreeOperation` left unsafe names out,
 the C++ capture pull stopped counting them as failed (as `stagedPath` used to). `CaptureSync` now counts every
 refused name as failed again, and the Rust pull does the same.
@@ -604,6 +680,12 @@ the backup of `/int` in the file `--backup` names (it must not exist, and it sta
 checks the region before the backup, and installs the wireless stack when it is given `RADIO.bin` (the C++ app
 compares the device's version with the update's; argus-cli has only the image).
 
+For the update server: argus-cli takes the country for the region data from the server, else from `--country`, else
+none (the default bands); the C++ app falls back to the system locale's territory, a language setting that says
+little about where the device is used. argus-cli fetches the region bundle before it changes anything on the firmware
+side; the C++ app installs the resources first and fails afterwards (`compare-repair.sh`'s `region-badband`). argus-cli
+never fetches firmware files during a repair (it takes local files; `argus-cli updates fetch` gets them, checked, before).
+
 What still differs, on purpose: the C++ app probes the device before a backup (and **sets its clock**) and starts the
 screen stream and a status screen; the Rust CLI only reads what the command needs. For writes: the Rust CLI asks for
 `--yes` (the C++ CLI is upstream's and writes when told to; the GUI asks in its dialogs), checks a backup before it
@@ -612,8 +694,8 @@ sends a large file up to each status ping and waits for that ping's answer (the 
 frames are the same), and after a reboot or reset waits for the device to leave instead of for it to come back
 (it has no USB hot-plug). The update reads the package whole before the port is opened and takes only one folder
 of plain files with an `update.fuf` (the C++ app unpacks it, takes the first folder by name and skips hidden files and
-subfolders), and does no region provisioning (it needs Flipper's server: phase 7; the C++ app skips it for
-development-region devices such as the fake). The C++ mkdir takes "already exists" as success (its callers make folders that may be
+subfolders), and does no region provisioning after the updater (the C++ app does, through the same code as the repair;
+it skips it for development-region devices such as the fake). The C++ mkdir takes "already exists" as success (its callers make folders that may be
 there); `flipper_rpc`'s `storage_mkdir` returns it as an error and `argus-cli mkdir` exits 1 (the restore only makes
 folders that are missing, so the two never differ there). The C++ CLI exits 255 on any error, the Rust CLI 1. For capture pull: the Rust CLI refuses a path
 outside the capture folders before it opens the port (the C++ CLI refuses once the device is ready), names the
@@ -627,19 +709,23 @@ failed, and does not read `devinfo` or start the screen.
    device without my approval in the app.
 2. Phase 5 is done at the protocol level (update over the updater, factory reset), proven against the fake only.
    Before either is used on my Flipper: run `argus-cli update` and `erase` against it once with me watching.
-3. Phase 6 (DFU and recovery): the DfuSe parser, the memory layout and the DfuSe protocol are done and match the C++
-   ones (`crates/flipper-dfu`; the nusb transport behind the `usb` feature, unused by tests and by any command).
-   The STM32WB55 layer, `recovery.cpp`'s flows and `argus-cli recovery` (behind `--yes`, `--dfu-socket` only) are done
-   too, and the full repair (`argus-cli recovery repair`, fake only). Left for phase 6:
-   - The repair and the legacy update are compared with the C++ `FullRepairOperation` and `LegacyUpdateOperation` on
-     the fakes (`compare-repair.sh`, section 4; in `linux.yml`), including the steps on the firmware (resources,
-     `/int` backup and restore, restart). A missing wireless stack is a partial success (exit 3) in both.
-   - The GUI does not show that partial success yet (`DeviceState::warningString`): it should, in the finish screen.
-   - Region data is only right for the development region; any other region is refused until phase 7 brings Flipper's
-     region bundle (it could also be read from a local file: `regionprovisioningoperation.cpp` and the plugin's
-     `regionBands` are the reference).
-   - Wiring `flipper_dfu::usb` into argus-cli opens a real USB device: only when I say so, with me watching, and
-     never from a test.
-   No flashing in tests, and none on my device until I say so.
-4. For the UI phase: the screen stream is there (`flipper_rpc::screen`); buttons (`GuiSendInputRequest`) and the
+3. Phase 6 (DFU and recovery) is done against the fakes: the DfuSe parser, layout and protocol, the STM32WB55 layer,
+   the full repair and the legacy update, compared with the C++ app (`compare-repair.sh`). Wiring `flipper_dfu::usb`
+   into argus-cli opens a real USB device: only when I say so, with me watching, and never from a test. No flashing in
+   tests, and none on my device until I say so.
+4. Phase 7 (update server) is done against a local HTTPS stand-in: `flipper-updates`, `argus-cli updates|region`, and
+   region data in `recovery repair|legacy-update|finish` for any region. Left:
+   - It has never talked to Flipper's real server (no test may). Before relying on it: run `argus-cli updates
+     directory` and `argus-cli region FILE` once with me watching, and check the real directory still parses (the
+     stricter rules: 64-digit hashes, https URLs) and the real bundle's bands fit the firmware's ranges.
+   - `argus-cli update` (the updater path) still skips region provisioning; the C++ `FullUpdateOperation` does it
+     after the updater. Add it the same way (`finish_install`'s region step) when the update path is compared again.
+   - The legacy update writes the fresh region data and then restores `/int` from the backup, which brings back an
+     older `/int/.region_data` if the backup had one (both apps, same order). Ask me whether the restore should keep
+     the new file.
+   - The firmware (Argus_Firmware, not this port) reads `country_code` without checking it is there; the app sends
+     none when the country is unknown. A note for the firmware side.
+   - The GUI's partial-success warning is in the finish screen and status bar (qmllint clean); look at it once on a
+     screen.
+5. For the UI phase: the screen stream is there (`flipper_rpc::screen`); buttons (`GuiSendInputRequest`) and the
    virtual display come with it.

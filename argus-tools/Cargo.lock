@@ -71,6 +71,9 @@ dependencies = [
  "flipper-dfu",
  "flipper-fake",
  "flipper-rpc",
+ "flipper-updates",
+ "hex",
+ "md-5",
  "serde_json",
  "tempfile",
 ]

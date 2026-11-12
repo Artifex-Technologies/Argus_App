@@ -372,9 +372,10 @@ impl<T: Transport> Session<T> {
     }
 
     /// The steps of the C++ full repair (and update) once the firmware runs: the resources, the region
-    /// data, a restart. Region data is only skipped here (development region, as the C++ app skips it);
-    /// for any other region it needs Flipper's region bundle, which is not ported (phase 7), and this
-    /// refuses before anything is sent. Returns the assets report; the device then restarts.
+    /// data, a restart. The development region (0) needs no region data (the C++ app skips the step); any other
+    /// needs `region_data`, the bytes for `/int/.region_data` made from Flipper's region bundle
+    /// (`flipper_updates::region`), and without them this refuses before anything is sent. Returns the assets
+    /// report; the device then restarts.
     ///
     /// `restore`: the legacy update's backup of `/int`, written back after the region step (as the C++
     /// `LegacyUpdateOperation` does).
@@ -382,10 +383,14 @@ impl<T: Transport> Session<T> {
         &mut self,
         bundle: &Bundle,
         region: u32,
+        region_data: Option<&[u8]>,
         restore: Option<&BackupArchive>,
     ) -> Result<(AssetsReport, Option<RestoreReport>), RpcError> {
-        check_region(region)?;
+        let region_data = check_region(region, region_data)?;
         let r = self.install_assets(bundle)?;
+        if let Some(data) = region_data {
+            self.storage_write(REGION_DATA_PATH, data)?;
+        }
         let restored = match restore {
             Some(archive) => Some(self.restore(archive)?),
             None => None,
@@ -395,14 +400,17 @@ impl<T: Transport> Session<T> {
     }
 }
 
-/// Region data is only right for the development region (0) yet: any other needs Flipper's region bundle.
-pub fn check_region(region: u32) -> Result<(), RpcError> {
-    if region != 0 {
-        return Err(RpcError::Invalid(format!(
-            "the device's region ({region}) needs region data from Flipper's region bundle, which argus-cli does not provide yet"
-        )));
+/// Where the firmware reads its region data (`RegionProvisioningOperation`).
+pub const REGION_DATA_PATH: &str = "/int/.region_data";
+
+/// The region data to write for a device of this region: none for the development region (0), else the
+/// bytes given, which must be there (and not empty: an empty file is "no region data" to the firmware).
+pub fn check_region(region: u32, region_data: Option<&[u8]>) -> Result<Option<&[u8]>, RpcError> {
+    match (region, region_data) {
+        (0, _) => Ok(None),
+        (_, Some(d)) if !d.is_empty() => Ok(Some(d)),
+        _ => Err(RpcError::Invalid(format!("the device's region ({region}) needs region data from Flipper's region bundle"))),
     }
-    Ok(())
 }
 
 /// The device's built-in region from its `devinfo` (`hardware.region.builtin`; 0 is the development region).

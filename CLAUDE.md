@@ -152,6 +152,26 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-12 — Rust port phase 7: the update directory and region data over HTTPS (both apps fixed)
+- New crate `argus-tools/crates/flipper-updates` (directory.json, the region bundle, HTTPS with rustls and the system's
+  roots, bounded and SHA-256 checked) and `crates/qjson` (Qt's JSON rules, moved out of argus-api, which re-exports
+  it). `argus-cli [--update-server URL] updates directory | updates fetch CHANNEL TYPE TARGET FILE`, `[--country CC]
+  region FILE`; `recovery repair|legacy-update|finish` now write `/int/.region_data` for devices of any region (the
+  bundle is fetched before anything changes on the device). Proven only against `flipper-fake --update-server` (HTTPS
+  on 127.0.0.1, a test CA made per run); never run against Flipper's real server yet. `compare-repair.sh` compares
+  the region step with the C++ app for a region-1 Flipper in four scenarios: 238 checks pass.
+- **Fixed in both (C++ and Rust):** an empty `sha256` in the directory skipped the integrity check; any URL scheme Qt
+  opens (file:, data:, http:) was followed; downloads had no size or time limit; a channel without versions (or the
+  preferred channel missing from the directory) crashed the app; version numbers overflowed and the version sort was
+  undefined behaviour; a malformed entry left half a directory; region bundles with out-of-range or non-numeric band
+  values, unknown band names or a broken reply (uninitialised flags) gave wrong region data. Compared with the C++
+  code itself on generated inputs (`flipper-updates/tests/qt_oracle.rs`, in linux.yml).
+- GUI: the finish screen shows a partial success (`DeviceState::warningString`, e.g. the radio stack not installed).
+- Test hook only: with `ARGUS_TEST_FIRMWARE_DIR` set, region provisioning reads the bundle from that folder (file
+  `bundle`) instead of skipping; unset, nothing changes.
+- **@Argus_Firmware:** `region.c` dereferences `pb_region.country_code` without checking it; the app sends no country
+  code when it does not know the country (both apps, as before). Worth a NULL check on the firmware side.
+
 ### 2026-11-12 — A missing radio stack is a partial success (both CLIs exit 3); the legacy update compared
 - **Behaviour change in both:** a repair or legacy update whose wireless stack step failed used to end in "SUCCESS" and
   exit 0. Now `qFlipper-cli` logs `PARTIAL SUCCESS: repaired, but the radio stack was not installed: <why>` and exits 3;

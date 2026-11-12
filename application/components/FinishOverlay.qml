@@ -9,6 +9,10 @@ import Misc 1.0
 AbstractOverlay {
     id: overlay
 
+    // A partial success (DeviceState::warningString): the operation went through, but not all of it, e.g. a
+    // repair whose radio stack was not installed. qFlipper-cli exits 3 for the same.
+    readonly property string warning: deviceState ? deviceState.warningString : ""
+
     TextLabel {
         id: successLabel
 
@@ -22,7 +26,26 @@ AbstractOverlay {
 
         anchors.horizontalCenter: parent.horizontalCenter
 
-        text: qsTr("Success!")
+        color: overlay.warning.length > 0 ? Theme.color.lightred2 : Theme.color.lightorange2
+        text: overlay.warning.length > 0 ? qsTr("Done, with a warning") : qsTr("Success!")
+    }
+
+    TextLabel {
+        id: warningLabel
+
+        anchors.top: successLabel.bottom
+        anchors.topMargin: 30
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: 640
+
+        visible: Backend.backendState === ApplicationBackend.Finished && overlay.warning.length > 0
+
+        capitalized: false
+        color: Theme.color.lightred2
+        wrapMode: Text.Wrap
+        horizontalAlignment: Text.AlignHCenter
+
+        text: overlay.warning
     }
 
     RowLayout {

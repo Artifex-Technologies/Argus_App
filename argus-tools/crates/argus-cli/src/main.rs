@@ -11,6 +11,7 @@
 
 mod chymaera;
 mod recovery;
+mod updates;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -47,7 +48,10 @@ const HELP: &str = "argus-cli — talk to a Flipper Zero over RPC (JSON on stdou
                      chymaera (plain text like it; serve and watch use the device named
                      with --port/--socket, if any: see argus-cli chymaera)
   recovery ...       the DFU bootloader: info, and (with --yes) exit, boot, firmware, radio,
-                     fus, option-bytes; needs --dfu-socket PATH (see argus-cli recovery)
+                     fus, option-bytes, repair; needs --dfu-socket PATH (see argus-cli recovery)
+  updates ...        Flipper's update server, no device: directory | fetch CHANNEL TYPE
+                     TARGET FILE (see argus-cli updates help)
+  region FILE        the region data for /int/.region_data from the region bundle (no device)
   version | help
 
   These change the device and do nothing without --yes (exit 2, nothing opened):
@@ -69,6 +73,8 @@ const HELP: &str = "argus-cli — talk to a Flipper Zero over RPC (JSON on stdou
   --port DEVICE   the Flipper's serial port, e.g. /dev/ttyACM0 (never guessed)
   --socket PATH   a Unix socket carrying the same byte stream (tests use a fake Flipper here)
   --timeout MS    per-read timeout, default 5000
+  --update-server URL  the update server (default https://update.flipperzero.one; https only)
+  --country CC    the country for region data when the server names none
   --datastore DB  the capture datastore, default the one the Argus app and the Sarina API use
                   ($XDG_DATA_HOME/Argus/chymaera/chymaera.db)";
 
@@ -85,6 +91,8 @@ struct Cmd {
     dfu_socket: Option<PathBuf>,
     resources: Option<PathBuf>,
     backup: Option<PathBuf>,
+    update_server: Option<String>,
+    country: Option<String>,
     poll: Duration,
     timeout: Duration,
     frames: usize,
@@ -100,6 +108,8 @@ fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
         dfu_socket: None,
         resources: None,
         backup: None,
+        update_server: None,
+        country: None,
         poll: Duration::from_millis(1000),
         timeout: Duration::from_millis(5000),
         frames: 1,
@@ -122,6 +132,20 @@ fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
             "--dfu-socket" => cmd.dfu_socket = Some(PathBuf::from(value("--dfu-socket")?)),
             "--resources" => cmd.resources = Some(PathBuf::from(value("--resources")?)),
             "--backup" => cmd.backup = Some(PathBuf::from(value("--backup")?)),
+            "--update-server" => {
+                let url = value("--update-server")?;
+                if !url.starts_with("https://") || url.len() > 2048 {
+                    return Err(Usage("--update-server takes an https URL".into()));
+                }
+                cmd.update_server = Some(url);
+            }
+            "--country" => {
+                let cc = value("--country")?;
+                if !(1..=8).contains(&cc.len()) || !cc.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                    return Err(Usage("--country takes a country code such as DE or US".into()));
+                }
+                cmd.country = Some(cc);
+            }
             "--poll-ms" => {
                 let ms: u64 = value("--poll-ms")?.parse().map_err(|_| Usage("--poll-ms takes milliseconds".into()))?;
                 if !(10..=5000).contains(&ms) {
@@ -433,6 +457,9 @@ fn main() -> ExitCode {
     }
     if words.first() == Some(&"recovery") {
         return recovery::run(&cmd);
+    }
+    if matches!(words.first(), Some(&"updates" | &"region")) {
+        return updates::run(&cmd);
     }
     match words.as_slice() {
         ["help"] | [] => {

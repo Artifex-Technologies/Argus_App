@@ -79,10 +79,19 @@ jobs:
           sh argus-tools/crates/flipper-dfu/tests/qt-oracle/build.sh "$RUNNER_TEMP/dfu-oracle"
           (cd argus-tools && ARGUS_DFU_ORACLE="$RUNNER_TEMP/dfu-oracle" cargo test --locked -j4 -p flipper-dfu --test qt_oracle --test qt_device --test qt_wb55)
 
+      # Flipper's update directory and region bundle: the C++ app's own UpdateRegistry/Flipper::Updates, RegionInfo,
+      # RegionData and RemoteFileFetcher's checks (through its test hook: a local folder, no network) against the Rust
+      # port (argus-tools/crates/flipper-updates) on 3000 generated directories and bundles.
+      - name: Compare the update directory and region parsers (C++ and Rust)
+        run: |
+          sh argus-tools/crates/flipper-updates/tests/qt-oracle/build.sh "$RUNNER_TEMP/updates-oracle"
+          (cd argus-tools && ARGUS_UPDATES_ORACLE="$RUNNER_TEMP/updates-oracle" cargo test --locked -j4 -p flipper-updates --test qt_oracle)
+
       # The full repair and the legacy update: qFlipper-cli (FullRepairOperation, LegacyUpdateOperation, through its
       # test hooks: the bootloader over a socket, the devices from a state file, the update files from a made-up local
       # folder) and argus-cli recovery repair|legacy-update on the same fake Flipper across its resets; requests,
-      # flash, option bytes, the card and exit codes compared. No USB, no network.
+      # flash, option bytes, the card (with the region data of a region-1 Flipper) and exit codes compared. argus-cli
+      # fetches the region bundle over HTTPS from flipper-fake's stand-in on 127.0.0.1 only. No USB, no other network.
       - name: Compare the full repair and the legacy update (C++ and Rust)
         run: |
           (cd argus-tools && cargo build --locked -j4 -p argus-cli -p flipper-fake)

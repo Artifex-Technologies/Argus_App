@@ -23,7 +23,28 @@ use flipper_dfu::{dfuse, wb55};
 use flipper_rpc::assets::{self, Bundle};
 use flipper_rpc::session::{RpcError, Session};
 
+use flipper_updates::region::RegionData;
+
+use super::updates::{fetch_region_data, region_json};
 use super::{fail, open, print, Cmd, GONE_WAIT};
+
+/// A failure on the firmware side: the device's, or fetching the region data.
+struct Failure {
+    code: String,
+    message: String,
+}
+
+impl From<RpcError> for Failure {
+    fn from(e: RpcError) -> Failure {
+        Failure { code: e.code().to_string(), message: e.to_string() }
+    }
+}
+
+impl From<(String, String)> for Failure {
+    fn from((code, message): (String, String)) -> Failure {
+        Failure { code, message: format!("region data: {message}") }
+    }
+}
 
 const USAGE: &str = "argus-cli --dfu-socket PATH recovery COMMAND (the DFU bootloader; JSON on stdout)
 
@@ -58,12 +79,17 @@ const USAGE: &str = "argus-cli --dfu-socket PATH recovery COMMAND (the DFU bootl
   finish RESOURCES.tgz     on the firmware at --port (no --dfu-socket): the C++ app's steps
                            after a repair or update: the resources onto /ext (compared with
                            /ext/Manifest; only what changed is removed and written), region
-                           data (the development region needs none; any other is refused,
-                           as its data comes from Flipper's server), and a restart
+                           data (the development region needs none; for any other the region
+                           bundle is fetched from --update-server before the resources (for
+                           legacy-update before the backup), and its bands for the country the server saw,
+                           else --country, else the default ones, go to /int/.region_data),
+                           and a restart
 
   --dfu-socket PATH        a Unix socket to a DFU bootloader (tests use the fake); USB
                            recovery is not built into argus-cli
   --port DEVICE            the Flipper's serial port once its firmware runs (never guessed)
+  --update-server URL      where the region bundle comes from (default Flipper's; https only)
+  --country CC             the country for the region data when the server names none
 
   Exit status: 0 done; 1 failed; 2 usage, or not confirmed with --yes; 3 repaired, but the radio
   (wireless) stack was not installed (\"ok\": false, \"partial\": true, the reason in \"error\")";
@@ -310,12 +336,12 @@ pub fn run(cmd: &Cmd) -> ExitCode {
         return fail("usage", "the steps on the firmware need --port DEVICE (the Flipper once its firmware runs)".into(), 2);
     }
     if let (Plan::Finish, Some(b)) = (&plan, &bundle) {
-        return match finish(cmd, b, None) {
+        return match finish(cmd, b, None, None) {
             Ok(v) => {
                 print(json!({"ok": true, "command": "recovery finish", "firmware": v}));
                 ExitCode::SUCCESS
             }
-            Err(e) => fail(e.code(), e.to_string(), 1),
+            Err(e) => fail(&e.code, e.message, 1),
         };
     }
     let Some(path) = &cmd.dfu_socket else {
@@ -341,12 +367,12 @@ pub fn run(cmd: &Cmd) -> ExitCode {
                     "option_bytes_written": written, "fixed": fields(&fixed), "read_only_differ": fields(&differ),
                 });
                 if let Some(b) = &bundle {
-                    match finish(cmd, b, None) {
+                    match finish(cmd, b, None, None) {
                         Ok(v) => out["firmware"] = v,
                         Err(e) => {
                             // the bootloader part is done; say so with the failure
                             out["ok"] = json!(false);
-                            out["error"] = json!({"code": e.code(), "message": format!("after the repair, on the firmware: {e}")});
+                            out["error"] = json!({"code": e.code, "message": format!("after the repair, on the firmware: {}", e.message)});
                             print(out);
                             return ExitCode::from(1);
                         }
@@ -388,14 +414,33 @@ fn read_bundle(path: &Path) -> Result<Bundle, String> {
 }
 
 /// The steps on the firmware: waits (at most 30 s, as for the bootloader) until the Flipper answers on
-/// `--port`, reads its region, installs the resources, and restarts it.
-fn finish(cmd: &Cmd, bundle: &Bundle, restore: Option<&flipper_rpc::restore::BackupArchive>) -> Result<Value, RpcError> {
+/// `--port`, reads its region, makes its region data (unless `region` brings it, or it is the development
+/// region) before anything changes, installs the resources and the region data, and restarts it.
+fn finish(
+    cmd: &Cmd,
+    bundle: &Bundle,
+    restore: Option<&flipper_rpc::restore::BackupArchive>,
+    region: Option<RegionData>,
+) -> Result<Value, Failure> {
     let mut s = firmware_session(cmd)?;
-    let region = read_region(&mut s)?;
-    let (r, restored) = s.finish_install(bundle, region, restore)?;
+    let builtin = read_region(&mut s)?;
+    let region = match (builtin, region) {
+        (0, _) => None,
+        (_, Some(d)) => Some(d),
+        (_, None) => Some(fetch_region_data(cmd)?),
+    };
+    let (r, restored) = s.finish_install(bundle, builtin, region.as_ref().map(|d| d.bytes.as_slice()), restore)?;
     let gone = s.wait_until_gone(GONE_WAIT);
+    let region_data = match &region {
+        None => json!("not needed (development region)"),
+        Some(d) => {
+            let mut v = region_json(d);
+            v["path"] = json!(assets::REGION_DATA_PATH);
+            v
+        }
+    };
     Ok(json!({
-        "region": region, "region_data": "not needed (development region)",
+        "region": builtin, "region_data": region_data,
         "assets": {"card": r.card, "device_manifest": r.device_manifest, "removed": r.removed, "dirs_made": r.dirs_made,
                    "files_written": r.files_written, "bytes": r.bytes},
         "restored": restored.map(|x| json!({"files": x.files, "bytes": x.bytes, "dirs_made": x.dirs_made, "dirs_kept": x.dirs_kept})),
@@ -436,11 +481,14 @@ fn legacy_update(
     let failed = |stage: &str, code: &str, m: String| {
         (1, json!({"ok": false, "command": "recovery legacy-update", "error": {"code": code, "message": format!("{stage}: {m}")}}))
     };
-    // on the firmware: the region first (nothing changes for a region argus-cli cannot provision), the backup,
-    // and the reboot into the bootloader
-    let step1 = (|| -> Result<Value, RpcError> {
+    // on the firmware: the region first (its data is fetched now, so nothing changes when that fails), the
+    // backup, and the reboot into the bootloader
+    let mut region = None;
+    let step1 = (|| -> Result<Value, Failure> {
         let mut s = firmware_session(cmd)?;
-        assets::check_region(read_region(&mut s)?)?;
+        if read_region(&mut s)? != 0 {
+            region = Some(fetch_region_data(cmd)?);
+        }
         let mtime = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let r = s.backup(backup, &flipper_rpc::transfer::Limits::backup(), mtime)?;
         s.system_reboot(flipper_rpc::write::RebootMode::Dfu)?;
@@ -451,7 +499,7 @@ fn legacy_update(
     })();
     let backed_up = match step1 {
         Ok(v) => v,
-        Err(e) => return failed("before the update, on the firmware", e.code(), e.to_string()),
+        Err(e) => return failed("before the update, on the firmware", &e.code, e.message),
     };
     let archive = match std::fs::File::open(backup)
         .map_err(|e| e.to_string())
@@ -477,11 +525,11 @@ fn legacy_update(
         "option_bytes_written": written,
     });
     // on the firmware again
-    match finish(cmd, bundle, Some(&archive)) {
+    match finish(cmd, bundle, Some(&archive), region) {
         Ok(v) => out["firmware"] = v,
         Err(e) => {
             out["ok"] = json!(false);
-            out["error"] = json!({"code": e.code(), "message": format!("after the update, on the firmware: {e}; /int is backed up in {}", backup.display())});
+            out["error"] = json!({"code": e.code, "message": format!("after the update, on the firmware: {}; /int is backed up in {}", e.message, backup.display())});
             return (1, out);
         }
     }
