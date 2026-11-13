@@ -23,7 +23,7 @@
 //! `--read-only` refuses every change with "access denied" (a write-protected or failing card).
 //! A reboot or factory reset request ends the session, as the device leaves USB.
 //!
-//! `flipper-fake --recovery DIR [--fus running|idle|stuck|never-settles] [--no-sd] [--old-resources] [--old-radio] [--start-firmware] [--fail-write-at HEX]` is one Flipper across
+//! `flipper-fake --recovery DIR [--fus running|idle|stuck|never-settles] [--no-sd] [--old-resources] [--old-radio | --radio-minor N] [--start-firmware] [--fail-write-at HEX]` is one Flipper across
 //! its lives, for comparing the full repair (`compare-repair.sh`): the fake bootloader (with factory
 //! information in its OTP) on the Unix socket `DIR/dfu.sock`, gone after every reset and back while the
 //! chip boots into it; once the chip boots its firmware, the fake Flipper on a pseudo-terminal (printed as
@@ -36,7 +36,8 @@
 //! address fails (errPROG); `--old-resources`: the card holds an older install of the resources with a valid
 //! `/ext/Manifest` (src/firmware.rs); `--start-firmware`: the chip starts as the firmware on the
 //! pseudo-terminal and turns into its bootloader when asked to reboot into DFU (the legacy update);
-//! `--old-radio`: devinfo reports wireless stack 1.16.3, older than the update's 1.17.3.
+//! `--old-radio`: devinfo reports wireless stack 1.16.3, older than the update's 1.17.3; `--radio-minor N`: 1.N.3
+//! (1.9.3 is older than 1.17.3 too, though it sorts after it as text).
 //! `--old-region-data`: `/int` holds an older `/int/.region_data`.
 //! `--region N`: the device's built-in region (devinfo and the OTP's factory information; default 0, the
 //! development region, which needs no region data).
@@ -214,10 +215,13 @@ fn main() -> ExitCode {
             "--no-sd" => fake.sd_card = false,
             "--old-resources" => fake = flipper_fake::firmware::with_old_resources(fake),
             "--start-firmware" => start_firmware = true,
-            "--old-radio" => {
+            "--old-radio" | "--radio-minor" => {
+                let minor =
+                    if a == "--old-radio" { Some(16) } else { args.next().and_then(|n| n.parse::<u32>().ok()).filter(|n| *n < 1000) };
+                let Some(minor) = minor else { return usage() };
                 for (k, v) in fake.devinfo.iter_mut() {
                     if k == "radio.stack.minor" {
-                        *v = "16".into();
+                        *v = minor.to_string();
                     }
                 }
             }

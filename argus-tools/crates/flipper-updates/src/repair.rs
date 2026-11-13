@@ -172,9 +172,31 @@ pub fn fetch(client: &Client, dir: &Directory, channel: &str) -> Result<RepairFi
     Ok(RepairFiles { version: version.number.clone(), firmware, radio, option_bytes, resources })
 }
 
+/// `FirmwareHelper::hasRadioUpdate` (the legacy update installs the wireless stack only then): the device has no
+/// running wireless stack, another stack type, or an older version than `image`. Versions are compared as numbers
+/// (`VersionInfo::compare`); the C++ app compared them as text, so 1.9.x counted as newer than 1.17.x (and a 1.13.x
+/// stack would be "updated" to an older 1.2.x), until both apps were changed on 2026-11-13.
+pub fn has_radio_update(device_version: &str, device_stack_type: i32, image: &RadioImage) -> bool {
+    device_version.is_empty()
+        || device_stack_type != image.stack_type
+        || crate::directory::compare(device_version, &image.version) == std::cmp::Ordering::Less
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wireless_stack_is_updated_only_when_older_by_number() {
+        let image = radio_image(&flipper_fake::firmware::core2_archive()).unwrap();
+        assert!(has_radio_update("", 3, &image), "no running stack");
+        assert!(has_radio_update("1.17.3", 1, &image), "another stack type");
+        assert!(has_radio_update("1.16.3", 3, &image));
+        assert!(has_radio_update("1.9.3", 3, &image), "1.9 is older than 1.17, though it sorts after it as text");
+        assert!(!has_radio_update("1.17.3", 3, &image), "the same");
+        assert!(!has_radio_update("1.20.0", 3, &image), "newer");
+        assert!(!has_radio_update("2.0.0", 3, &image));
+    }
 
     #[test]
     fn reads_the_wireless_stack_and_the_option_bytes() {

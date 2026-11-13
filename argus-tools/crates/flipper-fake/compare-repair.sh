@@ -58,6 +58,9 @@ start_server srv_files "$fw" 4
 upd_files=$upd
 start_server srv_core2 "$out/firmware-core2" 5
 upd_core2=$upd
+# the legacy update from the server's files (argus-cli legacy-update-from-server)
+start_server srv_legacy "$fw" 6
+upd_legacy=$upd
 upd=$upd_main
 ca=$out/srv_main.pem
 
@@ -92,7 +95,15 @@ run() {
             ARGUS_TEST_FIRMWARE_DIR="$fw" LC_ALL="${cpp_locale:-$LC_ALL_OUTER}" \
             timeout 300 "$cpp" -d 2 ${cpp_args:-} > stdout.txt 2> stderr.txt)
     elif [ -n "${rs_core2:-}" ]; then
-        (cd "$dir" && exec timeout 300 "$rs" --dfu-socket dfu.sock --poll-ms 200 recovery $rs_core2 --yes > stdout.txt 2> stderr.txt)
+        # from the running firmware (--port: argus-cli reboots it into its bootloader first), or in the bootloader
+        port_arg=
+        [ "${core2_from:-}" = firmware ] && port_arg="--port $port"
+        (cd "$dir" && exec timeout 300 "$rs" --dfu-socket dfu.sock $port_arg --poll-ms 200 recovery $rs_core2 --yes > stdout.txt 2> stderr.txt)
+    elif [ "${legacy:-}" = server ]; then
+        # the C++ app's GUI way: the release channel's files from the update server, the wireless stack decided from
+        # the device's own version
+        (cd "$dir" && exec env SSL_CERT_FILE="$ca" timeout 300 "$rs" --update-server "$upd" --dfu-socket dfu.sock --port "$port" --poll-ms 200 recovery \
+            legacy-update-from-server release --backup "$dir/backup.tgz" --yes > stdout.txt 2> stderr.txt)
     elif [ "${server:-}" = 1 ]; then
         # the C++ app's own way: the files of the release channel's latest version, from the update server
         (cd "$dir" && exec env SSL_CERT_FILE="$ca" timeout 300 "$rs" --update-server "$upd" --dfu-socket dfu.sock --port "$port" --poll-ms 200 recovery \
@@ -265,6 +276,28 @@ run legacy-radio-fails rs --start-firmware --no-sd --old-radio --fus running --f
 legacy=
 compare legacy-radio-fails 3u
 
+# The legacy update as the C++ GUI runs it, both from the update server's files (the C++ app through its hook, argus-cli
+# legacy-update-from-server over HTTPS), each deciding itself whether the wireless stack goes on (hasRadioUpdate): the
+# device's stack 1.17.3 is the update's (no), 1.16.3 is older (yes), and 1.9.3 is older too, though "1.9.3" sorts after
+# "1.17.3" as text: the C++ app compared the versions as text and left the old stack on (both compare numbers now).
+legacy=server upd=$upd_legacy ca=$out/srv_legacy.pem
+run legacy-server cpp --start-firmware --no-sd --fus running
+run legacy-server rs --start-firmware --no-sd --fus running
+run legacy-server-old cpp --start-firmware --no-sd --old-radio --fus running
+run legacy-server-old rs --start-firmware --no-sd --old-radio --fus running
+run legacy-server-1-9 cpp --start-firmware --no-sd --radio-minor 9 --fus running
+run legacy-server-1-9 rs --start-firmware --no-sd --radio-minor 9 --fus running
+legacy= upd=$upd_main ca=$out/srv_main.pem
+compare legacy-server 0
+check "legacy-server: neither touched the wireless stack (the device's is current)" \
+    "$(test "$(field "$out/legacy-server-cpp" fus_commands)" = - && test "$(field "$out/legacy-server-rs" fus_commands)" = - && grep -q '"install":false' "$out/legacy-server-rs/stdout.txt"; echo $?)"
+compare legacy-server-old 0
+compare legacy-server-1-9 0
+for n in legacy-server-old legacy-server-1-9; do
+    check "$n: both installed the wireless stack (the device's is older)" \
+        "$(test "$(field "$out/$n-cpp" fus_commands)" = 5253 && test "$(field "$out/$n-rs" fus_commands)" = 5253 && grep -q '"install":true' "$out/$n-rs/stdout.txt"; echo $?)"
+done
+
 # A resources bundle with a file that is not what its manifest says (its SHA-256 in directory.json is right):
 # argus-cli refuses it before it opens anything; the C++ app repairs the chip, then refuses the bundle before it
 # removes or writes anything on the card (it used to write the file anyway).
@@ -366,11 +399,12 @@ check "core2-mismatch: both chips as they were" "$(cmp -s "$out/core2-mismatch-c
 
 # The developer tab's installs: the C++ WirelessStackUpdateOperation and FUSUpdateOperation (qFlipper-cli
 # core2radio/core2fus, the code the GUI's developer tab runs) and argus-cli install-radio/install-fus (the Rust app's
-# developer tab runs the same flipper_dfu::recovery::core2_update). The C++ app starts from the running firmware and
-# reboots it into the bootloader over RPC; argus-cli starts in the bootloader. Then the same bootloader requests, flash
-# and FUS commands, and both chips start their firmware at the end.
+# developer tab runs the same steps). From the running firmware both reboot it into the bootloader over RPC first
+# (argus-cli with --port); in recovery mode both start in the bootloader. Then the same bootloader requests, flash and
+# FUS commands, and both chips start their firmware at the end.
+# compare_core2 NAME firmware|bootloader
 compare_core2() {
-    name=$1 c=$out/$1-cpp r=$out/$1-rs
+    name=$1 from=$2 c=$out/$1-cpp r=$out/$1-rs
     check "$name: C++ exit 0 ($(cat "$c/exit.txt"))" "$(test "$(cat "$c/exit.txt")" = 0; echo $?)"
     check "$name: Rust exit 0 ($(cat "$r/exit.txt"))" "$(test "$(cat "$r/exit.txt")" = 0; echo $?)"
     requests "$c" > "$c/requests.dfu"
@@ -383,24 +417,44 @@ compare_core2() {
         check "$name: same $f ($(field "$r" "$f" | cut -c1-24))" "$(test "$(field "$c" "$f")" = "$(field "$r" "$f")"; echo $?)"
     done
     check "$name: both chips start their firmware" "$(test "$(field "$c" booted_firmware)" = true && test "$(field "$r" booted_firmware)" = true; echo $?)"
-    check "$name: C++ rebooted the firmware into the bootloader first" "$(grep -q 'SystemRebootRequest mode 1' "$c/requests.txt"; echo $?)"
+    if [ "$from" = firmware ]; then
+        check "$name: both rebooted the firmware into the bootloader first" \
+            "$(grep -q 'SystemRebootRequest mode 1' "$c/requests.txt" && grep -q 'SystemRebootRequest mode 1' "$r/requests.txt" && grep -q '"rebooted_into_bootloader":true' "$r/stdout.txt"; echo $?)"
+        rpc_requests "$c" > "$c/requests.rpc"
+        rpc_requests "$r" > "$r/requests.rpc"
+        diff "$c/requests.rpc" "$r/requests.rpc" > "$out/$name-rpc.diff"
+        check "$name: same requests on the firmware ($(wc -l < "$c/requests.rpc") each)" $?
+    else
+        # the C++ app reads the firmware the chip started afterwards, as on every connection (and sets its clock)
+        rpc_requests "$c" > "$c/requests.rpc"
+        rpc_requests "$r" > "$r/requests.rpc"
+        check "$name: no reboot, nothing else on a firmware in either" \
+            "$(! grep -q 'SystemRebootRequest' "$c/requests.txt" "$r/requests.txt" && test ! -s "$c/requests.rpc" && test ! -s "$r/requests.rpc"; echo $?)"
+    fi
 }
+core2_from=firmware
 cpp_args="core2radio $fw/radio.bin" rs_core2="install-radio $fw/radio.bin"
 run install-radio cpp --start-firmware --fus running
-run install-radio rs --fus running
-compare_core2 install-radio
+run install-radio rs --start-firmware --fus running
+compare_core2 install-radio firmware
 check "install-radio: the image below SFSA in both" "$(grep -q '"address":null' "$out/install-radio-rs/stdout.txt"; echo $?)"
 cpp_args="core2fus $fw/radio.bin 080EC000" rs_core2="install-fus $fw/radio.bin"
 run install-fus cpp --start-firmware --fus running
-run install-fus rs --fus running
-compare_core2 install-fus
+run install-fus rs --start-firmware --fus running
+compare_core2 install-fus firmware
 check "install-fus: written at 0x080EC000" "$(grep -q '"address":"0x080EC000"' "$out/install-fus-rs/stdout.txt" && grep -q '^OUT 1 0 2100c00e08' "$out/install-fus-rs/dfu.log"; echo $?)"
 # The address the Qt GUI passed before 2026-11-13 (0x080ec00, a digit short: outside the flash): both refuse to erase
 # or write there; nothing of the flash changes.
 cpp_args="core2fus $fw/radio.bin 080ec00" rs_core2="install-fus $fw/radio.bin 080ec00"
 run fus-typo cpp --start-firmware --fus running
-run fus-typo rs --fus running
-cpp_args= rs_core2=
+run fus-typo rs --start-firmware --fus running
+# a device already in recovery mode: no reboot, straight to the bootloader steps
+core2_from=bootloader
+cpp_args="core2radio $fw/radio.bin" rs_core2="install-radio $fw/radio.bin"
+run install-radio-recovery cpp --fus running
+run install-radio-recovery rs --fus running
+compare_core2 install-radio-recovery bootloader
+cpp_args= rs_core2= core2_from=
 check "fus-typo: both fail ($(cat "$out/fus-typo-cpp/exit.txt"), $(cat "$out/fus-typo-rs/exit.txt"))" \
     "$(test "$(cat "$out/fus-typo-cpp/exit.txt")" != 0 && test "$(cat "$out/fus-typo-rs/exit.txt")" = 1; echo $?)"
 check "fus-typo: neither erased a page of the flash, same flash in both (only the boot mode was set)" \
@@ -408,8 +462,10 @@ check "fus-typo: neither erased a page of the flash, same flash in both (only th
 check "fus-typo: both say why (outside the flash)" \
     "$(grep -q 'is not inside the memory layout' "$out/fus-typo-rs/stdout.txt" && grep -q 'Failed to download the Wireless Stack' "$out/fus-typo-cpp/stderr.txt" "$out/fus-typo-cpp/stdout.txt"; echo $?)"
 
-exec 4>&- 5>&-
-wait "$srv_files_pid" "$srv_core2_pid"
+exec 4>&- 5>&- 6>&-
+wait "$srv_files_pid" "$srv_core2_pid" "$srv_legacy_pid"
+check "the legacy server saw the directory and the four files three times ($(grep -c '^GET ' "$out/srv_legacy.out"))" \
+    "$(test "$(grep -c '^GET ' "$out/srv_legacy.out")" = 15 && ! grep -q 'update-test\|bundle' "$out/srv_legacy.out"; echo $?)"
 check "the files server saw the directory and the four files, once each ($(grep -c '^GET ' "$out/srv_files.out"))" \
     "$(test "$(grep -c '^GET ' "$out/srv_files.out")" = 5 && for f in directory.json full-test.dfu core2_firmware-test.tgz scripts-test.tgz resources-test.tgz; do grep -q "^GET .*$f\$" "$out/srv_files.out" || exit 1; done; echo $?)"
 check "the damaged archive's server: the directory, the firmware and the wireless stack, nothing after ($(grep -c '^GET ' "$out/srv_core2.out"))" \
