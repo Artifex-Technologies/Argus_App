@@ -268,6 +268,35 @@ fn poll_fus<B: Bootloader>(
 /// below SFSA, have the FUS install it, and check its version; the whole install up to
 /// [`INSTALL_TRIES`] times.
 pub fn install_wireless_stack<B: Bootloader>(b: &mut B, image: &[u8]) -> Result<(), FlowError> {
+    install_core2(b, image, None)
+}
+
+/// Where a FUS image goes on Flipper's STM32WB55 (1 MiB flash): ST's FUS for this part installs from
+/// 0x080EC000. qFlipper's QML passed `0x080ec00` (a digit short: 0x0080EC00, outside the flash), so
+/// its "Install FUS" could never work; the Qt app passes this value since 2026-11-13.
+pub const FUS_ADDRESS: u32 = 0x080E_C000;
+
+/// `WirelessStackDownloadOperation` with a target address (`Recovery::downloadFUS`): the same
+/// steps as [`install_wireless_stack`], the image written at `address` instead of below SFSA.
+pub fn install_fus<B: Bootloader>(b: &mut B, image: &[u8], address: u32) -> Result<(), FlowError> {
+    install_core2(b, image, Some(address))
+}
+
+/// The bootloader part of the C++ `WirelessStackUpdateOperation`/`FUSUpdateOperation` (the
+/// developer tab's installs) for a chip already in its bootloader: the recovery boot mode, the
+/// install ([`install_wireless_stack`], or [`install_fus`] at `fus_address`), then the OS boot
+/// mode, after which the chip starts its firmware. The C++ operations first reboot a running
+/// firmware into the bootloader over RPC; that step is the caller's.
+pub fn core2_update<B: Bootloader>(b: &mut B, image: &[u8], fus_address: Option<u32>) -> Result<(), FlowError> {
+    if image.is_empty() {
+        return Err(FlowError::Step { step: "read the image", error: Error::EmptyImage });
+    }
+    step(b, "set the recovery boot mode", |d| set_boot_mode(d, false))?;
+    install_core2(b, image, fus_address)?;
+    step(b, "set the OS boot mode", |d| set_boot_mode(d, true))
+}
+
+fn install_core2<B: Bootloader>(b: &mut B, image: &[u8], address: Option<u32>) -> Result<(), FlowError> {
     for _ in 0..INSTALL_TRIES {
         step(b, "start the FUS", start_fus)?;
         step(b, "delete the wireless stack", delete_wireless_stack)?;
@@ -276,7 +305,7 @@ pub fn install_wireless_stack<B: Bootloader>(b: &mut B, image: &[u8]) -> Result<
             WirelessStatus::WirelessStackRunning | WirelessStatus::ErrorOccurred => Err(s),
             WirelessStatus::Unhandled => Ok(false),
         })?;
-        step(b, "write the wireless stack", |d| download_wireless_stack(d, image, None).map(|_| ()))?;
+        step(b, "write the wireless stack", |d| download_wireless_stack(d, image, address).map(|_| ()))?;
         step(b, "install the wireless stack", upgrade_wireless_stack)?;
         poll_fus(b, "install the wireless stack", |s| match s {
             WirelessStatus::ErrorOccurred => Err(s),

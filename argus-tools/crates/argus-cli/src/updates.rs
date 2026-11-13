@@ -36,7 +36,7 @@ pub(crate) fn server(cmd: &Cmd) -> &str {
     cmd.update_server.as_deref().unwrap_or(flipper_updates::DEFAULT_SERVER)
 }
 
-fn client() -> Result<Client, (String, String)> {
+pub(crate) fn client() -> Result<Client, (String, String)> {
     Client::new().map_err(|e| (e.code().to_string(), e.to_string()))
 }
 
@@ -50,7 +50,7 @@ fn write_new(path: &Path, data: &[u8]) -> Result<(), (String, String)> {
         .map_err(|e| ("local".to_string(), format!("{}: {e}", path.display())))
 }
 
-fn get_directory(c: &Client, server: &str) -> Result<directory::Directory, (String, String)> {
+pub(crate) fn get_directory(c: &Client, server: &str) -> Result<directory::Directory, (String, String)> {
     let text = c.get(&flipper_updates::directory_url(server), directory::MAX_DIRECTORY).map_err(|e| (e.code().into(), e.to_string()))?;
     directory::parse(&text).map_err(|e| ("directory".into(), e.to_string()))
 }

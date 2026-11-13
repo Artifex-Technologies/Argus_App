@@ -101,12 +101,21 @@ fn sha256(b: &[u8]) -> String {
 
 /// `core2_firmware.tgz`: `core2_firmware/Manifest.json` and the image it names.
 pub fn core2_archive() -> Vec<u8> {
-    let image = radio();
+    core2_archive_with(false)
+}
+
+/// [`core2_archive`]; `mismatch`: the image holds other bytes than its SHA-256 in the manifest says (same size), as a
+/// damaged archive whose own SHA-256 in `directory.json` is right; both apps must refuse it.
+pub fn core2_archive_with(mismatch: bool) -> Vec<u8> {
+    let mut image = radio();
     let manifest = format!(
         r#"{{"manifest":{{"version":0,"timestamp":1700000000}},"copro":{{"fus":{{"version":{{"major":1,"minor":2,"sub":0}},"files":[{{"name":"fus.bin","sha256":"{}","address":"0x080EC000"}}]}},"radio":{{"version":{{"type":3,"major":1,"minor":17,"sub":3,"branch":0,"release":7}},"files":[{{"name":"radio.bin","sha256":"{}","address":"0x080D3000"}}]}}}}}}"#,
         sha256(b""),
         sha256(&image)
     );
+    if mismatch {
+        image[100] ^= 0x01;
+    }
     gzip(&tar(
         &[
             Raw::dir("core2_firmware/"),
@@ -168,11 +177,16 @@ pub fn region_bundle(country: Option<&str>) -> String {
 /// `DE`), plus `firmware.dfu`, `radio.bin` and `ob.data` as plain files for argus-cli. `resources_mismatch`: see [`resources_archive`] (its SHA-256 in
 /// `directory.json` is right, so only the app's own check can catch it).
 pub fn write(dir: &Path, resources_mismatch: bool) -> io::Result<()> {
+    write_with(dir, resources_mismatch, false)
+}
+
+/// [`write`]; `core2_mismatch`: see [`core2_archive_with`].
+pub fn write_with(dir: &Path, resources_mismatch: bool, core2_mismatch: bool) -> io::Result<()> {
     std::fs::create_dir(dir)?;
     let files: [(&str, &str, &str, Vec<u8>); 5] = [
         ("full_dfu", "f7", "flipper-z-f7-full-test.dfu", firmware()),
         ("update_tgz", "f7", "flipper-z-f7-update-test.tgz", crate::archives::update_package(true)),
-        ("core2_firmware_tgz", "any", "flipper-z-any-core2_firmware-test.tgz", core2_archive()),
+        ("core2_firmware_tgz", "any", "flipper-z-any-core2_firmware-test.tgz", core2_archive_with(core2_mismatch)),
         ("scripts_tgz", "any", "flipper-z-any-scripts-test.tgz", scripts_archive()),
         ("resources_tgz", "any", "flipper-z-any-resources-test.tgz", resources_archive(resources_mismatch)),
     ];

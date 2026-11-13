@@ -28,6 +28,7 @@ out=$(cd "$out" && pwd)
 fw=$out/firmware
 "$fake" --write-firmware "$fw" || { echo "could not write the firmware folder" >&2; exit 1; }
 "$fake" --write-firmware "$out/firmware-mismatch" --resources-mismatch || { echo "could not write the firmware folder" >&2; exit 1; }
+"$fake" --write-firmware "$out/firmware-core2" --core2-mismatch || { echo "could not write the firmware folder" >&2; exit 1; }
 # the same folder with a region bundle in which the server names no country, and one with a band the firmware
 # cannot hold (a power limit of 200 dBm)
 cp -r "$fw" "$out/firmware-nocountry" && sed -i 's/"country":"DE"/"country":null/' "$out/firmware-nocountry/bundle"
@@ -52,6 +53,11 @@ start_server srv_nocountry "$out/firmware-nocountry" 8
 upd_nocountry=$upd
 start_server srv_badband "$out/firmware-badband" 9
 upd_badband=$upd
+# the servers argus-cli repair-from-server fetches all its files from (the others serve only region bundles)
+start_server srv_files "$fw" 4
+upd_files=$upd
+start_server srv_core2 "$out/firmware-core2" 5
+upd_core2=$upd
 upd=$upd_main
 ca=$out/srv_main.pem
 
@@ -84,7 +90,13 @@ run() {
             XDG_CACHE_HOME="$dir/home/.cache" XDG_RUNTIME_DIR="$dir/tmp" TMPDIR="$dir/tmp" QT_QPA_PLATFORM=offscreen \
             ARGUS_TEST_DEVICE_STATE="$dir/state" ARGUS_TEST_DFU_SOCKET=dfu.sock ARGUS_TEST_SERIAL_PORT="$port" \
             ARGUS_TEST_FIRMWARE_DIR="$fw" LC_ALL="${cpp_locale:-$LC_ALL_OUTER}" \
-            timeout 300 "$cpp" -d 2 > stdout.txt 2> stderr.txt)
+            timeout 300 "$cpp" -d 2 ${cpp_args:-} > stdout.txt 2> stderr.txt)
+    elif [ -n "${rs_core2:-}" ]; then
+        (cd "$dir" && exec timeout 300 "$rs" --dfu-socket dfu.sock --poll-ms 200 recovery $rs_core2 --yes > stdout.txt 2> stderr.txt)
+    elif [ "${server:-}" = 1 ]; then
+        # the C++ app's own way: the files of the release channel's latest version, from the update server
+        (cd "$dir" && exec env SSL_CERT_FILE="$ca" timeout 300 "$rs" --update-server "$upd" --dfu-socket dfu.sock --port "$port" --poll-ms 200 recovery \
+            repair-from-server release --yes > stdout.txt 2> stderr.txt)
     elif [ "${legacy:-}" = radio ] || [ "${legacy:-}" = plain ]; then
         radio_arg=
         [ "$legacy" = radio ] && radio_arg=$fw/radio.bin
@@ -324,7 +336,86 @@ check "region-badband: neither wrote region data" \
 check "region-badband: the same bootloader requests and flash (the repair itself is done)" \
     "$(requests "$out/region-badband-cpp" | cmp -s - "$(requests "$out/region-badband-rs" > "$out/region-badband-rs.dfu"; echo "$out/region-badband-rs.dfu")" && cmp -s "$out/region-badband-cpp/flash.bin" "$out/region-badband-rs/flash.bin"; echo $?)"
 
-# Only the region scenarios fetched anything, and only the bundle (never a firmware file: argus-cli takes local files).
+# The repair as the C++ app runs it, both from the update server's files: argus-cli repair-from-server fetches the
+# release channel's latest version over HTTPS (directory, firmware, wireless stack, scripts, resources), the C++ app
+# reads the same folder through its hook.
+fw_saved=$fw
+server=1 upd=$upd_files ca=$out/srv_files.pem
+run server cpp --fus running
+run server rs --fus running
+server= upd=$upd_main ca=$out/srv_main.pem
+compare server 0
+check "server: Rust says which version it installed" "$(grep -q '"server_version":"9.9.9"' "$out/server-rs/stdout.txt"; echo $?)"
+
+# A wireless stack archive whose image is not what its manifest says (the archive's own SHA-256 in directory.json is
+# right): both refuse it before anything is written to the chip (the C++ app used to flash it); argus-cli before it
+# opens the bootloader at all. Both chips stay as they were.
+fw=$out/firmware-core2 server=1 upd=$upd_core2 ca=$out/srv_core2.pem
+run core2-mismatch cpp --fus running
+run core2-mismatch rs --fus running
+fw=$fw_saved server= upd=$upd_main ca=$out/srv_main.pem
+ce=$(cat "$out/core2-mismatch-cpp/exit.txt") re=$(cat "$out/core2-mismatch-rs/exit.txt")
+check "core2-mismatch: C++ fails ($ce) on the image" \
+    "$(test "$ce" = 255 && grep -q 'The wireless stack image radio.bin does not match its manifest' "$out/core2-mismatch-cpp/stderr.txt" "$out/core2-mismatch-cpp/stdout.txt"; echo $?)"
+check "core2-mismatch: Rust fails ($re) on the image" \
+    "$(test "$re" = 1 && grep -q 'the wireless stack image \\"radio.bin\\" does not match its manifest' "$out/core2-mismatch-rs/stdout.txt"; echo $?)"
+check "core2-mismatch: C++ wrote nothing to the chip (no erase, no data block)" \
+    "$(! grep -qE '^OUT 1 ([1-9][0-9]* |0 41)' "$out/core2-mismatch-cpp/dfu.log"; echo $?)"
+check "core2-mismatch: Rust opened nothing" "$(! grep -qv '^$' "$out/core2-mismatch-rs/dfu.log" && test ! -s "$out/core2-mismatch-rs/requests.txt"; echo $?)"
+check "core2-mismatch: both chips as they were" "$(cmp -s "$out/core2-mismatch-cpp/flash.bin" "$out/core2-mismatch-rs/flash.bin" && test "$(field "$out/core2-mismatch-cpp" option_bytes)" = "$(field "$out/core2-mismatch-rs" option_bytes)"; echo $?)"
+
+# The developer tab's installs: the C++ WirelessStackUpdateOperation and FUSUpdateOperation (qFlipper-cli
+# core2radio/core2fus, the code the GUI's developer tab runs) and argus-cli install-radio/install-fus (the Rust app's
+# developer tab runs the same flipper_dfu::recovery::core2_update). The C++ app starts from the running firmware and
+# reboots it into the bootloader over RPC; argus-cli starts in the bootloader. Then the same bootloader requests, flash
+# and FUS commands, and both chips start their firmware at the end.
+compare_core2() {
+    name=$1 c=$out/$1-cpp r=$out/$1-rs
+    check "$name: C++ exit 0 ($(cat "$c/exit.txt"))" "$(test "$(cat "$c/exit.txt")" = 0; echo $?)"
+    check "$name: Rust exit 0 ($(cat "$r/exit.txt"))" "$(test "$(cat "$r/exit.txt")" = 0; echo $?)"
+    requests "$c" > "$c/requests.dfu"
+    requests "$r" > "$r/requests.dfu"
+    diff "$c/requests.dfu" "$r/requests.dfu" > "$out/$name-requests.diff"
+    check "$name: same bootloader requests in the same order ($(wc -l < "$c/requests.dfu") each)" $?
+    cmp -s "$c/flash.bin" "$r/flash.bin"
+    check "$name: same flash, byte for byte" $?
+    for f in option_bytes fus fus_commands wireless_stack erased_pages booted_firmware; do
+        check "$name: same $f ($(field "$r" "$f" | cut -c1-24))" "$(test "$(field "$c" "$f")" = "$(field "$r" "$f")"; echo $?)"
+    done
+    check "$name: both chips start their firmware" "$(test "$(field "$c" booted_firmware)" = true && test "$(field "$r" booted_firmware)" = true; echo $?)"
+    check "$name: C++ rebooted the firmware into the bootloader first" "$(grep -q 'SystemRebootRequest mode 1' "$c/requests.txt"; echo $?)"
+}
+cpp_args="core2radio $fw/radio.bin" rs_core2="install-radio $fw/radio.bin"
+run install-radio cpp --start-firmware --fus running
+run install-radio rs --fus running
+compare_core2 install-radio
+check "install-radio: the image below SFSA in both" "$(grep -q '"address":null' "$out/install-radio-rs/stdout.txt"; echo $?)"
+cpp_args="core2fus $fw/radio.bin 080EC000" rs_core2="install-fus $fw/radio.bin"
+run install-fus cpp --start-firmware --fus running
+run install-fus rs --fus running
+compare_core2 install-fus
+check "install-fus: written at 0x080EC000" "$(grep -q '"address":"0x080EC000"' "$out/install-fus-rs/stdout.txt" && grep -q '^OUT 1 0 2100c00e08' "$out/install-fus-rs/dfu.log"; echo $?)"
+# The address the Qt GUI passed before 2026-11-13 (0x080ec00, a digit short: outside the flash): both refuse to erase
+# or write there; nothing of the flash changes.
+cpp_args="core2fus $fw/radio.bin 080ec00" rs_core2="install-fus $fw/radio.bin 080ec00"
+run fus-typo cpp --start-firmware --fus running
+run fus-typo rs --fus running
+cpp_args= rs_core2=
+check "fus-typo: both fail ($(cat "$out/fus-typo-cpp/exit.txt"), $(cat "$out/fus-typo-rs/exit.txt"))" \
+    "$(test "$(cat "$out/fus-typo-cpp/exit.txt")" != 0 && test "$(cat "$out/fus-typo-rs/exit.txt")" = 1; echo $?)"
+check "fus-typo: neither erased a page of the flash, same flash in both (only the boot mode was set)" \
+    "$(test "$(field "$out/fus-typo-cpp" erased_pages)" = 0 && test "$(field "$out/fus-typo-rs" erased_pages)" = 0 && cmp -s "$out/fus-typo-cpp/flash.bin" "$out/fus-typo-rs/flash.bin"; echo $?)"
+check "fus-typo: both say why (outside the flash)" \
+    "$(grep -q 'is not inside the memory layout' "$out/fus-typo-rs/stdout.txt" && grep -q 'Failed to download the Wireless Stack' "$out/fus-typo-cpp/stderr.txt" "$out/fus-typo-cpp/stdout.txt"; echo $?)"
+
+exec 4>&- 5>&-
+wait "$srv_files_pid" "$srv_core2_pid"
+check "the files server saw the directory and the four files, once each ($(grep -c '^GET ' "$out/srv_files.out"))" \
+    "$(test "$(grep -c '^GET ' "$out/srv_files.out")" = 5 && for f in directory.json full-test.dfu core2_firmware-test.tgz scripts-test.tgz resources-test.tgz; do grep -q "^GET .*$f\$" "$out/srv_files.out" || exit 1; done; echo $?)"
+check "the damaged archive's server: the directory, the firmware and the wireless stack, nothing after ($(grep -c '^GET ' "$out/srv_core2.out"))" \
+    "$(test "$(grep -c '^GET ' "$out/srv_core2.out")" = 3 && ! grep -q 'scripts\|resources' "$out/srv_core2.out"; echo $?)"
+
+# Only the region scenarios fetched anything from these, and only the bundle (argus-cli took local files there).
 exec 7>&- 8>&- 9>&-
 wait "$srv_main_pid" "$srv_nocountry_pid" "$srv_badband_pid"
 check "the update servers saw only region bundle requests ($(cat "$out/srv_main.out" "$out/srv_nocountry.out" "$out/srv_badband.out" | grep -c '^GET '))" \

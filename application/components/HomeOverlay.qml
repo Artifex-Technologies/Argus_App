@@ -495,7 +495,10 @@ AbstractOverlay {
             };
 
             const actionFunc = function() {
-                Backend.installFUS(SystemFileDialog.fileUrl, 0x080ec00);
+                // 0x080EC000: ST's FUS address on the 1 MiB STM32WB55. Upstream passed 0x080ec00 (a digit short,
+                // outside the flash), so this install could never work; the Rust port uses the same constant
+                // (flipper_dfu::recovery::FUS_ADDRESS) and compare-repair.sh "fus" runs both.
+                Backend.installFUS(SystemFileDialog.fileUrl, 0x080EC000);
             }
 
             confirmationDialog.openWithMessage(actionFunc, messageObj);

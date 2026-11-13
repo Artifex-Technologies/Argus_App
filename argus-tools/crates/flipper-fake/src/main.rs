@@ -40,8 +40,10 @@
 //! `--old-region-data`: `/int` holds an older `/int/.region_data`.
 //! `--region N`: the device's built-in region (devinfo and the OTP's factory information; default 0, the
 //! development region, which needs no region data).
-//! `flipper-fake --write-firmware DIR [--resources-mismatch]` writes a made-up update folder (`directory.json`, its files
-//! and the region `bundle`) for the C++ app's test hook `ARGUS_TEST_FIRMWARE_DIR` (src/firmware.rs) and exits.
+//! `flipper-fake --write-firmware DIR [--resources-mismatch | --core2-mismatch]` writes a made-up update folder
+//! (`directory.json`, its files and the region `bundle`) for the C++ app's test hook `ARGUS_TEST_FIRMWARE_DIR`
+//! (src/firmware.rs) and exits; the options damage the resources bundle or the wireless stack archive inside
+//! (their SHA-256 in `directory.json` stays right).
 //! `flipper-fake --update-server DIR --ca-out FILE` serves such a folder over HTTPS on 127.0.0.1 (src/update_server.rs)
 //! with a test CA made at start and written to FILE, prints `listening https://127.0.0.1:PORT`, serves until its standard
 //! input closes, then prints the requests it saw.
@@ -149,13 +151,14 @@ fn main() -> ExitCode {
             "--read-only" => fake.read_only = true,
             "--write-firmware" => {
                 let dir = args.next();
-                let mismatch = match args.next().as_deref() {
-                    None => false,
-                    Some("--resources-mismatch") => true,
+                let (resources, core2) = match args.next().as_deref() {
+                    None => (false, false),
+                    Some("--resources-mismatch") => (true, false),
+                    Some("--core2-mismatch") => (false, true),
                     Some(_) => return usage(),
                 };
                 return match dir {
-                    Some(dir) => match flipper_fake::firmware::write(&PathBuf::from(&dir), mismatch) {
+                    Some(dir) => match flipper_fake::firmware::write_with(&PathBuf::from(&dir), resources, core2) {
                         Ok(()) => ExitCode::SUCCESS,
                         Err(e) => {
                             eprintln!("flipper-fake: {dir}: {e}");

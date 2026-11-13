@@ -1,6 +1,7 @@
 #include "radiomanifesthelper.h"
 
 #include <QFile>
+#include <QCryptographicHash>
 
 #include "tararchive.h"
 #include "tarziparchive.h"
@@ -76,6 +77,21 @@ void RadioManifestHelper::readManifest()
 
     if(m_manifest.isError()) {
         finishWithError(m_manifest.error(), QStringLiteral("Failed to read radio manifest: %1").arg(m_manifest.errorString()));
+        return;
+    }
+
+    // The image must be in the archive and be what the manifest says: only the archive as a whole was checked
+    // (against the directory), so a damaged archive's image was flashed as it was. The Rust port has the same rule
+    // (flipper_updates::repair::radio_image); compare-repair.sh "core2-mismatch" runs both on such an archive.
+    const auto &fileInfo = m_manifest.firmware().radio().files().first();
+    const auto data = radioFirmwareData();
+    const auto expected = fileInfo.sha256().toLower();
+    const auto got = QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex();
+
+    if(data.isEmpty()) {
+        finishWithError(BackendError::DataError, QStringLiteral("The wireless stack archive lacks %1, which its manifest names").arg(fileInfo.name()));
+    } else if(expected.size() != 64 || got != expected) {
+        finishWithError(BackendError::DataError, QStringLiteral("The wireless stack image %1 does not match its manifest").arg(fileInfo.name()));
     } else {
         advanceState();
     }

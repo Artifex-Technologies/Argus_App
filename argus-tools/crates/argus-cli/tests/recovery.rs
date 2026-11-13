@@ -83,6 +83,8 @@ fn nothing_changes_without_yes() {
         &["recovery", "radio", "{dir}/radio.bin"],
         &["recovery", "fus", "delete"],
         &["recovery", "option-bytes", "{dir}/ob.data"],
+        // nothing is fetched either (nothing listens there)
+        &["--update-server", "https://127.0.0.1:9", "recovery", "repair-from-server", "release"],
     ] {
         let r = run(Faults::default(), &[("fw.dfu", &fw), ("radio.bin", &[1; 10]), ("ob.data", b"BOR_LEV:0x3:rw\n")], args);
         assert_eq!(r.status, 2, "{args:?}");

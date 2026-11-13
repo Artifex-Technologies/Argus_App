@@ -23,7 +23,7 @@ use flipper_rpc::session::{RpcError, Session};
 
 use flipper_updates::region::RegionData;
 
-use super::updates::{fetch_region_data, region_json};
+use super::updates::{client, fetch_region_data, get_directory, region_json, server};
 use super::{fail, open, print, Cmd, GONE_WAIT};
 
 /// A failure on the firmware side: the device's, or fetching the region data.
@@ -58,6 +58,13 @@ const USAGE: &str = "argus-cli --dfu-socket PATH recovery COMMAND (the DFU bootl
                            install the image written by radio, start the wireless stack
   option-bytes FILE        correct the option bytes from a file like Flipper's ob.data:
                            only its rw fields are written, RDP never
+  install-radio RADIO.bin   the developer tab's wireless stack install (the C++ WirelessStackUpdate-
+                           Operation from its bootloader part): recovery boot mode, the FUS steps
+                           with the image below SFSA, then the OS boot mode (the chip starts its
+                           firmware)
+  install-fus FUS.bin [ADDRESS]
+                           the same with a FUS image written at ADDRESS (hex; default 080EC000,
+                           ST's FUS address on Flipper's chip). It invalidates the chip's keys
   repair FIRMWARE.dfu OB.data [RADIO.bin] [--resources RESOURCES.tgz --port DEVICE]
                            the C++ app's full repair with local files: recovery boot mode,
                            the wireless stack (FUS: delete, write, install, check; a failure
@@ -65,6 +72,14 @@ const USAGE: &str = "argus-cli --dfu-socket PATH recovery COMMAND (the DFU bootl
                            the chip then boots its firmware. Waits for the chip after each
                            reset (at most 30 s), polls the FUS every --poll-ms (1000).
                            With --resources: then, on the firmware at --port, what finish does
+  repair-from-server CHANNEL [--port DEVICE]
+                           the C++ app's full repair as its GUI and qFlipper-cli run it: the
+                           files of CHANNEL's latest version on --update-server (full_dfu f7,
+                           the wireless stack from core2_firmware_tgz, ob.data from
+                           scripts_tgz, resources_tgz), each checked against the directory's
+                           SHA-256 and read whole before anything opens (the wireless stack
+                           image must match its manifest's SHA-256); then repair; with --port
+                           also finish with those resources
   legacy-update FIRMWARE.dfu OB.data [RADIO.bin] --resources R.tgz --backup FILE
                            the C++ app's legacy update (a device without SD card or with old
                            firmware), with --port and --dfu-socket: /int backed up to FILE
@@ -122,9 +137,21 @@ enum Plan {
     Radio(Vec<u8>),
     Fus(&'static str),
     OptionBytes(Vec<u8>),
-    Repair { firmware: Vec<u8>, option_bytes: Vec<u8>, radio: Option<Vec<u8>> },
-    Legacy { firmware: Vec<u8>, option_bytes: Vec<u8>, radio: Option<Vec<u8>> },
+    Repair {
+        firmware: Vec<u8>,
+        option_bytes: Vec<u8>,
+        radio: Option<Vec<u8>>,
+    },
+    Legacy {
+        firmware: Vec<u8>,
+        option_bytes: Vec<u8>,
+        radio: Option<Vec<u8>>,
+    },
     Finish,
+    /// The files come from the update server (fetched in `run`, before anything opens).
+    FromServer(String),
+    /// A wireless stack (None) or FUS image (its address) through the FUS, between the boot modes.
+    Core2(Vec<u8>, Option<u32>),
 }
 
 fn plan(words: &[&str]) -> Result<Plan, (String, String, u8)> {
@@ -179,6 +206,22 @@ fn plan(words: &[&str]) -> Result<Plan, (String, String, u8)> {
             }
         }
         ["finish", _] => Plan::Finish,
+        ["repair-from-server", channel] => Plan::FromServer(channel.to_string()),
+        ["install-radio" | "install-fus", f, rest @ ..] if rest.len() <= usize::from(words[0] == "install-fus") => {
+            let data = checked(read_limited(f, MAX_RADIO))?;
+            if data.is_empty() {
+                return Err(("file".into(), format!("{f} is empty"), 1));
+            }
+            let address = match (words[0], rest.first()) {
+                ("install-radio", _) => None,
+                (_, None) => Some(recovery::FUS_ADDRESS),
+                (_, Some(a)) => Some(
+                    u32::from_str_radix(a.trim_start_matches("0x"), 16)
+                        .map_err(|_| ("usage".to_string(), format!("not a hexadecimal address: {a}"), 2))?,
+                ),
+            };
+            Plan::Core2(data, address)
+        }
         [] | ["help"] => return Err(usage("recovery needs a command")),
         _ => return Err(usage(&format!("unknown recovery command: {}", words.join(" ")))),
     })
@@ -237,7 +280,7 @@ fn execute(d: &mut Device, plan: Plan) -> Result<Value, String> {
             .map_err(|x| e(&x))?;
             json!({"ok": true, "command": "recovery fus", "step": step})
         }
-        Plan::Repair { .. } | Plan::Legacy { .. } | Plan::Finish => unreachable!("run by run()"),
+        Plan::Repair { .. } | Plan::Legacy { .. } | Plan::Finish | Plan::FromServer(_) | Plan::Core2(..) => unreachable!("run by run()"),
         Plan::OptionBytes(data) => match recovery::download_option_bytes(d, &data).map_err(|x| e(&x))? {
             OptionBytesOutcome::Left { differ } => {
                 json!({"ok": true, "command": "recovery option-bytes", "written": false, "read_only_differ": fields(&differ)})
@@ -252,10 +295,49 @@ fn execute(d: &mut Device, plan: Plan) -> Result<Value, String> {
 
 pub fn run(cmd: &Cmd) -> ExitCode {
     let words: Vec<&str> = cmd.words[1..].iter().map(String::as_str).collect();
-    let plan = match plan(&words) {
+    let mut plan = match plan(&words) {
         Ok(p) => p,
         Err((code, m, status)) => return fail(&code, m, status),
     };
+    if matches!(plan, Plan::FromServer(_)) && cmd.resources.is_some() {
+        return fail("usage", "repair-from-server takes its resources from the server, not --resources".into(), 2);
+    }
+    if let Plan::FromServer(_) = &plan {
+        if !cmd.yes {
+            print(json!({
+                "ok": false, "command": format!("recovery {}", words.join(" ")), "checked": true,
+                "error": {"code": "confirm", "message": format!("recovery {} changes the device; run again with --yes", words.join(" "))},
+            }));
+            return ExitCode::from(2);
+        }
+    }
+    // the server's files, fetched and checked before anything opens; the resources go to finish when --port is given
+    let mut fetched: Option<Bundle> = None;
+    let mut server_version: Option<String> = None;
+    if let Plan::FromServer(channel) = &plan {
+        let files = match client().and_then(|c| {
+            let dir = get_directory(&c, server(cmd))?;
+            flipper_updates::repair::fetch(&c, &dir, channel).map_err(|m| ("update_server".to_string(), m))
+        }) {
+            Ok(f) => f,
+            Err((code, m)) => return fail(&code, m, 1),
+        };
+        if let Err(e) = dfuse::parse(&files.firmware) {
+            return fail("file", format!("the firmware from the server: {e}"), 1);
+        }
+        if let Err(e) = OptionBytesFile::parse(&files.option_bytes) {
+            return fail("file", format!("the option bytes from the server: {e}"), 1);
+        }
+        let bundle = match assets::read_bundle(&files.resources[..], &assets::BundleLimits::default()) {
+            Ok(b) => b,
+            Err(e) => return fail("file", format!("the resources from the server: {}", e.0), 1),
+        };
+        if cmd.target.is_some() {
+            fetched = Some(bundle);
+        }
+        server_version = Some(files.version.clone());
+        plan = Plan::Repair { firmware: files.firmware, option_bytes: files.option_bytes, radio: Some(files.radio.data) };
+    }
     // the resources (for finish, or a repair that goes on to the firmware) are checked before anything opens
     let bundle = match (&plan, &cmd.resources) {
         (Plan::Finish, Some(_)) => return fail("usage", "finish takes RESOURCES.tgz as its argument, not --resources".into(), 2),
@@ -268,7 +350,7 @@ pub fn run(cmd: &Cmd) -> ExitCode {
     let bundle = match bundle {
         Some(Ok(b)) => Some(b),
         Some(Err(m)) => return fail("file", m, 1),
-        None => None,
+        None => fetched.take(),
     };
     if !matches!(plan, Plan::Info) && !cmd.yes {
         let what = words.join(" ");
@@ -308,6 +390,17 @@ pub fn run(cmd: &Cmd) -> ExitCode {
         print(out);
         return ExitCode::from(code);
     }
+    if let Plan::Core2(image, address) = &plan {
+        let mut b = SocketBootloader { path: path.to_path_buf(), poll: cmd.poll };
+        let what = if address.is_some() { "recovery install-fus" } else { "recovery install-radio" };
+        return match recovery::core2_update(&mut b, image, *address) {
+            Ok(()) => {
+                print(json!({"ok": true, "command": what, "bytes": image.len(), "address": address.map(|a| format!("0x{a:08X}"))}));
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail("device", e.to_string(), 1),
+        };
+    }
     if let Plan::Repair { firmware, option_bytes, radio } = &plan {
         let mut b = SocketBootloader { path: path.to_path_buf(), poll: cmd.poll };
         return match recovery::full_repair(&mut b, firmware, radio.as_deref(), option_bytes) {
@@ -321,6 +414,9 @@ pub fn run(cmd: &Cmd) -> ExitCode {
                     "radio": radio.as_ref().map(|image| json!({"bytes": image.len(), "installed": r.radio_error.is_none(), "error": r.radio_error})),
                     "option_bytes_written": written, "fixed": fields(&fixed), "read_only_differ": fields(&differ),
                 });
+                if let Some(v) = &server_version {
+                    out["server_version"] = json!(v);
+                }
                 if let Some(b) = &bundle {
                     match finish(cmd, b, None, None) {
                         Ok(v) => out["firmware"] = v,

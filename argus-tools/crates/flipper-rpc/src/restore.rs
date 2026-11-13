@@ -206,6 +206,13 @@ pub(crate) fn read_tar(t: &[u8], max_entries: usize) -> Result<Vec<TarEntry>, Ar
     Ok(out)
 }
 
+/// Reads a `.tgz` by the rules every archive the app reads meets (see the module text) and returns its files by
+/// path (`a/b/c`; folders left out). For the update server's smaller archives (the wireless stack, the scripts).
+pub fn read_tgz_files(input: impl Read, max_tar: u64, max_entries: usize) -> Result<BTreeMap<String, Vec<u8>>, ArchiveError> {
+    let t = gunzip(input, max_tar)?;
+    Ok(read_tar(&t, max_entries)?.into_iter().filter(|e| !e.dir).map(|e| (e.parts.join("/"), t[e.data].to_vec())).collect())
+}
+
 /// Reads and checks a backup of `/int`. Nothing is written anywhere.
 pub fn read_backup(input: impl Read, limits: &ArchiveLimits) -> Result<BackupArchive, ArchiveError> {
     let t = gunzip(input, limits.max_tar)?;

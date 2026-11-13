@@ -6,12 +6,15 @@
 //! - [`region`]: the region bundle (`/regions/api/v0/bundle`) and the `/int/.region_data` it becomes.
 //! - [`fetch`]: HTTPS GET with rustls and the system's roots, https only, every body bounded, a
 //!   file's SHA-256 checked before its bytes are handed out.
+//! - [`repair`]: the files of a repair (firmware, wireless stack, option bytes, resources), as the
+//!   C++ app's `FirmwareHelper` fetches and reads them.
 //!
 //! Nothing here talks to a device; nothing fetches on its own: callers name the server.
 
 pub mod directory;
 pub mod fetch;
 pub mod region;
+pub mod repair;
 
 /// Flipper's update server (the host of the C++ app's directory and region URLs).
 pub const DEFAULT_SERVER: &str = "https://update.flipperzero.one";
