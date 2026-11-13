@@ -19,6 +19,9 @@ flipper-updates = { path = "../flipper-updates" }
 flipper-dfu = { path = "../flipper-dfu" }
 argus-api = { path = "../argus-api" }
 argus-capture = { path = "../argus-capture" }
+# the Argus tools window: the same library the Qt app runs as a process
+argus-tools = { path = "../.." }
+serde_json = "1"
 png = "0.18"
 
 [dev-dependencies]

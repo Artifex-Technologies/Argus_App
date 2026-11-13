@@ -256,12 +256,14 @@ version = "0.1.0"
 dependencies = [
  "argus-api",
  "argus-capture",
+ "argus-tools",
  "eframe",
  "flipper-dfu",
  "flipper-fake",
  "flipper-rpc",
  "flipper-updates",
  "png",
+ "serde_json",
  "ureq",
 ]
 

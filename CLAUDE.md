@@ -152,6 +152,22 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-13 — `argus-app`: the API with the app's device, repair from the server, Developer tab, tools window, picker
+- The Rust app's Sarina API now has the connected device (`device.status`, `capture.pull`/`pullAll` run on the app's
+  own device worker; the console's pulls go through the same bridge call). Recovery: the repair from the update
+  server's files (as qFlipper's main button) and from local files, then the steps on the firmware (resources, region
+  data, restart) once the device is back. The Developer tab (developer mode; wireless stack and FUS installs, recovery
+  mode only), the Argus tools window (apps, check-up, rebuild, snapshots, capture library; `argus_tools` in process)
+  and a built-in file picker. All tested headless against the fakes; still never run on a desktop or a real Flipper.
+- **Fixed in both (C++ and Rust):** a wireless stack image that is not what its `core2_firmware` manifest's SHA-256
+  says was flashed by the C++ app; now refused before the chip is touched. The Qt GUI's "Install FUS" passed
+  `0x080ec00` (a digit short, outside the flash) and could never work; it passes `0x080EC000` now. Both compared in
+  `compare-repair.sh` (307 checks). New: `argus-cli recovery repair-from-server|install-radio|install-fus`.
+- `argus-tools checkup` moved into the library (`argus_tools::checkup`), output unchanged.
+- The real `argus-app` binary passed a smoke test in Yggdrasil's headless compositor against `flipper-fake`
+  (Yggdrasil's `tests/apps.rs`, run by `argus-tools/crates/argus-app/smoke-yggdrasil.sh` in its podman container).
+- **@Sarina:** with the Rust app's API started, `device.status` and `capture.pull` now work as with the Qt app.
+
 ### 2026-11-12 — `argus-app`: operations, the console with the Sarina API toggle, recovery
 - The Rust app now does backup, restore, erase, the update (server and file), the console (capture pulls into the
   shared datastore, sessions, notes, the control API started and stopped from the app) and recovery (repair with local

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use argus_app::discovery::{Fixed, Found, Kind};
+use argus_app::discovery::{Discovery, Fixed, Found, Kind};
 use argus_app::net::Net;
 use argus_app::{theme, ArgusApp, Config};
 use eframe::egui::{self, accesskit, pos2, vec2, Color32, ColorImage, Event, Key, Modifiers, PointerButton, Pos2, Rect, TextureId};
@@ -186,6 +186,11 @@ pub struct Widget {
 impl Harness {
     /// The app with `devices` as its only devices, its files in `dir`, a fixed dark style.
     pub fn new(dir: &Path, devices: Vec<Found>, opts: Options) -> Harness {
+        Harness::with_discovery(dir, Box::new(Fixed(devices)), opts)
+    }
+
+    /// The app with a discovery of the test's own (devices that come and go).
+    pub fn with_discovery(dir: &Path, discovery: Box<dyn Discovery>, opts: Options) -> Harness {
         let config = dir.join("config");
         std::fs::create_dir_all(&config).unwrap();
         let mut settings = format!("check_updates = {}\n", opts.check_updates);
@@ -194,7 +199,7 @@ impl Harness {
         let home = dir.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let cfg = Config {
-            discovery: Box::new(Fixed(devices)),
+            discovery,
             config_dir: config,
             datastore: dir.join("data/chymaera.db"),
             library_dir: dir.join("data/captures"),
@@ -206,6 +211,12 @@ impl Harness {
             home,
             api_token: "test-token".into(),
             recovery_poll: Duration::from_millis(5),
+            // Limbo is never reached: its socket here does not exist
+            tools: argus_app::tools::Dirs {
+                data: dir.join("data/argus"),
+                pulls: dir.join("data/pulls"),
+                limbo_socket: dir.join("limbo.sock"),
+            },
         };
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
@@ -319,6 +330,9 @@ impl Harness {
 
     /// The confirmation dialog's area while it is open: only what is inside it can be clicked then.
     fn modal(&self) -> Option<Rect> {
+        if self.app.picker_open() {
+            return self.ctx.memory(|m| m.area_rect(egui::Id::new("picker")));
+        }
         self.app.dialog().and_then(|_| self.ctx.memory(|m| m.area_rect(egui::Id::new("confirm"))))
     }
 
@@ -553,4 +567,20 @@ pub fn read_png(path: &Path) -> Option<ColorImage> {
     let data = &buf[..info.buffer_size()];
     let pixels = data.as_chunks::<3>().0.iter().map(|c| Color32::from_rgb(c[0], c[1], c[2])).collect();
     Some(ColorImage::new([info.width as usize, info.height as usize], pixels))
+}
+
+/// Devices the test changes while the app runs (a chip that leaves its bootloader and comes back as its firmware).
+#[derive(Clone, Default)]
+pub struct Shared(pub Arc<Mutex<Vec<Found>>>);
+
+impl Shared {
+    pub fn set(&self, list: Vec<Found>) {
+        *self.0.lock().unwrap() = list;
+    }
+}
+
+impl Discovery for Shared {
+    fn scan(&self) -> Vec<Found> {
+        self.0.lock().unwrap().clone()
+    }
 }

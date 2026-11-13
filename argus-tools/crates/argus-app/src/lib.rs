@@ -11,5 +11,6 @@ pub mod net;
 pub mod recovery;
 pub mod settings;
 pub mod theme;
+pub mod tools;
 
 pub use app::{ArgusApp, Config};

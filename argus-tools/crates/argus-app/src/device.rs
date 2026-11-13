@@ -132,6 +132,9 @@ pub enum Op {
     Repair,
     /// Leaving recovery mode.
     Exit,
+    /// The developer tab's installs (recovery mode).
+    Radio,
+    Fus,
 }
 
 impl Op {
@@ -143,6 +146,8 @@ impl Op {
             Op::Update => "Updating your device",
             Op::Repair => "Repairing your device",
             Op::Exit => "Leaving recovery mode",
+            Op::Radio => "Installing the wireless stack",
+            Op::Fus => "Installing the FUS",
             Op::Pull | Op::Push | Op::Mkdir | Op::Remove | Op::Rename => "File operation in progress",
             Op::Captures => "Pulling captures",
         }
@@ -150,7 +155,7 @@ impl Op {
 
     /// Operations that take the whole window (the Qt app's update overlay); file operations and capture pulls do not.
     pub fn is_big(self) -> bool {
-        matches!(self, Op::Backup | Op::Restore | Op::Erase | Op::Update | Op::Repair | Op::Exit)
+        matches!(self, Op::Backup | Op::Restore | Op::Erase | Op::Update | Op::Repair | Op::Exit | Op::Radio | Op::Fus)
     }
 }
 
@@ -159,6 +164,16 @@ pub struct UpdateJob {
     pub package: flipper_rpc::update::UpdatePackage,
     /// `None`: the device is of the development region and needs none.
     pub region: Option<Result<Vec<u8>, String>>,
+}
+
+/// The steps on the firmware side after a repair (the C++ `FullRepairOperation`'s last steps, `argus-cli recovery
+/// repair --resources --port`): the region data made first (for a device not of the development region, from the
+/// update server, before anything changes), then the resources onto the SD card, the region data, a restart.
+pub struct FinishJob {
+    pub bundle: flipper_rpc::assets::Bundle,
+    /// The device's built-in region.
+    pub region: u32,
+    pub net: crate::net::Net,
 }
 
 pub enum Cmd {
@@ -188,6 +203,9 @@ pub enum Cmd {
     Restore(PathBuf),
     Erase,
     Update(Box<UpdateJob>),
+    Finish(Box<FinishJob>),
+    /// A job of the tools window on the session (it sends its own result and wakes the UI).
+    Run(Box<dyn FnOnce(&mut crate::tools::Sess) + Send>),
     /// A capture pull into the shared datastore, asked for by the bridge (the console or the Sarina API); its steps go
     /// back as notes the bridge logs.
     Captures {
@@ -409,6 +427,11 @@ fn run(found: Found, timeout: Duration, rx: Receiver<Cmd>, tx: Sender<Event>, br
                     }
                     streaming = false;
                 }
+                if let Cmd::Run(job) = other {
+                    job(&mut s);
+                    last_alive = Instant::now();
+                    continue;
+                }
                 let (event, left) = handle(&mut s, other, &bridge, &waker);
                 let broken = matches!(&event, Some(Event::Listing { result: Err(_), .. }) | Some(Event::Done { result: Err(_), .. }))
                     && s.protobuf_version().is_err();
@@ -532,6 +555,33 @@ fn handle<T: Transport>(s: &mut Session<T>, cmd: Cmd, bridge: &Arc<Mutex<Bridge>
                 Err(e) => (done(Op::Update, Err(e.to_string())), None),
             }
         }
+        Cmd::Finish(job) => {
+            let region = match job.region {
+                0 => None,
+                _ => match job.net.region() {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        return (
+                            done(Op::Repair, Err(format!("after the repair, the region data: {e}; nothing was changed on the firmware"))),
+                            None,
+                        )
+                    }
+                },
+            };
+            match s.finish_install(&job.bundle, job.region, region.as_deref(), None) {
+                Ok((r, _)) => {
+                    let summary = format!(
+                        "On the firmware: {} file(s) of the resources written ({} bytes, {} removed){}, then a restart",
+                        r.files_written,
+                        r.bytes,
+                        r.removed,
+                        if region.is_some() { ", the region data written" } else { "" }
+                    );
+                    (done(Op::Repair, Ok(summary)), Some("the device restarts".into()))
+                }
+                Err(e) => (done(Op::Repair, Err(format!("after the repair, on the firmware: {e}"))), None),
+            }
+        }
         Cmd::Captures { request, notes } => {
             let path = bridge.lock().unwrap_or_else(|e| e.into_inner()).datastore_path().to_string();
             let mut summary = String::new();
@@ -545,7 +595,7 @@ fn handle<T: Transport>(s: &mut Session<T>, cmd: Cmd, bridge: &Arc<Mutex<Bridge>
             // the pull's last line ("Pulled ...: n new, ...") is its summary; a device that stopped answering ends it
             (done(Op::Captures, r.map(|_| summary).map_err(err)), None)
         }
-        Cmd::Disconnect | Cmd::Screen(_) | Cmd::Input(..) => (None, None),
+        Cmd::Disconnect | Cmd::Screen(_) | Cmd::Input(..) | Cmd::Run(_) => (None, None),
     }
 }
 

@@ -1,7 +1,7 @@
 //! The window: qFlipper's layout and motion (application/components/*.qml), drawn in Yggdrasil's style.
 //!
 //! - **Layout** as qFlipper's `MainWindow.qml`: a title strip, one content card (830 x 390), a footer with LOGS, CONSOLE,
-//!   SETTINGS and the status bar, and a log drawer under it. In the card, the stages of `ApplicationBackend` each have
+//!   TOOLS (the Argus tools window, `app/tools_ui.rs`), SETTINGS and the status bar, and a log drawer under it. In the card, the stages of `ApplicationBackend` each have
 //!   their overlay: no device (`NoDeviceOverlay`), home with the tabs on the left and the device on the right
 //!   (`HomeOverlay`), an operation in progress (`UpdateOverlay`), its end (`FinishOverlay`, with the partial-success
 //!   warning) and the full-size screen with the keypad (`StreamOverlay`).
@@ -39,6 +39,12 @@ use crate::firmware::{self, UpdateState};
 use crate::net::{Net, NetEvent, PackageSource};
 use crate::settings::{Settings, Style};
 use crate::theme::{self, Palette, Theme};
+
+mod picker;
+mod tools_ui;
+
+pub use picker::PickFor;
+use picker::Picker;
 
 /// The app's version: the repository's VERSION file, as the Qt app and argus-tools show it.
 pub const VERSION: &str = include_str!("../../../../VERSION").trim_ascii();
@@ -85,6 +91,8 @@ pub struct Config {
     pub api_token: String,
     /// The wait between the FUS status polls of a repair (1 s, as the C++ app).
     pub recovery_poll: Duration,
+    /// Where the Argus tools keep their data, the console's pulls, and Limbo's socket.
+    pub tools: crate::tools::Dirs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +100,8 @@ pub enum Tab {
     Info,
     Actions,
     Files,
+    /// qFlipper's developer tab (Settings, developer mode): the wireless stack and FUS installs.
+    Developer,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,15 +147,35 @@ pub enum Action {
         remote: String,
     },
     SaveScreenshot,
-    /// The repair with local files (recovery mode only).
+    /// The repair with the update server's files (recovery mode only; the main button, as qFlipper's).
     Repair,
+    /// The repair with local files (recovery mode only).
+    RepairFiles,
     ExitRecovery,
+    /// The developer tab (recovery mode only): a wireless stack image, or a FUS image.
+    InstallRadio,
+    InstallFus,
+    /// The tools window: the planned app install, the planned restore from a snapshot, deleting a snapshot.
+    ToolsInstall,
+    ToolsRestore,
+    ToolsDeleteSnapshot {
+        id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Field {
     pub label: String,
     pub value: String,
+    pub kind: FieldKind,
+}
+
+/// What a dialog field holds: text, a file to read (Browse… picks one), or a new file (Browse… picks its folder).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldKind {
+    Text,
+    Open,
+    Save,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,6 +240,18 @@ impl Drop for Api {
     }
 }
 
+struct Pending {
+    /// Taken when the steps are sent to the device.
+    bundle: Option<flipper_rpc::assets::Bundle>,
+    /// The bootloader part's partial success, shown at the end.
+    warning: Option<String>,
+    /// When the wait for the device started (the frame clock).
+    since: Option<f64>,
+}
+
+/// How long the device may take to come back after a repair (the CLIs wait as long for the chip).
+const COME_BACK: f64 = 30.0;
+
 enum DirState {
     Unknown,
     Checking,
@@ -249,8 +291,15 @@ pub struct ArgusApp {
     directory: DirState,
     net_tx: Sender<NetEvent>,
     net_rx: Receiver<NetEvent>,
-    rec_tx: Sender<Result<device::Outcome, String>>,
-    rec_rx: Receiver<Result<device::Outcome, String>>,
+    rec_tx: Sender<Result<crate::recovery::Done, String>>,
+    rec_rx: Receiver<Result<crate::recovery::Done, String>>,
+    /// A repair whose bootloader part is done, waiting for the device to come back for the steps on the firmware side.
+    pending: Option<Pending>,
+    tools_open: bool,
+    tools: crate::tools::State,
+    tools_tx: Sender<crate::tools::Reply>,
+    tools_rx: Receiver<crate::tools::Reply>,
+    picker: Option<Picker>,
     keypad: Keypad,
     console_note: String,
 }
@@ -266,6 +315,7 @@ impl ArgusApp {
         let bridge = Arc::new(Mutex::new(Bridge::new(&cfg.datastore, cfg.library_dir.clone())));
         let (net_tx, net_rx) = mpsc::channel();
         let (rec_tx, rec_rx) = mpsc::channel();
+        let (tools_tx, tools_rx) = mpsc::channel();
         ArgusApp {
             settings,
             theme: Theme::new(source),
@@ -297,6 +347,12 @@ impl ArgusApp {
             net_rx,
             rec_tx,
             rec_rx,
+            pending: None,
+            tools_open: false,
+            tools: crate::tools::State::default(),
+            tools_tx,
+            tools_rx,
+            picker: None,
             keypad: Keypad::default(),
             console_note: String::new(),
             cfg,
@@ -340,6 +396,9 @@ impl ArgusApp {
     // ------------------------------------------------------------------ devices
 
     fn scan(&mut self, now: f64) {
+        if self.pending.is_some() {
+            return self.scan_for_finish(now);
+        }
         if self.worker.is_some() || !matches!(self.stage, Stage::Waiting) || now - self.last_scan < 1.0 {
             return;
         }
@@ -351,6 +410,35 @@ impl ArgusApp {
         }
         if self.settings.auto_connect && self.found.len() == 1 && self.failed.as_ref() != Some(&self.found[0]) {
             let f = self.found[0].clone();
+            self.connect(f);
+        }
+    }
+
+    /// After a repair's bootloader part: the first device that is not in recovery mode is the repaired one (the chip
+    /// left its bootloader and started its firmware); connected to by itself, whatever auto-connect says.
+    fn scan_for_finish(&mut self, now: f64) {
+        if self.worker.is_some() {
+            return;
+        }
+        let Some(p) = &mut self.pending else { return };
+        let since = *p.since.get_or_insert(now);
+        if now - since > COME_BACK {
+            self.pending = None;
+            self.stage = Stage::Error {
+                title: "Repair Failed".into(),
+                text: format!(
+                    "The firmware is written, but the device did not come back within {COME_BACK} s: the databases are not \
+                     installed. Connect it again and repair it once more."
+                ),
+            };
+            return;
+        }
+        if now - self.last_scan < 1.0 {
+            return;
+        }
+        self.last_scan = now;
+        self.found = self.cfg.discovery.scan();
+        if let Some(f) = self.found.iter().find(|f| !f.is_recovery()).cloned() {
             self.connect(f);
         }
     }
@@ -367,7 +455,9 @@ impl ArgusApp {
         }
         let Some(waker) = self.waker.clone() else { return };
         self.logline(format!("Connecting to {}", found.location()));
-        self.stage = Stage::Connecting;
+        if self.pending.is_none() {
+            self.stage = Stage::Connecting;
+        }
         self.worker = Some(Worker::spawn(found, self.cfg.timeout, self.bridge.clone(), waker));
     }
 
@@ -408,7 +498,30 @@ impl ArgusApp {
         self.bridge.lock().unwrap_or_else(|e| e.into_inner()).is_pulling()
     }
 
+    /// The console or the tools window covers the card.
+    fn covered(&self) -> bool {
+        self.console || self.tools_open
+    }
+
+    /// What the tools window asked for, as it arrives.
+    pub fn tools_state(&self) -> &crate::tools::State {
+        &self.tools
+    }
+
     fn poll(&mut self) {
+        let replies: Vec<crate::tools::Reply> = self.tools_rx.try_iter().collect();
+        for r in replies {
+            let done = matches!(r, crate::tools::Reply::Done(_));
+            self.tools.apply(r);
+            // as the Qt controller: the list again after a snapshot is made or deleted, the search after an index
+            if done && self.tools.busy.is_none() {
+                match self.tools.tab {
+                    crate::tools::Tab::Snapshots => self.refresh_snapshots(),
+                    crate::tools::Tab::Captures => self.search_captures(),
+                    _ => {}
+                }
+            }
+        }
         // what the device's pulls logged (the API's server thread does the same while it runs)
         self.bridge.lock().unwrap_or_else(|e| e.into_inner()).poll_device();
         let events: Vec<Event> = match &self.worker {
@@ -418,10 +531,21 @@ impl ArgusApp {
         for e in events {
             self.on_event(e);
         }
-        let done: Vec<Result<device::Outcome, String>> = self.rec_rx.try_iter().collect();
+        let done: Vec<Result<crate::recovery::Done, String>> = self.rec_rx.try_iter().collect();
         for result in done {
             let Stage::Busy(op) = self.stage else { continue };
-            self.on_event(Event::Done { op, result });
+            match result {
+                Ok(crate::recovery::Done { outcome, finish: Some(bundle) }) => {
+                    // the chip starts its firmware; the rest runs on the device once it is back
+                    self.logline(outcome.summary);
+                    self.logline("Waiting for the device to come back for the resources and a restart");
+                    self.pending = Some(Pending { bundle: Some(bundle), warning: outcome.warning, since: None });
+                    self.current = None;
+                    self.last_scan = f64::NEG_INFINITY;
+                }
+                Ok(d) => self.on_event(Event::Done { op, result: Ok(d.outcome) }),
+                Err(e) => self.on_event(Event::Done { op, result: Err(e) }),
+            }
         }
         let net: Vec<NetEvent> = self.net_rx.try_iter().collect();
         for e in net {
@@ -468,11 +592,16 @@ impl ArgusApp {
                     let d = w.api_device(info.name.clone(), waker);
                     self.bridge.lock().unwrap_or_else(|e| e.into_inner()).attach_device(d);
                 }
+                let region = info.region;
                 self.info = Some(info);
                 if self.stage == Stage::Connecting {
                     self.stage = Stage::Ready;
                 }
                 self.tab = Tab::Info;
+                if let Some(bundle) = self.pending.as_mut().and_then(|p| p.bundle.take()) {
+                    self.send(Cmd::Finish(Box::new(device::FinishJob { bundle, region, net: self.cfg.net.clone() })));
+                    return;
+                }
                 if self.settings.check_updates {
                     self.check_updates();
                 }
@@ -498,7 +627,11 @@ impl ArgusApp {
                 }
             }
             Event::Frame(f) => self.frame = Some(f),
-            Event::Done { op, result } => {
+            Event::Done { op, mut result } => {
+                // the end of a repair's steps on the firmware: the bootloader part's warning stays
+                if let (Op::Repair, Some(p)) = (op, self.pending.take()) {
+                    result = result.map(|o| device::Outcome { warning: p.warning.or(o.warning), ..o });
+                }
                 if op != Op::Captures {
                     self.busy = None;
                 }
@@ -527,6 +660,7 @@ impl ArgusApp {
             Event::Gone(why) => {
                 self.logline(format!("Device disconnected: {why}"));
                 self.bridge.lock().unwrap_or_else(|e| e.into_inner()).detach_device(&why);
+                self.pending = None;
                 self.worker = None;
                 self.info = None;
                 self.frame = None;
@@ -547,6 +681,11 @@ impl ArgusApp {
             Event::Failed(why) => {
                 self.logline(format!("Cannot connect: {why}"));
                 self.worker = None;
+                if self.pending.is_some() {
+                    // tried again until the wait is over
+                    self.current = None;
+                    return;
+                }
                 self.failed = self.current.take();
                 self.stage = Stage::Error { title: "Cannot Connect".into(), text: why };
             }
@@ -557,7 +696,7 @@ impl ArgusApp {
     fn sync_stream(&mut self) {
         let want = self.worker.is_some()
             && self.info.is_some()
-            && (self.stage == Stage::Streaming || (self.stage == Stage::Ready && self.tab != Tab::Files && !self.console));
+            && (self.stage == Stage::Streaming || (self.stage == Stage::Ready && self.tab != Tab::Files && !self.covered()));
         if want != self.stream_wanted {
             self.stream_wanted = want;
             self.send(Cmd::Screen(want));
@@ -565,7 +704,7 @@ impl ArgusApp {
         let listing_due = self.files.loaded.as_deref() != Some(self.files.path.as_str());
         if self.stage == Stage::Ready
             && self.tab == Tab::Files
-            && !self.console
+            && !self.covered()
             && self.worker.is_some()
             && self.busy.is_none()
             && listing_due
@@ -614,7 +753,7 @@ impl ArgusApp {
                 warning: None,
                 confirm: "Backup".into(),
                 danger: false,
-                fields: vec![field("Save to", home.join(format!("{}-backup-{stamp}.tgz", self.device_name())))],
+                fields: vec![save_field("Save to", home.join(format!("{}-backup-{stamp}.tgz", self.device_name())))],
                 action,
                 error: None,
             },
@@ -664,7 +803,7 @@ impl ArgusApp {
                 warning: None,
                 confirm: "Create".into(),
                 danger: false,
-                fields: vec![Field { label: "Name".into(), value: "New Folder".into() }],
+                fields: vec![Field { label: "Name".into(), value: "New Folder".into(), kind: FieldKind::Text }],
                 action,
                 error: None,
             },
@@ -674,7 +813,7 @@ impl ArgusApp {
                 warning: None,
                 confirm: "Rename".into(),
                 danger: false,
-                fields: vec![Field { label: "Name".into(), value: old.clone() }],
+                fields: vec![Field { label: "Name".into(), value: old.clone(), kind: FieldKind::Text }],
                 action,
                 error: None,
             },
@@ -694,7 +833,7 @@ impl ArgusApp {
                 warning: None,
                 confirm: "Download".into(),
                 danger: false,
-                fields: vec![field("Save to", home.join(remote.rsplit('/').next().unwrap_or("download")))],
+                fields: vec![save_field("Save to", home.join(remote.rsplit('/').next().unwrap_or("download")))],
                 action,
                 error: None,
             },
@@ -704,14 +843,30 @@ impl ArgusApp {
                 warning: None,
                 confirm: "Save".into(),
                 danger: false,
-                fields: vec![field("Save to", home.join(format!("Screenshot-{stamp}.png")))],
+                fields: vec![save_field("Save to", home.join(format!("Screenshot-{stamp}.png")))],
                 action,
                 error: None,
             },
             Action::Repair => Dialog {
                 title: "Repair Device?".into(),
+                message: format!(
+                    "The latest firmware of the {} channel will be downloaded from the update server and installed, with \
+                     the wireless stack and the option bytes; then the databases go onto the SD card and the device \
+                     restarts. Recovery may erase your progress and settings.",
+                    self.settings.update_channel
+                ),
+                warning: None,
+                confirm: "Repair".into(),
+                danger: false,
+                fields: Vec::new(),
+                action,
+                error: None,
+            },
+            Action::RepairFiles => Dialog {
+                title: "Repair from files?".into(),
                 message: "The firmware from these files will be installed, the option bytes corrected, and the wireless stack \
-                          installed when an image is given. Recovery may erase your progress and settings."
+                          installed when an image is given; with the resources, they then go onto the SD card and the device \
+                          restarts. Recovery may erase your progress and settings."
                     .into(),
                 warning: None,
                 confirm: "Repair".into(),
@@ -719,8 +874,34 @@ impl ArgusApp {
                 fields: vec![
                     field("Firmware (.dfu)", home.join("")),
                     field("Option bytes (ob.data)", home.join("")),
-                    Field { label: "Wireless stack image (.bin, optional)".into(), value: String::new() },
+                    Field { label: "Wireless stack image (.bin, optional)".into(), value: String::new(), kind: FieldKind::Open },
+                    Field { label: "Resources (.tgz, optional)".into(), value: String::new(), kind: FieldKind::Open },
                 ],
+                action,
+                error: None,
+            },
+            Action::InstallRadio => Dialog {
+                title: "Install wireless stack?".into(),
+                message: "WARNING! This operation can break your Flipper!".into(),
+                warning: Some(
+                    "The image goes below the secure flash start and the FUS installs it; the chip then starts its firmware.".into(),
+                ),
+                confirm: "Install".into(),
+                danger: true,
+                fields: vec![field("Wireless stack image (.bin)", home.join(""))],
+                action,
+                error: None,
+            },
+            Action::InstallFus => Dialog {
+                title: "Install FUS?".into(),
+                message: "LAST WARNING! This will invalidate your encryption keys! Please reconsider.".into(),
+                warning: Some(format!(
+                    "The image is written at 0x{:08X} and the FUS upgrades itself from it.",
+                    flipper_dfu::recovery::FUS_ADDRESS
+                )),
+                confirm: "Install".into(),
+                danger: true,
+                fields: vec![field("FUS image (.bin)", home.join(""))],
                 action,
                 error: None,
             },
@@ -735,6 +916,7 @@ impl ArgusApp {
                 error: None,
             },
             Action::Update(_) => return self.ask_update(),
+            Action::ToolsInstall | Action::ToolsRestore | Action::ToolsDeleteSnapshot { .. } => return self.ask_tools(action),
         };
         self.open_dialog(d);
     }
@@ -814,22 +996,39 @@ impl ArgusApp {
                 self.busy = Some(Op::Pull);
                 self.send(Cmd::Pull { remote, local: p });
             }
-            Action::Repair | Action::ExitRecovery => {
+            Action::Repair | Action::RepairFiles | Action::ExitRecovery | Action::InstallRadio | Action::InstallFus => {
                 let kind = self.current.as_ref().map(|f| f.kind.clone()).ok_or("No device.")?;
                 if let Some(why) = crate::recovery::unreachable(&kind) {
                     return Err(why);
                 }
-                let (job, op) = if action == Action::Repair {
-                    let radio = value(2);
-                    let files = crate::recovery::RepairFiles::read(&path(0)?, &path(1)?, (!radio.is_empty()).then(|| Path::new(&radio)))?;
-                    (crate::recovery::Job::Repair(files), Op::Repair)
-                } else {
-                    (crate::recovery::Job::Exit, Op::Exit)
+                let optional = |i: usize| (!value(i).is_empty()).then(|| PathBuf::from(value(i)));
+                let (job, op) = match action {
+                    Action::Repair => (
+                        crate::recovery::Job::FromServer { net: self.cfg.net.clone(), channel: self.settings.update_channel.clone() },
+                        Op::Repair,
+                    ),
+                    Action::RepairFiles => {
+                        let files =
+                            crate::recovery::RepairFiles::read(&path(0)?, &path(1)?, optional(2).as_deref(), optional(3).as_deref())?;
+                        (crate::recovery::Job::Repair(files), Op::Repair)
+                    }
+                    Action::InstallRadio => {
+                        (crate::recovery::Job::Core2 { image: crate::recovery::read_image(&path(0)?)?, fus: None }, Op::Radio)
+                    }
+                    Action::InstallFus => (
+                        crate::recovery::Job::Core2 {
+                            image: crate::recovery::read_image(&path(0)?)?,
+                            fus: Some(flipper_dfu::recovery::FUS_ADDRESS),
+                        },
+                        Op::Fus,
+                    ),
+                    _ => (crate::recovery::Job::Exit, Op::Exit),
                 };
                 let waker = self.waker.clone().ok_or("Not ready yet.")?;
                 crate::recovery::start(kind, self.cfg.recovery_poll, job, self.rec_tx.clone(), waker)?;
                 self.big(op);
             }
+            Action::ToolsInstall | Action::ToolsRestore | Action::ToolsDeleteSnapshot { .. } => return self.execute_tools(action, fields),
             Action::SaveScreenshot => {
                 let p = new_path(0)?;
                 let frame = self.frame.clone().ok_or("There is no screen to save yet.")?;
@@ -930,6 +1129,7 @@ impl ArgusApp {
         }
 
         self.dialog_ui(&ctx, &pal);
+        self.picker_ui(&ctx, &pal);
         self.settings_ui(&ctx, &pal);
         if let Some(op) = self.busy {
             if !op.is_big() {
@@ -997,15 +1197,16 @@ impl ArgusApp {
 
         let fade = |name: &str, on: bool| ctx.animate_bool_with_time_and_easing(Id::new(("overlay", name)), on, FADE, ease);
         let console = fade("console", self.console);
-        let waiting = fade("waiting", matches!(self.stage, Stage::Waiting | Stage::Connecting) && !self.console);
-        let home = fade("home", self.stage == Stage::Ready && !self.console);
-        let busy = fade("busy", matches!(self.stage, Stage::Busy(_)) && !self.console);
-        let finished = fade("finished", matches!(self.stage, Stage::Finished { .. }) && !self.console);
-        let error = fade("error", matches!(self.stage, Stage::Error { .. }) && !self.console);
-        let stream = fade("stream", self.stage == Stage::Streaming && !self.console);
+        let tools = fade("tools", self.tools_open && !self.console);
+        let waiting = fade("waiting", matches!(self.stage, Stage::Waiting | Stage::Connecting) && !self.covered());
+        let home = fade("home", self.stage == Stage::Ready && !self.covered());
+        let busy = fade("busy", matches!(self.stage, Stage::Busy(_)) && !self.covered());
+        let finished = fade("finished", matches!(self.stage, Stage::Finished { .. }) && !self.covered());
+        let error = fade("error", matches!(self.stage, Stage::Error { .. }) && !self.covered());
+        let stream = fade("stream", self.stage == Stage::Streaming && !self.covered());
 
         // the device view: at home on the right, during an operation further left; it slides between them
-        let device_shown = matches!(self.stage, Stage::Ready | Stage::Busy(_) | Stage::Finished { .. }) && !self.console;
+        let device_shown = matches!(self.stage, Stage::Ready | Stage::Busy(_) | Stage::Finished { .. }) && !self.covered();
         let device_alpha = ctx.animate_bool_with_time_and_easing(Id::new("device-alpha"), device_shown, SLIDE, ease);
         let at_home = ctx.animate_bool_with_time_and_easing(Id::new("device-x"), self.stage == Stage::Ready, SLIDE, ease);
         if device_alpha > 0.0 {
@@ -1037,6 +1238,9 @@ impl ArgusApp {
         }
         if console > 0.0 {
             self.layer(ui, "console", card, console, self.console, |app, ui| app.console_ui(ui, card, pal));
+        }
+        if tools > 0.0 {
+            self.layer(ui, "tools", card, tools, self.tools_open && !self.console, |app, ui| app.tools_ui(ui, card, pal));
         }
     }
 
@@ -1219,7 +1423,13 @@ impl ArgusApp {
         let tabs = Rect::from_min_size(card.min + vec2(28.0, 22.0), vec2(360.0, 34.0));
         ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 4))).max_rect(tabs), |ui| {
             ui.horizontal(|ui| {
-                for (t, label) in [(Tab::Info, "Info"), (Tab::Actions, "Actions"), (Tab::Files, "Files")] {
+                let mut tabs = vec![(Tab::Info, "Info"), (Tab::Actions, "Actions"), (Tab::Files, "Files")];
+                if self.settings.developer {
+                    tabs.push((Tab::Developer, "Developer"));
+                } else if self.tab == Tab::Developer {
+                    self.tab = Tab::Info;
+                }
+                for (t, label) in tabs {
                     let enabled = !(t == Tab::Files && self.recovery());
                     let on = self.tab == t;
                     let b = egui::Button::new(RichText::new(label).color(if on { pal.on_accent() } else { pal.text }))
@@ -1239,6 +1449,7 @@ impl ArgusApp {
             Tab::Info => self.info_tab(ui, pal),
             Tab::Actions => self.actions_tab(ui, pal),
             Tab::Files => self.files_tab(ui, pal),
+            Tab::Developer => self.developer_tab(ui, pal),
         });
     }
 
@@ -1276,13 +1487,24 @@ impl ArgusApp {
             ui.label(RichText::new("Recovery").color(pal.dim));
             let size = vec2(150.0, 32.0);
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new("Repair…").min_size(size)).on_hover_text("Install firmware from local files.").clicked() {
+                if ui
+                    .add(egui::Button::new("Repair…").min_size(size))
+                    .on_hover_text("Install the latest firmware from the update server.")
+                    .clicked()
+                {
                     self.ask(Action::Repair);
                 }
-                if ui.add(egui::Button::new("Leave recovery mode").min_size(size)).clicked() {
-                    self.ask(Action::ExitRecovery);
+                if ui
+                    .add(egui::Button::new("Repair from files…").min_size(size))
+                    .on_hover_text("Install firmware from local files.")
+                    .clicked()
+                {
+                    self.ask(Action::RepairFiles);
                 }
             });
+            if ui.add(egui::Button::new("Leave recovery mode").min_size(size)).clicked() {
+                self.ask(Action::ExitRecovery);
+            }
             if let Some(why) = self.current.as_ref().and_then(|f| crate::recovery::unreachable(&f.kind)) {
                 ui.label(RichText::new(why).color(pal.amber));
             }
@@ -1349,6 +1571,37 @@ impl ArgusApp {
             }
             ui.end_row();
         });
+    }
+
+    /// qFlipper's developer tab: the wireless stack and FUS installs, both red, both behind their dialogs, and only for
+    /// a device in recovery mode on a bootloader the app can reach (this build does not reboot a running firmware into
+    /// its bootloader).
+    fn developer_tab(&mut self, ui: &mut egui::Ui, pal: &Palette) {
+        ui.label(RichText::new("Developer Mode").color(pal.amber));
+        let why = match &self.current {
+            Some(f) if f.is_recovery() => crate::recovery::unreachable(&f.kind),
+            _ => Some("These run on a device in recovery mode: put it into recovery mode first.".into()),
+        };
+        let can = why.is_none() && self.stage == Stage::Ready;
+        let size = vec2(220.0, 32.0);
+        let red = |t: &str| RichText::new(t.to_string()).color(if can { pal.red } else { pal.dim });
+        if ui
+            .add_enabled(can, egui::Button::new(red("Install wireless fw")).min_size(size))
+            .on_hover_text("Install a custom wireless stack. WARNING! This may result in a non-functional Flipper!")
+            .clicked()
+        {
+            self.ask(Action::InstallRadio);
+        }
+        if ui
+            .add_enabled(can, egui::Button::new(red("Install FUS firmware")).min_size(size))
+            .on_hover_text("Install a custom FUS firmware. !!MEGA WARNING!! It WILL result in encryption keys loss!")
+            .clicked()
+        {
+            self.ask(Action::InstallFus);
+        }
+        if let Some(w) = why {
+            ui.label(RichText::new(w).color(pal.dim));
+        }
     }
 
     fn files_tab(&mut self, ui: &mut egui::Ui, pal: &Palette) {
@@ -1832,10 +2085,11 @@ impl ArgusApp {
         ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 10))).max_rect(r), |ui| {
             ui.horizontal_centered(|ui| {
                 let size = vec2(100.0, r.height());
-                for (label, which) in [("LOGS", 0), ("CONSOLE", 1), ("SETTINGS", 2)] {
+                for (label, which) in [("LOGS", 0), ("CONSOLE", 1), ("TOOLS", 3), ("SETTINGS", 2)] {
                     let on = match which {
                         0 => self.log_open,
                         1 => self.console,
+                        3 => self.tools_open,
                         _ => self.settings_open,
                     };
                     let b = egui::Button::new(RichText::new(label).color(if on { pal.on_accent() } else { pal.text }))
@@ -1849,7 +2103,14 @@ impl ArgusApp {
                                 let h = WINDOW[1] + if self.log_open { LOG_H } else { 0.0 };
                                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(WINDOW[0], h)));
                             }
-                            1 => self.console = !self.console,
+                            1 => {
+                                self.console = !self.console;
+                                self.tools_open = false;
+                            }
+                            3 => {
+                                self.tools_open = !self.tools_open;
+                                self.console = false;
+                            }
                             _ => self.settings_open = !self.settings_open,
                         }
                     }
@@ -1901,6 +2162,7 @@ impl ArgusApp {
     fn dialog_ui(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(mut d) = self.dialog.take() else { return };
         let mut result: Option<bool> = None;
+        let mut browse: Option<usize> = None;
         let resp = egui::Modal::new(Id::new("confirm")).show(ctx, |ui| {
             let t = ctx.animate_bool_with_time_and_easing(Id::new("confirm-fade"), true, FADE, ease);
             ui.multiply_opacity(t);
@@ -1915,7 +2177,16 @@ impl ArgusApp {
             for (i, f) in d.fields.iter_mut().enumerate() {
                 ui.add_space(6.0);
                 ui.label(RichText::new(&f.label).color(pal.dim));
-                ui.add(egui::TextEdit::singleline(&mut f.value).id(Id::new(("dialog-field", i))).desired_width(f32::INFINITY));
+                if f.kind == FieldKind::Text {
+                    ui.add(egui::TextEdit::singleline(&mut f.value).id(Id::new(("dialog-field", i))).desired_width(f32::INFINITY));
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut f.value).id(Id::new(("dialog-field", i))).desired_width(330.0));
+                        if ui.add(egui::Button::new("Browse…")).on_hover_text("Choose the file").clicked() {
+                            browse = Some(i);
+                        }
+                    });
+                }
             }
             if let Some(e) = &d.error {
                 ui.add_space(4.0);
@@ -1932,8 +2203,17 @@ impl ArgusApp {
                 }
             });
         });
+        // the picker on top: the dialog stays open under it (Escape or a click outside closes the picker, not the dialog)
+        if self.picker.is_some() {
+            self.dialog = Some(d);
+            return;
+        }
         if resp.should_close() && result.is_none() {
             result = Some(false);
+        }
+        if let (Some(i), None) = (browse, result) {
+            self.dialog = Some(d);
+            return self.open_picker(PickFor::Field(i));
         }
         match result {
             Some(true) => {
@@ -1973,6 +2253,7 @@ impl ArgusApp {
             ui.checkbox(&mut s.auto_connect, "Connect by itself when one device is found");
             ui.checkbox(&mut s.check_updates, "Look for firmware updates when a device connects");
             ui.checkbox(&mut s.show_hidden, "Show hidden files");
+            ui.checkbox(&mut s.developer, "Developer mode (the Developer tab)");
             ui.horizontal(|ui| {
                 ui.label("Control API port");
                 ui.add(egui::DragValue::new(&mut s.api_port).range(1024..=65535));
@@ -2031,12 +2312,19 @@ fn error_title(op: Op) -> &'static str {
         Op::Restore => "Restore Failed",
         Op::Update => "Update Failed",
         Op::Repair => "Repair Failed",
+        Op::Radio | Op::Fus => "Install Failed",
         _ => "Operation Error",
     }
 }
 
+/// A field naming a file to read.
 fn field(label: &str, value: PathBuf) -> Field {
-    Field { label: label.into(), value: value.display().to_string() }
+    Field { label: label.into(), value: value.display().to_string(), kind: FieldKind::Open }
+}
+
+/// A field naming a new file.
+fn save_field(label: &str, value: PathBuf) -> Field {
+    Field { label: label.into(), value: value.display().to_string(), kind: FieldKind::Save }
 }
 
 /// `yyyyMMdd-HHmmss` in UTC (file names; the Qt app uses local time).

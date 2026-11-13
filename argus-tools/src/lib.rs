@@ -14,6 +14,7 @@
 
 pub mod api;
 pub mod capture;
+pub mod checkup;
 pub mod elf;
 pub mod fap;
 pub mod flipperfile;

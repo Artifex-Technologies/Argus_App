@@ -13,7 +13,7 @@ use argus_tools::capture::{self, Builder, Library};
 use argus_tools::limbo;
 use argus_tools::package::{self, Limits};
 use argus_tools::snapshot::{self, Listing, Snapshots};
-use argus_tools::{fap, paths, Error, Result};
+use argus_tools::{fap, Error, Result};
 
 /// The Argus app's own version (the VERSION file at the top of the repository, read when this is built), as the app reports it.
 const APP_VERSION: &str = include_str!("../../VERSION").trim_ascii();
@@ -150,82 +150,10 @@ fn run(raw: Vec<String>) -> Result<Value> {
     }
 }
 
-/// Read every .fap in a local mirror of the card's /ext/apps (`<dir>/ext/apps/...`), judge it
-/// against the firmware API, and for each one that will not load, look for a compatible copy in
-/// the given packages.
 fn checkup(a: &Args) -> Result<Value> {
-    let dir = a.path("dir")?;
-    let fw = a.fw()?;
-    let table = api::builtin_table(&fw);
-    let apps_root = dir.join("ext").join("apps");
-    let mut found = Vec::new();
-    let mut stack = vec![(apps_root.clone(), 0)];
-    while let Some((d, depth)) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let Ok(ft) = e.file_type() else { continue };
-            if ft.is_dir() && depth < 8 {
-                stack.push((e.path(), depth + 1));
-            } else if ft.is_file() && e.file_name().to_string_lossy().to_ascii_lowercase().ends_with(".fap") {
-                found.push(e.path());
-            }
-        }
-    }
-    found.sort();
-    // candidates from packages: (file_name lowercase, manifest name) -> entries
-    let mut candidates: Vec<package::AppEntry> = Vec::new();
-    let mut packages = Vec::new();
-    if !a.all("package").is_empty() {
-        let out = a.path("out")?;
-        for pkg in a.all("package") {
-            progress(&format!("reading package {}", argus_tools::display_text(pkg.as_bytes(), 200)));
-            let r = package::scan(Path::new(&pkg), &out, Limits::default(), Some(fw))?;
-            packages.push(json!({"package": r.package, "apps": r.apps.len(), "incomplete": r.incomplete, "warnings": r.warnings}));
-            candidates.extend(r.apps);
-        }
-    }
-    let mut apps = Vec::new();
-    let (mut bad, mut unknown) = (0, 0);
-    for f in found {
-        let rel = f.strip_prefix(&dir).unwrap_or(&f).to_string_lossy().replace('\\', "/");
-        let card = format!("/{rel}");
-        if !paths::valid_device_path(&card) {
-            continue;
-        }
-        let data = match std::fs::read(&f) {
-            Ok(d) if d.len() <= 8 << 20 => d,
-            _ => continue,
-        };
-        let file_name = card.rsplit('/').next().unwrap_or("").to_string();
-        let category = card.strip_prefix("/ext/apps/").and_then(|r| r.rsplit_once('/')).map(|(c, _)| c.to_string()).unwrap_or_default();
-        let (manifest, compat) = match fap::inspect(&data) {
-            Ok(info) => (Some(info.manifest.clone()), api::check(&info, &fw, table.as_ref())),
-            Err(e) => (None, api::not_a_fap(&fw, &e.message)),
-        };
-        let mut replacement = Value::Null;
-        if compat.status != api::Status::Compatible {
-            if compat.status == api::Status::Incompatible {
-                bad += 1;
-            } else {
-                unknown += 1;
-            }
-            let mname = manifest.as_ref().map(|m| m.name.clone()).unwrap_or_default();
-            let best = candidates.iter().find(|c| {
-                c.compat.as_ref().is_some_and(|x| x.status == api::Status::Compatible)
-                    && (c.file_name.eq_ignore_ascii_case(&file_name)
-                        || (!mname.is_empty() && c.manifest.as_ref().is_some_and(|m| m.name == mname)))
-            });
-            if let Some(c) = best {
-                replacement = serde_json::to_value(c)?;
-            }
-        }
-        apps.push(json!({
-            "path": card, "category": category, "file_name": file_name, "size": data.len(),
-            "sha256": argus_tools::sha256_hex(&data), "manifest": manifest, "compat": compat, "replacement": replacement,
-        }));
-    }
-    Ok(ok(json!({"firmware_api": fw.text(), "symbols_table": table.is_some(), "apps": apps,
-                 "incompatible": bad, "unknown": unknown, "packages": packages})))
+    let packages = a.all("package");
+    let out = if packages.is_empty() { None } else { Some(a.path("out")?) };
+    Ok(ok(argus_tools::checkup::run(&a.path("dir")?, a.fw()?, &packages, out.as_deref(), &mut |m| progress(m))?))
 }
 
 fn snapshot_cmd(sub: &str, a: &Args) -> Result<Value> {

@@ -82,7 +82,16 @@ impl Net {
         }
     }
 
-    fn region(&self) -> Result<Vec<u8>, String> {
+    /// The files of a repair from the latest version of `channel` (`flipper_updates::repair::fetch`).
+    pub fn repair_files(&self, channel: &str) -> Result<flipper_updates::repair::RepairFiles, String> {
+        let dir = self.directory()?;
+        let client = self.client()?;
+        flipper_updates::repair::fetch(&client, &dir, channel)
+    }
+
+    /// The region data for a device not of the development region (the default bands when the server names no
+    /// country).
+    pub fn region(&self) -> Result<Vec<u8>, String> {
         let text = self.client()?.get(&flipper_updates::region_url(&self.server), region::MAX_BUNDLE).map_err(|e| e.to_string())?;
         // no country from the server: the default bands (argus-cli never guesses a country either)
         region::region_data(&text, b"").map(|d| d.bytes).map_err(|e| e.to_string())

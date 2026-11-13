@@ -79,6 +79,11 @@ fn main() -> ExitCode {
         home,
         api_token: String::new(),
         recovery_poll: Duration::from_secs(1),
+        tools: argus_app::tools::Dirs {
+            data: data.join("argus"),
+            pulls: data.join("Argus/chymaera/pulls"),
+            limbo_socket: PathBuf::from(argus_tools::limbo::DEFAULT_SOCKET),
+        },
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
