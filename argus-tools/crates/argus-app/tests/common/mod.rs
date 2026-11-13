@@ -71,6 +71,12 @@ pub struct Fake {
 
 impl Fake {
     pub fn start(dir: &Path, fake: FakeFlipper) -> Fake {
+        Fake::start_with(dir, fake, |_| {})
+    }
+
+    /// As [`Fake::start`], with `ended` hearing each session's transcript as it ends (a test's device list follows a
+    /// reboot into the bootloader with it).
+    pub fn start_with(dir: &Path, fake: FakeFlipper, mut ended: impl FnMut(&flipper_fake::Transcript) + Send + 'static) -> Fake {
         let sock = dir.join("flipper.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let wires: Wires = Arc::default();
@@ -80,8 +86,11 @@ impl Fake {
             while let Ok((stream, _)) = listener.accept() {
                 let wire = Arc::new(Mutex::new(Vec::new()));
                 w.lock().unwrap().push(wire.clone());
-                let _ = fake.serve(&mut Recording { stream, wire: &wire });
+                let t = fake.serve(&mut Recording { stream, wire: &wire });
                 e.lock().unwrap().push((fake.dump(), fake.inputs.borrow().clone()));
+                if let Ok(t) = t {
+                    ended(&t);
+                }
             }
         });
         Fake { sock, wires, ends }

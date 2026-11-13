@@ -170,7 +170,9 @@ pub struct UpdateJob {
 /// repair --resources --port`): the region data made first (for a device not of the development region, from the
 /// update server, before anything changes), then the resources onto the SD card, the region data, a restart.
 pub struct FinishJob {
-    pub bundle: flipper_rpc::assets::Bundle,
+    /// The operation these steps end (the repair, or the legacy update).
+    pub op: Op,
+    pub finish: crate::recovery::Finish,
     /// The device's built-in region.
     pub region: u32,
     pub net: crate::net::Net,
@@ -204,6 +206,13 @@ pub enum Cmd {
     Erase,
     Update(Box<UpdateJob>),
     Finish(Box<FinishJob>),
+    /// The first part of an operation that goes on in the bootloader (the developer tab's installs, the legacy update;
+    /// the C++ `StartRecoveryOperation`): `/int` backed up into `backup` first when given (a new file), then a reboot
+    /// into the bootloader. The device leaves; the app waits for its bootloader.
+    ToBootloader {
+        op: Op,
+        backup: Option<PathBuf>,
+    },
     /// A job of the tools window on the session (it sends its own result and wakes the UI).
     Run(Box<dyn FnOnce(&mut crate::tools::Sess) + Send>),
     /// A capture pull into the shared datastore, asked for by the bridge (the console or the Sarina API); its steps go
@@ -556,30 +565,45 @@ fn handle<T: Transport>(s: &mut Session<T>, cmd: Cmd, bridge: &Arc<Mutex<Bridge>
             }
         }
         Cmd::Finish(job) => {
-            let region = match job.region {
-                0 => None,
-                _ => match job.net.region() {
+            let FinishJob { op, finish, region, net } = *job;
+            let after = if op == Op::Repair { "after the repair" } else { "after the update" };
+            let region_data = match (region, finish.region_data) {
+                (0, _) => None,
+                (_, Some(d)) => Some(d),
+                (_, None) => match net.region() {
                     Ok(d) => Some(d),
-                    Err(e) => {
-                        return (
-                            done(Op::Repair, Err(format!("after the repair, the region data: {e}; nothing was changed on the firmware"))),
-                            None,
-                        )
-                    }
+                    Err(e) => return (done(op, Err(format!("{after}, the region data: {e}; nothing was changed on the firmware"))), None),
                 },
             };
-            match s.finish_install(&job.bundle, job.region, region.as_deref(), None) {
-                Ok((r, _)) => {
+            match s.finish_install(&finish.bundle, region, region_data.as_deref(), finish.restore.as_ref()) {
+                Ok((r, restored)) => {
                     let summary = format!(
-                        "On the firmware: {} file(s) of the resources written ({} bytes, {} removed){}, then a restart",
+                        "On the firmware: {} file(s) of the resources written ({} bytes, {} removed){}{}, then a restart",
                         r.files_written,
                         r.bytes,
                         r.removed,
-                        if region.is_some() { ", the region data written" } else { "" }
+                        restored.map(|x| format!(", /int restored ({} file(s))", x.files)).unwrap_or_default(),
+                        if region_data.is_some() { ", the region data written" } else { "" }
                     );
-                    (done(Op::Repair, Ok(summary)), Some("the device restarts".into()))
+                    (done(op, Ok(summary)), Some("the device restarts".into()))
                 }
-                Err(e) => (done(Op::Repair, Err(format!("after the repair, on the firmware: {e}"))), None),
+                Err(e) => (done(op, Err(format!("{after}, on the firmware: {e}"))), None),
+            }
+        }
+        Cmd::ToBootloader { op, backup } => {
+            if let Some(out) = &backup {
+                if let Some(dir) = out.parent() {
+                    if let Err(e) = std::fs::create_dir_all(dir) {
+                        return (done(op, Err(format!("{}: {e}; nothing was changed on the device", dir.display()))), None);
+                    }
+                }
+                if let Err(e) = s.backup(out, &flipper_rpc::transfer::Limits::backup(), now_secs()) {
+                    return (done(op, Err(format!("The backup of /int: {e}; nothing was changed on the device"))), None);
+                }
+            }
+            match s.system_reboot(flipper_rpc::write::RebootMode::Dfu) {
+                Ok(()) => (None, Some("the device restarts into its bootloader".into())),
+                Err(e) => (done(op, Err(format!("Starting recovery mode: {e}"))), None),
             }
         }
         Cmd::Captures { request, notes } => {

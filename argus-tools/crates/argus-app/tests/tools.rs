@@ -2,14 +2,18 @@
 //! `/ext/apps` behind their dialog (cancelled: nothing written; confirmed: exactly the apps, checked by MD5; an app
 //! already there only when ticked), the check-up of the card's apps, snapshots (taken, compared, a restore planned
 //! and run behind its dialog, deleted behind its dialog), the capture library (read from the card, searched,
-//! explained, tagged), and a rebuild that never reaches Limbo here. The built-in file picker fills the fields. All of
-//! the tools' data lives in the test's own folder.
+//! explained, tagged), a rebuild that never reaches Limbo when its agent is not there, and one against a fake Limbo
+//! agent (Limbo's HTTP API on a Unix socket, playing the sealed guest's part). The built-in file picker fills the
+//! fields. All of the tools' data lives in the test's own folder.
 
 mod common;
+
+use std::sync::{Arc, Mutex};
 
 use argus_app::tools::Tab;
 use common::*;
 use flipper_fake::FakeFlipper;
+use serde_json::json;
 
 const PACKAGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/update-f7-test.tgz");
 
@@ -267,4 +271,126 @@ fn the_picker_fills_a_dialogs_field() {
     assert!(!h.app.picker_open() && h.app.dialog().is_some(), "back in the dialog");
     assert!(h.field_value(0).ends_with(&format!("home/backups/{name}")), "{}", h.field_value(0));
     h.click("Cancel");
+}
+
+/// A fake Limbo agent on `sock`: Limbo's HTTP API (profiles, runs, a run's result), every run done at once with what
+/// `guest` prints for it. Records the runs asked for.
+fn limbo_agent(
+    sock: &std::path::Path,
+    guest: impl Fn(&serde_json::Value) -> (String, i64) + Send + 'static,
+) -> Arc<Mutex<Vec<serde_json::Value>>> {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let runs: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let seen = runs.clone();
+    let l = std::os::unix::net::UnixListener::bind(sock).unwrap();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { break };
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            let mut w = line.split_whitespace();
+            let (method, path) = (w.next().unwrap_or("").to_string(), w.next().unwrap_or("").to_string());
+            let mut len = 0;
+            loop {
+                let mut h = String::new();
+                r.read_line(&mut h).unwrap();
+                if h == "\r\n" || h.is_empty() {
+                    break;
+                }
+                if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; len];
+            r.read_exact(&mut body).unwrap();
+            let (status, out) = match (method.as_str(), path.as_str()) {
+                ("GET", "/v1/profiles") => (200, json!({"profiles": ["argus-fap-build", "argus-fap-fetch"], "details": [], "skipped": []})),
+                ("POST", "/v1/runs") => {
+                    let mut runs = seen.lock().unwrap();
+                    runs.push(serde_json::from_slice(&body).unwrap());
+                    (202, json!({"id": format!("r{:08x}", runs.len())}))
+                }
+                ("GET", p) if p.starts_with("/v1/runs/r") => {
+                    let n = usize::from_str_radix(&p["/v1/runs/r".len()..], 16).unwrap();
+                    let req = seen.lock().unwrap()[n - 1].clone();
+                    let (stdout, exit) = guest(&req);
+                    (
+                        200,
+                        json!({"id": &p[9..], "profile": req["profile"], "status": "done", "exit_code": exit, "stdout": stdout, "stderr": "ufbt: done\n"}),
+                    )
+                }
+                _ => (404, json!({"error": "not_found: no", "code": "not_found"})),
+            };
+            let text = out.to_string();
+            let resp = format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{text}", text.len());
+            s.write_all(resp.as_bytes()).unwrap();
+        }
+    });
+    runs
+}
+
+const SNAKE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/snake_game.fap");
+
+/// An app's source folder, with what a build must not carry (git data, a symbolic link).
+fn app_source(dir: &std::path::Path) -> std::path::PathBuf {
+    let d = dir.join("home/snake");
+    std::fs::create_dir_all(d.join(".git")).unwrap();
+    std::fs::write(d.join("application.fam"), "App(appid='snake_game', apptype=FlipperAppType.EXTERNAL)\n").unwrap();
+    std::fs::write(d.join("snake.c"), "int main(void) { return 0; }\n").unwrap();
+    std::fs::write(d.join(".git/config"), "[core]\n").unwrap();
+    d
+}
+
+fn rebuild_window(name: &str) -> Harness {
+    let dir = tempdir(name);
+    let mut h = Harness::new(&dir, Vec::new(), Options::default());
+    h.click("TOOLS");
+    h.wait("the tools", |h| h.has("Apps"));
+    h.click("Rebuild");
+    h
+}
+
+#[test]
+fn a_rebuild_runs_in_limbo_and_keeps_the_built_app() {
+    use base64::Engine;
+    let mut h = rebuild_window("tools-limbo");
+    let snake = std::fs::read(SNAKE).unwrap();
+    let block = format!(
+        "ARGUS-FAP-BEGIN snake_game.fap {}\n{}\nARGUS-FAP-END\n",
+        argus_tools::sha256_hex(&snake),
+        base64::engine::general_purpose::STANDARD.encode(&snake)
+    );
+    let runs = limbo_agent(&h.dir.join("limbo.sock"), move |_| (block.clone(), 0));
+    let src = app_source(&h.dir.clone());
+    h.set_field(0, src.to_str().unwrap());
+    h.click("Build in Limbo");
+    idle(&mut h, "the rebuild");
+    assert_eq!(message(&h), "Built 1 app(s) in Limbo");
+    h.settle();
+    assert!(h.shows_text("snake_game.fap (") && h.shows_text("Compatible"), "the built app and its verdict for API 88.2");
+    assert!(h.shows_text("ufbt: done"), "the build's log");
+    let runs = runs.lock().unwrap();
+    assert_eq!(runs.len(), 1, "a local folder needs no fetch run");
+    assert_eq!(runs[0]["profile"], "argus-fap-build");
+    assert!(runs[0]["command"].as_str().unwrap().contains("UFBT_HOME=/opt/argus-ufbt/f7-88.2"), "built for the default API");
+    let built = h.app.tools_state().built.as_ref().expect("the report");
+    let kept = &built.faps[0].stored;
+    assert!(kept.starts_with(h.dir.join("data/argus/apps/built")), "kept in the tools' folder: {}", kept.display());
+    assert_eq!(std::fs::read(kept).unwrap(), snake);
+}
+
+#[test]
+fn a_rebuild_whose_build_fails_says_so_and_keeps_nothing() {
+    let mut h = rebuild_window("tools-limbo-fails");
+    let runs = limbo_agent(&h.dir.join("limbo.sock"), |_| (String::new(), 2));
+    let src = app_source(&h.dir.clone());
+    h.set_field(0, src.to_str().unwrap());
+    h.click("Build in Limbo");
+    idle(&mut h, "the rebuild");
+    assert!(message(&h).starts_with("ERROR "), "{}", message(&h));
+    assert_eq!(runs.lock().unwrap().len(), 1);
+    assert!(h.app.tools_state().built.is_none());
+    let built = h.dir.join("data/argus/apps/built");
+    assert!(std::fs::read_dir(&built).map_or(true, |mut d| d.all(|e| e.unwrap().path().is_dir())), "no app kept");
 }

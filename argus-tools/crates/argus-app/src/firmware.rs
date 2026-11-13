@@ -120,6 +120,15 @@ pub fn can_update(info: &DeviceInfo, server_channel: &str, latest: &Version) -> 
     }
 }
 
+/// `FlipperZero::fullUpdate`: a device without SD card, or with a protobuf older than 0.7, is updated through its
+/// bootloader (`LegacyUpdateOperation`) instead of its updater.
+pub fn is_legacy_update(info: &DeviceInfo) -> bool {
+    !info.sd_present || (info.protobuf.0 == 0 && info.protobuf.1 < 7)
+}
+
+/// The firmware the C++ legacy update does not back up `/int` for (`SHIPPED_VERSION`: what Flipper shipped with).
+pub const SHIPPED_VERSION: &str = "0.43.1";
+
 /// `ApplicationBackend::firmwareUpdateState` once the directory is read.
 pub fn state(info: &DeviceInfo, recovery: bool, server_channel: &str, latest: Option<&Version>) -> UpdateState {
     let Some(latest) = latest else { return UpdateState::Unknown };

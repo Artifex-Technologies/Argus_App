@@ -28,3 +28,5 @@ png = "0.18"
 flipper-fake = { path = "../flipper-fake" }
 # the tests' own CA for the local update server
 ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider"] }
+# the fake Limbo agent's guest output (a built app, base64)
+base64 = "0.22"

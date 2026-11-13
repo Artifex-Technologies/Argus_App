@@ -128,6 +128,10 @@ pub enum Action {
     Restore,
     Erase,
     Update(PackageSource),
+    /// The update through the bootloader (`LegacyUpdateOperation`): a device without SD card or with an old protobuf.
+    LegacyUpdate {
+        channel: String,
+    },
     InstallFile,
     Upload {
         dir: String,
@@ -152,7 +156,8 @@ pub enum Action {
     /// The repair with local files (recovery mode only).
     RepairFiles,
     ExitRecovery,
-    /// The developer tab (recovery mode only): a wireless stack image, or a FUS image.
+    /// The developer tab: a wireless stack image, or a FUS image (a running firmware is rebooted into its bootloader
+    /// first).
     InstallRadio,
     InstallFus,
     /// The tools window: the planned app install, the planned restore from a snapshot, deleting a snapshot.
@@ -241,8 +246,10 @@ impl Drop for Api {
 }
 
 struct Pending {
+    /// The repair, or the legacy update.
+    op: Op,
     /// Taken when the steps are sent to the device.
-    bundle: Option<flipper_rpc::assets::Bundle>,
+    finish: Option<crate::recovery::Finish>,
     /// The bootloader part's partial success, shown at the end.
     warning: Option<String>,
     /// When the wait for the device started (the frame clock).
@@ -251,6 +258,15 @@ struct Pending {
 
 /// How long the device may take to come back after a repair (the CLIs wait as long for the chip).
 const COME_BACK: f64 = 30.0;
+
+/// An operation whose first part ran on the firmware (a reboot into the bootloader), waiting for the bootloader to be
+/// listed to run its job there (the C++ `StartRecoveryOperation`, which waits as long).
+struct ToBoot {
+    op: Op,
+    job: Option<crate::recovery::Job>,
+    /// When the device left (the frame clock); `None` while the firmware still works on the first part.
+    since: Option<f64>,
+}
 
 enum DirState {
     Unknown,
@@ -295,6 +311,8 @@ pub struct ArgusApp {
     rec_rx: Receiver<Result<crate::recovery::Done, String>>,
     /// A repair whose bootloader part is done, waiting for the device to come back for the steps on the firmware side.
     pending: Option<Pending>,
+    /// An operation waiting for the device's bootloader after the firmware rebooted into it.
+    to_boot: Option<ToBoot>,
     tools_open: bool,
     tools: crate::tools::State,
     tools_tx: Sender<crate::tools::Reply>,
@@ -348,6 +366,7 @@ impl ArgusApp {
             rec_tx,
             rec_rx,
             pending: None,
+            to_boot: None,
             tools_open: false,
             tools: crate::tools::State::default(),
             tools_tx,
@@ -399,6 +418,9 @@ impl ArgusApp {
         if self.pending.is_some() {
             return self.scan_for_finish(now);
         }
+        if self.to_boot.is_some() {
+            return self.scan_for_bootloader(now);
+        }
         if self.worker.is_some() || !matches!(self.stage, Stage::Waiting) || now - self.last_scan < 1.0 {
             return;
         }
@@ -423,12 +445,14 @@ impl ArgusApp {
         let Some(p) = &mut self.pending else { return };
         let since = *p.since.get_or_insert(now);
         if now - since > COME_BACK {
+            let op = p.op;
             self.pending = None;
+            let again = if op == Op::Repair { "repair it once more" } else { "repair it (the backup of /int is kept)" };
             self.stage = Stage::Error {
-                title: "Repair Failed".into(),
+                title: error_title(op).into(),
                 text: format!(
                     "The firmware is written, but the device did not come back within {COME_BACK} s: the databases are not \
-                     installed. Connect it again and repair it once more."
+                     installed. Connect it again and {again}."
                 ),
             };
             return;
@@ -440,6 +464,40 @@ impl ArgusApp {
         self.found = self.cfg.discovery.scan();
         if let Some(f) = self.found.iter().find(|f| !f.is_recovery()).cloned() {
             self.connect(f);
+        }
+    }
+
+    /// After the firmware rebooted into its bootloader: the first device in recovery mode is it; the job runs there.
+    fn scan_for_bootloader(&mut self, now: f64) {
+        if self.worker.is_some() {
+            return;
+        }
+        let Some(t) = &mut self.to_boot else { return };
+        let since = *t.since.get_or_insert(now);
+        let op = t.op;
+        if now - since > COME_BACK {
+            self.to_boot = None;
+            self.stage = Stage::Error {
+                title: error_title(op).into(),
+                text: format!("The device did not come back in recovery mode within {COME_BACK} s; nothing was written to the chip."),
+            };
+            return;
+        }
+        if now - self.last_scan < 1.0 {
+            return;
+        }
+        self.last_scan = now;
+        self.found = self.cfg.discovery.scan();
+        let Some(f) = self.found.iter().find(|f| f.is_recovery()).cloned() else { return };
+        let Some(job) = self.to_boot.take().and_then(|t| t.job) else { return };
+        self.logline(format!("Recovery mode device at {}", f.location()));
+        self.current = Some(f.clone());
+        let started = match self.waker.clone() {
+            Some(w) => crate::recovery::start(f.kind, self.cfg.recovery_poll, job, self.rec_tx.clone(), w),
+            None => Err("Not ready yet.".into()),
+        };
+        if let Err(e) = started {
+            self.stage = Stage::Error { title: error_title(op).into(), text: format!("{e} The device is in recovery mode now.") };
         }
     }
 
@@ -535,11 +593,11 @@ impl ArgusApp {
         for result in done {
             let Stage::Busy(op) = self.stage else { continue };
             match result {
-                Ok(crate::recovery::Done { outcome, finish: Some(bundle) }) => {
+                Ok(crate::recovery::Done { outcome, finish: Some(finish) }) => {
                     // the chip starts its firmware; the rest runs on the device once it is back
                     self.logline(outcome.summary);
                     self.logline("Waiting for the device to come back for the resources and a restart");
-                    self.pending = Some(Pending { bundle: Some(bundle), warning: outcome.warning, since: None });
+                    self.pending = Some(Pending { op, finish: Some(finish), warning: outcome.warning, since: None });
                     self.current = None;
                     self.last_scan = f64::NEG_INFINITY;
                 }
@@ -574,6 +632,33 @@ impl ArgusApp {
                         }
                     }
                 }
+                NetEvent::LegacyReady(r) => {
+                    if self.stage != Stage::Busy(Op::Update) {
+                        continue;
+                    }
+                    match (r, &self.worker) {
+                        (Ok(files), Some(_)) => {
+                            self.logline(format!("The legacy update: {}", files.radio_note));
+                            let info = self.info.clone().unwrap_or_default();
+                            // as the C++ app: no backup of /int for the firmware Flipper shipped with
+                            let backup = (info.firmware_version != firmware::SHIPPED_VERSION)
+                                .then(|| self.cfg.tools.data.join("legacy-backups").join(format!("{}-{}.tgz", info.name, stamp())));
+                            if let Some(b) = &backup {
+                                self.logline(format!("/int is backed up to {} (kept)", b.display()));
+                            }
+                            let job = crate::recovery::Job::Legacy { files, backup: backup.clone() };
+                            self.to_boot = Some(ToBoot { op: Op::Update, job: Some(job), since: None });
+                            self.send(Cmd::ToBootloader { op: Op::Update, backup });
+                        }
+                        (Ok(_), None) => {
+                            self.stage = Stage::Error {
+                                title: "Update Failed".into(),
+                                text: "The device left before the update could start.".into(),
+                            };
+                        }
+                        (Err(e), _) => self.stage = Stage::Error { title: "Update Failed".into(), text: e },
+                    }
+                }
                 NetEvent::UpdateReady(Err(e)) => {
                     if self.stage == Stage::Busy(Op::Update) {
                         self.stage = Stage::Error { title: "Update Failed".into(), text: e };
@@ -598,8 +683,8 @@ impl ArgusApp {
                     self.stage = Stage::Ready;
                 }
                 self.tab = Tab::Info;
-                if let Some(bundle) = self.pending.as_mut().and_then(|p| p.bundle.take()) {
-                    self.send(Cmd::Finish(Box::new(device::FinishJob { bundle, region, net: self.cfg.net.clone() })));
+                if let Some((op, finish)) = self.pending.as_mut().and_then(|p| Some((p.op, p.finish.take()?))) {
+                    self.send(Cmd::Finish(Box::new(device::FinishJob { op, finish, region, net: self.cfg.net.clone() })));
                     return;
                 }
                 if self.settings.check_updates {
@@ -628,9 +713,14 @@ impl ArgusApp {
             }
             Event::Frame(f) => self.frame = Some(f),
             Event::Done { op, mut result } => {
-                // the end of a repair's steps on the firmware: the bootloader part's warning stays
-                if let (Op::Repair, Some(p)) = (op, self.pending.take()) {
+                // the end of a repair's or legacy update's steps on the firmware: the bootloader part's warning stays
+                if self.pending.as_ref().is_some_and(|p| p.op == op) {
+                    let p = self.pending.take().expect("checked");
                     result = result.map(|o| device::Outcome { warning: p.warning.or(o.warning), ..o });
+                }
+                // the first part on the firmware failed: nothing goes on in the bootloader
+                if result.is_err() && self.to_boot.as_ref().is_some_and(|t| t.op == op) {
+                    self.to_boot = None;
                 }
                 if op != Op::Captures {
                     self.busy = None;
@@ -660,6 +750,18 @@ impl ArgusApp {
             Event::Gone(why) => {
                 self.logline(format!("Device disconnected: {why}"));
                 self.bridge.lock().unwrap_or_else(|e| e.into_inner()).detach_device(&why);
+                if self.to_boot.is_some() && matches!(self.stage, Stage::Busy(_)) {
+                    // rebooted into its bootloader, as asked: the operation goes on there once it is listed
+                    self.worker = None;
+                    self.info = None;
+                    self.frame = None;
+                    self.stream_wanted = false;
+                    self.current = None;
+                    self.directory = DirState::Unknown;
+                    self.last_scan = f64::NEG_INFINITY;
+                    self.dialog = None;
+                    return;
+                }
                 self.pending = None;
                 self.worker = None;
                 self.info = None;
@@ -727,10 +829,24 @@ impl ArgusApp {
     fn ask_update(&mut self) {
         let Some(info) = self.info.clone() else { return };
         let label = self.latest_label().unwrap_or_default();
+        let channel = self.settings.update_channel.clone();
         let mut warning = firmware::fork_warning(&info);
-        if !info.sd_present {
-            warning = Some("There is no SD card in the device: an update through its updater needs one.".into());
-        }
+        // as the C++ FlipperZero::fullUpdate: without SD card (or with an old protobuf) through the bootloader
+        let action = if firmware::is_legacy_update(&info) {
+            let why =
+                if info.sd_present { "The device's firmware is too old for its updater" } else { "There is no SD card in the device" };
+            let legacy = format!(
+                "{why}: the device restarts into recovery mode and the firmware is written there (the legacy update). /int is \
+                 backed up first and put back afterwards."
+            );
+            warning = Some(match warning {
+                Some(fork) => format!("{fork}\n{legacy}"),
+                None => legacy,
+            });
+            Action::LegacyUpdate { channel }
+        } else {
+            Action::Update(PackageSource::Server { channel })
+        };
         self.open_dialog(Dialog {
             title: "Update firmware?".into(),
             message: format!("New firmware {label} will be installed"),
@@ -738,7 +854,7 @@ impl ArgusApp {
             confirm: "Update".into(),
             danger: false,
             fields: Vec::new(),
-            action: Action::Update(PackageSource::Server { channel: self.settings.update_channel.clone() }),
+            action,
             error: None,
         });
     }
@@ -883,9 +999,10 @@ impl ArgusApp {
             Action::InstallRadio => Dialog {
                 title: "Install wireless stack?".into(),
                 message: "WARNING! This operation can break your Flipper!".into(),
-                warning: Some(
-                    "The image goes below the secure flash start and the FUS installs it; the chip then starts its firmware.".into(),
-                ),
+                warning: Some(format!(
+                    "{}The image goes below the secure flash start and the FUS installs it; the chip then starts its firmware.",
+                    self.restarts_first()
+                )),
                 confirm: "Install".into(),
                 danger: true,
                 fields: vec![field("Wireless stack image (.bin)", home.join(""))],
@@ -896,7 +1013,8 @@ impl ArgusApp {
                 title: "Install FUS?".into(),
                 message: "LAST WARNING! This will invalidate your encryption keys! Please reconsider.".into(),
                 warning: Some(format!(
-                    "The image is written at 0x{:08X} and the FUS upgrades itself from it.",
+                    "{}The image is written at 0x{:08X} and the FUS upgrades itself from it.",
+                    self.restarts_first(),
                     flipper_dfu::recovery::FUS_ADDRESS
                 )),
                 confirm: "Install".into(),
@@ -915,10 +1033,19 @@ impl ArgusApp {
                 action,
                 error: None,
             },
-            Action::Update(_) => return self.ask_update(),
+            Action::Update(_) | Action::LegacyUpdate { .. } => return self.ask_update(),
             Action::ToolsInstall | Action::ToolsRestore | Action::ToolsDeleteSnapshot { .. } => return self.ask_tools(action),
         };
         self.open_dialog(d);
+    }
+
+    /// The developer installs' note for a running device.
+    fn restarts_first(&self) -> &'static str {
+        if self.recovery() {
+            ""
+        } else {
+            "The device first restarts into recovery mode. "
+        }
     }
 
     /// Runs a confirmed action. Returns why it cannot run (the dialog stays open and shows it).
@@ -959,6 +1086,33 @@ impl ArgusApp {
                 if let Some(w) = self.waker.clone() {
                     self.cfg.net.prepare_update(source, region, self.net_tx.clone(), w);
                 }
+            }
+            Action::LegacyUpdate { channel } => {
+                let kind = self.current.as_ref().map(|f| f.kind.clone()).ok_or("No device.")?;
+                if let Some(why) = crate::recovery::unreachable_from_firmware(&kind) {
+                    return Err(why);
+                }
+                let info = self.info.clone().ok_or("No device.")?;
+                let waker = self.waker.clone().ok_or("Not ready yet.")?;
+                self.big(Op::Update);
+                // every file fetched and checked (and the region data made) before the device is touched
+                self.cfg.net.prepare_legacy(channel, &info, self.net_tx.clone(), waker);
+            }
+            Action::InstallRadio | Action::InstallFus if !self.recovery() => {
+                // from the running firmware: a reboot into the bootloader first, then the same steps there
+                let kind = self.current.as_ref().map(|f| f.kind.clone()).ok_or("No device.")?;
+                if let Some(why) = crate::recovery::unreachable_from_firmware(&kind) {
+                    return Err(why);
+                }
+                if self.worker.is_none() {
+                    return Err("No device.".into());
+                }
+                let image = crate::recovery::read_image(&path(0)?)?;
+                let (op, fus) =
+                    if action == Action::InstallFus { (Op::Fus, Some(flipper_dfu::recovery::FUS_ADDRESS)) } else { (Op::Radio, None) };
+                self.to_boot = Some(ToBoot { op, job: Some(crate::recovery::Job::Core2 { image, fus }), since: None });
+                self.big(op);
+                self.send(Cmd::ToBootloader { op, backup: None });
             }
             Action::InstallFile => {
                 let p = path(0)?;
@@ -1573,16 +1727,17 @@ impl ArgusApp {
         });
     }
 
-    /// qFlipper's developer tab: the wireless stack and FUS installs, both red, both behind their dialogs, and only for
-    /// a device in recovery mode on a bootloader the app can reach (this build does not reboot a running firmware into
-    /// its bootloader).
+    /// qFlipper's developer tab: the wireless stack and FUS installs, both red, both behind their dialogs, for a device
+    /// in recovery mode on a bootloader the app can reach, or a running firmware the app can follow into its bootloader
+    /// (it reboots it there first, as the C++ operations do).
     fn developer_tab(&mut self, ui: &mut egui::Ui, pal: &Palette) {
         ui.label(RichText::new("Developer Mode").color(pal.amber));
         let why = match &self.current {
             Some(f) if f.is_recovery() => crate::recovery::unreachable(&f.kind),
-            _ => Some("These run on a device in recovery mode: put it into recovery mode first.".into()),
+            Some(f) if self.worker.is_some() => crate::recovery::unreachable_from_firmware(&f.kind),
+            _ => Some("No device.".into()),
         };
-        let can = why.is_none() && self.stage == Stage::Ready;
+        let can = why.is_none() && self.stage == Stage::Ready && !self.pulling();
         let size = vec2(220.0, 32.0);
         let red = |t: &str| RichText::new(t.to_string()).color(if can { pal.red } else { pal.dim });
         if ui

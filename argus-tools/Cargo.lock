@@ -257,6 +257,7 @@ dependencies = [
  "argus-api",
  "argus-capture",
  "argus-tools",
+ "base64 0.22.1",
  "eframe",
  "flipper-dfu",
  "flipper-fake",

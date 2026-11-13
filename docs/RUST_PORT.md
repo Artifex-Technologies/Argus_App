@@ -202,7 +202,13 @@ must end in partial success in both (exit 3 and "repaired, but the radio stack w
 recovery legacy-update` in three: `flipper-fake --recovery DIR --start-firmware` starts as the firmware and turns into
 the bootloader when asked to reboot into DFU; `/int` is backed up, the firmware written and the chip let go (or, with
 `--old-radio`, the repair's steps), then `/int` restored and a restart; also with the stack refused (exit 3,
-"updated, but ..."). With the test hook, a serial device that leaves also ends the C++ session (a vanished USB port
+"updated, but ..."). The legacy update as the C++ GUI runs it, from the update server's files, against `argus-cli
+recovery legacy-update-from-server`, which reads the device's wireless stack and decides as the C++
+`FirmwareHelper::hasRadioUpdate` does, in three (`legacy-server*`: the device's stack the update's, older (1.16.3), and
+1.9.3, older by number but after 1.17.3 as text, which the C++ app left on until 2026-11-13). The developer tab's
+installs (`qFlipper-cli core2radio|core2fus`) against `argus-cli recovery install-radio|install-fus --port`: from the
+running firmware both reboot it into DFU first (the same RPC requests), then the same bootloader steps; and in
+recovery mode both start in the bootloader (`install-radio-recovery`). With the test hook, a serial device that leaves also ends the C++ session (a vanished USB port
 does that; a pseudo-terminal does not vanish). Last, a resources bundle with a file that is not what its manifest says:
 argus-cli refuses it before it opens anything, the C++ app repairs the chip and then refuses the bundle without
 changing the card. and compares the exit status, every bootloader request in order, the whole 1 MiB flash, the
@@ -787,11 +793,29 @@ and written through the device worker (`Cmd::Run`), between the app's own reques
 `~/.local/share/argus` as the Qt app keeps it.
 
 The Developer tab (Settings, developer mode, as qFlipper's `--developer`) has qFlipper's two red buttons: "Install
-wireless fw" and "Install FUS firmware", each behind its warning dialog, for a device in recovery mode on a bootloader
-the app can reach (`flipper_dfu::recovery::core2_update`: recovery boot mode, the FUS steps, the OS boot mode). From a
-running firmware the C++ app first reboots into the bootloader; the Rust app does not do that yet. qFlipper's FUS
-address was a digit short (0x080ec00, outside the flash, so it could never work); both apps use 0x080EC000 since
-2026-11-13 (`compare-repair.sh` `install-fus`, `fus-typo`).
+wireless fw" and "Install FUS firmware", each behind its warning dialog (`flipper_dfu::recovery::core2_update`: recovery
+boot mode, the FUS steps, the OS boot mode). For a device in recovery mode they run on its bootloader at once; for a
+running firmware the app first reboots it into its bootloader over RPC (`Cmd::ToBootloader`, the C++
+`StartRecoveryOperation`), waits (at most 30 s) for the bootloader to be listed and runs the steps there, as the C++
+`WirelessStackUpdateOperation` and `FUSUpdateOperation` do. Only a firmware on a Unix socket is rebooted so: a Flipper
+on USB would come back as a USB bootloader this build cannot reach and stay in recovery mode, so the dialog refuses it
+before anything is sent. qFlipper's FUS address was a digit short (0x080ec00, outside the flash, so it could never
+work); both apps use 0x080EC000 since 2026-11-13 (`compare-repair.sh` `install-fus`, `fus-typo`).
+
+The legacy update (`LegacyUpdateOperation`): for a device without SD card or with a protobuf older than 0.7 the main
+button's update goes through the bootloader instead of the device's updater, as the C++ `FlipperZero::fullUpdate`
+chooses. The dialog says so; once confirmed, the selected channel's files are fetched and checked (firmware, wireless
+stack, option bytes, resources, and the region data for a device not of the development region) before the device is
+touched. The wireless stack goes on only when the device's is missing, of another type or older
+(`flipper_updates::repair::has_radio_update`). On the firmware `/int` is backed up (into
+`~/.local/share/argus/legacy-backups/`, kept; skipped for the 0.43.1 firmware Flipper shipped with, as the C++ app) and
+the device reboots into its bootloader; there the firmware is written (with a wireless stack update, the repair's
+order), the chip starts it, and once it is back the resources, `/int` restored, the region data and a restart. A
+wireless stack that was not installed ends in "Done, with a warning" (`updated, but the radio stack was not
+installed: ...`), the partial success `argus-cli` reports with exit 3. Found while porting it: the C++ app compared
+the wireless stack versions as text (`QString`'s `<`), so a 1.9.x stack counted as newer than 1.17.x and was left on,
+and a 1.13.x stack counted as older than 1.2.x; both apps compare them as numbers since 2026-11-13
+(`compare-repair.sh` `legacy-server-1-9`).
 
 A file picker of the app's own (`app/picker.rs`): every path field of a dialog has "Browse…" (a file to read: Choose;
 a new file: "Save here" keeps the name and takes the folder shown), and the tools' package field has one. It reads
@@ -866,9 +890,19 @@ now has an explicit id; the console tests click right after the console opens.
 - The live screen's protocol (`flipper-fake/tests/stream.rs`): stream start, input events and stop are the C++ app's
   bytes (the nanopb fixture), a quiet device leaves the session usable, frames of the wrong length are skipped.
 
-- The Developer tab (`tests/recovery.rs`): hidden without developer mode, its installs disabled for a running device;
-  each install cancelled and confirmed (the wireless stack: deleted and installed, nothing else, the chip starts its
-  firmware; the FUS: the image at 0x080EC000), an empty image refused in the dialog; snapshot `developer.png`.
+- The Developer tab (`tests/recovery.rs`): hidden without developer mode; in recovery mode each install cancelled and
+  confirmed (the wireless stack: deleted and installed, nothing else, the chip starts its firmware; the FUS: the image
+  at 0x080EC000), an empty image refused in the dialog; snapshot `developer.png`. From the running firmware (the fake
+  Flipper on a socket whose chip turns into the fake bootloader when asked to reboot into DFU, and back): cancelled,
+  no reboot; confirmed, the only request on the firmware is the reboot into DFU, then the same bootloader steps, and
+  Continue connects the firmware again; the FUS at its address. A running Flipper on USB is refused (never rebooted
+  into a bootloader the app cannot reach).
+- The legacy update (`tests/recovery.rs`): a region-1 Flipper without SD card; cancelled, nothing fetched and nothing
+  changed; confirmed, the release files and the region bundle fetched, `/int` backed up (kept), the reboot into DFU
+  first, the firmware written and started, the wireless stack left alone (current), then `/int` restored, the region
+  data after it, a restart last, nothing on a card it lacks. With a 1.9.3 stack (older than the update's 1.17.3) and a
+  stuck FUS: the stack is tried, not installed, and the update ends in "Done, with a warning" (`updated, but the radio
+  stack was not installed: ...`).
 - The tools window (`tests/tools.rs`): a package picked with the picker and opened (2 apps, compatible with 88.2), the
   install planned (nothing written), cancelled (nothing written) and confirmed (exactly the two apps under
   `/ext/apps`), planned again (both there: nothing to do until an overwrite is ticked; then one written), the check-up
@@ -876,7 +910,10 @@ now has an explicit id; the console tests click right after the console opens.
   manager, the restore planned, cancelled (nothing written) and confirmed (only that file), the snapshot's delete
   cancelled and confirmed; the capture library read from the card (no secrets, no assets read, nothing written),
   explained, tagged, searched, duplicates; no device: the package opens, the card's tools are disabled, the rebuild
-  says Limbo is not there and sends nothing (snapshot); the picker fills a dialog's save field (snapshot `picker.png`).
+  says Limbo is not there and sends nothing (snapshot); a rebuild against a fake Limbo agent on the tools' socket
+  (Limbo's HTTP API, playing the sealed guest): one build run for a local folder, built for API 88.2, the app kept in
+  the tools' folder and listed with its verdict and the build's log; a build that fails says so and keeps nothing;
+  the picker fills a dialog's save field (snapshot `picker.png`).
 
 The real binary also runs in Yggdrasil's headless compositor: Yggdrasil's `packages/compositor/tests/apps.rs`
 (`the_argus_app_opens_reaches_the_fake_flipper_and_closes`) starts `argus-app --socket` against `flipper-fake --socket`
@@ -909,14 +946,14 @@ passed on 2026-11-13. Yggdrasil's CI skips it (it has no Argus checkout).
    server and from a file, the console (capture pulls and list, sessions, notes, the Sarina API toggle, the API with
    the app's device: `device.status`, `capture.pull`), recovery (the repair from the update server and from local
    files, then the steps on the firmware; leaving recovery mode; only `--dfu-socket`, no USB) with the partial-success
-   warning, the Developer tab (wireless stack and FUS installs, recovery mode only), the Argus tools window, a file
-   picker of its own, settings, and a smoke test of the real binary in Yggdrasil's headless compositor
-   (`smoke-yggdrasil.sh`). Open, in this order:
-   a. the Developer tab's installs from a running firmware (reboot into the bootloader over RPC first, as the C++
-      `WirelessStackUpdateOperation`; needs the bootloader on `--dfu-socket` to appear after the reboot);
-   b. the legacy update in the app (a device without SD card; `argus-cli recovery legacy-update` has it);
-   c. Yggdrasil's own chooser through the FileChooser portal, if I want it over the built-in picker (a D-Bus client);
-   d. a Limbo rebuild tested against a fake Limbo agent (argus-tools' `tests/limbo.rs` has one) instead of only its
-      "not running" path.
+   warning, the Developer tab (wireless stack and FUS installs, in recovery mode or from the running firmware after a
+   reboot into the bootloader), the legacy update (no SD card or an old protobuf: through the bootloader, `/int` kept
+   and put back, the partial-success warning), the Argus tools window (the Limbo rebuild tested against a fake agent),
+   a file picker of its own, settings, and a smoke test of the real binary in Yggdrasil's headless compositor
+   (`smoke-yggdrasil.sh`). Open:
+   a. Yggdrasil's own chooser through the FileChooser portal, if I want it over the built-in picker (a D-Bus client);
+   b. a USB recovery transport (`flipper_dfu::usb`) in the app: until then a Flipper on USB in recovery mode cannot be
+      repaired from the app, and a running one is never rebooted into its bootloader by it (only with me watching);
+   c. the Qt GUI's partial-success screen is still unseen on a screen (the Rust app's is in `finished-warning.png`).
    The app has never run on my desktop or against my Flipper. Its first run is with me watching, against the fake
    first (`argus-app --socket PATH`, with `flipper-fake --socket PATH`), then my Flipper. The Qt app stays until then.

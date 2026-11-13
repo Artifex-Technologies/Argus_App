@@ -26,6 +26,8 @@ pub enum NetEvent {
     Directory(Result<Directory, String>),
     /// An update ready for the device (package checked, region data fetched or why not).
     UpdateReady(Result<Box<UpdateJob>, String>),
+    /// The legacy update's files, fetched and checked.
+    LegacyReady(Result<Box<crate::recovery::LegacyFiles>, String>),
 }
 
 /// The update server and the client that reaches it; the client is made on first use (system roots) unless one was
@@ -95,6 +97,17 @@ impl Net {
         let text = self.client()?.get(&flipper_updates::region_url(&self.server), region::MAX_BUNDLE).map_err(|e| e.to_string())?;
         // no country from the server: the default bands (argus-cli never guesses a country either)
         region::region_data(&text, b"").map(|d| d.bytes).map_err(|e| e.to_string())
+    }
+
+    /// Fetches the legacy update's files on a thread (`LegacyFiles::fetch`).
+    pub fn prepare_legacy(&self, channel: String, info: &crate::device::DeviceInfo, tx: Sender<NetEvent>, waker: Waker) {
+        let net = self.clone();
+        let (version, stack_type, region) = (info.radio_version.clone(), info.stack_type, info.region);
+        std::thread::spawn(move || {
+            let r = crate::recovery::LegacyFiles::fetch(&net, &channel, &version, stack_type, region).map(Box::new);
+            let _ = tx.send(NetEvent::LegacyReady(r));
+            waker();
+        });
     }
 
     /// Prepares an update on a thread: the package (read and checked whole before anything goes to the device), then,

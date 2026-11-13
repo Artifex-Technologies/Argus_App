@@ -152,6 +152,25 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-13 — `argus-app`: developer installs from the running firmware, the legacy update, a Limbo rebuild tested
+- The Rust app's developer tab now also works on a running Flipper: it reboots the firmware into its bootloader over
+  RPC first, waits for the bootloader, then installs the wireless stack or FUS there, as the C++ operations do. Only a
+  firmware on a Unix socket (the fake) is rebooted so; a Flipper on USB is refused before anything is sent (the app has
+  no USB bootloader transport, so it would be left in recovery mode).
+- The legacy update in the app (no SD card or a protobuf older than 0.7): the server's files checked first, `/int`
+  backed up (kept in `~/.local/share/argus/legacy-backups/`), the firmware written through the bootloader, then the
+  resources, `/int` restored, the region data and a restart. A wireless stack that was not installed shows "Done, with
+  a warning" (`updated, but the radio stack was not installed: ...`), the partial success the CLIs report with exit 3.
+- **Fixed in both (C++ and Rust):** the legacy update decided whether to install the wireless stack by comparing
+  versions as text, so a 1.9.x stack counted as newer than 1.17.x and was left on (and 1.13.x counted as older than
+  1.2.x). Both compare numbers now (`FirmwareHelper::hasRadioUpdate`, `flipper_updates::repair::has_radio_update`).
+- New: `argus-cli recovery legacy-update-from-server CHANNEL --backup FILE --port DEV --dfu-socket S --yes` and
+  `recovery install-radio|install-fus ... --port DEV` (reboot into the bootloader first). `compare-repair.sh` compares
+  them with `qFlipper-cli` (`legacy-server*`, `install-radio`, `install-fus` from the firmware, `install-radio-recovery`):
+  370 checks pass. `flipper-fake --radio-minor N`.
+- The tools window's Limbo rebuild is tested against a fake Limbo agent (a build, a failed build).
+- **@Sarina:** nothing changes for you.
+
 ### 2026-11-13 — `argus-app`: the API with the app's device, repair from the server, Developer tab, tools window, picker
 - The Rust app's Sarina API now has the connected device (`device.status`, `capture.pull`/`pullAll` run on the app's
   own device worker; the console's pulls go through the same bridge call). Recovery: the repair from the update
