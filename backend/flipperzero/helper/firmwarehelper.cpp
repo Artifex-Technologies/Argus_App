@@ -9,6 +9,7 @@
 #include "flipperzero/helper/scriptshelper.h"
 #include "flipperzero/helper/radiomanifesthelper.h"
 
+#include "flipperupdates.h"
 #include "remotefilefetcher.h"
 #include "tempdirectories.h"
 
@@ -104,7 +105,10 @@ void FirmwareHelper::prepareRadioFirmware()
         const auto &currentRadioVersion = m_deviceState->deviceInfo().radioVersion;
         const auto &currentStackType = m_deviceState->deviceInfo().stackType;
 
-        m_hasRadioUpdate = currentRadioVersion.isEmpty() || (currentStackType != newStackType) || (currentRadioVersion < newRadioVersion);
+        // the versions compared as numbers: as text (QString's <), 1.9.x counted as newer than 1.17.x and stayed on,
+        // and 1.13.x counted as older than 1.2.x and was "updated" to it
+        m_hasRadioUpdate = currentRadioVersion.isEmpty() || (currentStackType != newStackType) ||
+                           (Updates::VersionInfo::compare(currentRadioVersion, newRadioVersion) < 0);
 
         auto *file = globalTempDirs->createTempFile(this);
         m_files.insert(FileIndex::RadioFirmware, file);
