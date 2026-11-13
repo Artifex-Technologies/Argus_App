@@ -403,7 +403,14 @@ impl ArgusApp {
         }
     }
 
+    /// Whether a capture pull runs (started from the console or the Sarina API; one at a time, as in the C++ app).
+    pub fn pulling(&self) -> bool {
+        self.bridge.lock().unwrap_or_else(|e| e.into_inner()).is_pulling()
+    }
+
     fn poll(&mut self) {
+        // what the device's pulls logged (the API's server thread does the same while it runs)
+        self.bridge.lock().unwrap_or_else(|e| e.into_inner()).poll_device();
         let events: Vec<Event> = match &self.worker {
             Some(w) => w.rx.try_iter().collect(),
             None => Vec::new(),
@@ -456,6 +463,11 @@ impl ArgusApp {
         match e {
             Event::Connected(info) => {
                 self.logline(format!("Connected to {} ({})", info.name, info.firmware_shown()));
+                // the console's and the Sarina API's device, as the C++ app attaches its current device
+                if let (Some(w), Some(waker)) = (&self.worker, self.waker.clone()) {
+                    let d = w.api_device(info.name.clone(), waker);
+                    self.bridge.lock().unwrap_or_else(|e| e.into_inner()).attach_device(d);
+                }
                 self.info = Some(info);
                 if self.stage == Stage::Connecting {
                     self.stage = Stage::Ready;
@@ -487,7 +499,9 @@ impl ArgusApp {
             }
             Event::Frame(f) => self.frame = Some(f),
             Event::Done { op, result } => {
-                self.busy = None;
+                if op != Op::Captures {
+                    self.busy = None;
+                }
                 match (&result, op.is_big()) {
                     (Ok(o), true) => {
                         self.logline(o.summary.clone());
@@ -512,6 +526,7 @@ impl ArgusApp {
             }
             Event::Gone(why) => {
                 self.logline(format!("Device disconnected: {why}"));
+                self.bridge.lock().unwrap_or_else(|e| e.into_inner()).detach_device(&why);
                 self.worker = None;
                 self.info = None;
                 self.frame = None;
@@ -917,7 +932,7 @@ impl ArgusApp {
         self.dialog_ui(&ctx, &pal);
         self.settings_ui(&ctx, &pal);
         if let Some(op) = self.busy {
-            if !op.is_big() && op != Op::Captures {
+            if !op.is_big() {
                 egui::Modal::new(Id::new("busy")).show(&ctx, |ui| {
                     ui.set_width(300.0);
                     ui.horizontal(|ui| {
@@ -1160,7 +1175,7 @@ impl ArgusApp {
             _ => pal.accent,
         };
         let button = Rect::from_center_size(pos2(card.left() + CENTER_X, card.top() + 290.0), vec2(220.0, 48.0));
-        let enabled = state.enabled() && (self.worker.is_some() || self.recovery());
+        let enabled = state.enabled() && (self.worker.is_some() || self.recovery()) && !self.pulling();
         let resp = ui.put(
             button,
             egui::Button::new(RichText::new(state.button().to_uppercase()).size(20.0).color(if enabled {
@@ -1273,7 +1288,8 @@ impl ArgusApp {
             }
             return;
         }
-        let connected = self.worker.is_some() && !self.recovery();
+        // nothing that changes the device starts while a capture pull reads from it
+        let connected = self.worker.is_some() && !self.recovery() && !self.pulling();
         ui.label(RichText::new("Firmware update channel").color(pal.dim));
         let names: Vec<String> = match &self.directory {
             DirState::Ready(d) => d.channel_names().iter().map(|s| s.to_string()).collect(),
@@ -1336,7 +1352,7 @@ impl ArgusApp {
     }
 
     fn files_tab(&mut self, ui: &mut egui::Ui, pal: &Palette) {
-        let idle = self.busy.is_none() && self.worker.is_some();
+        let idle = self.busy.is_none() && self.worker.is_some() && !self.pulling();
         let root = self.files.is_root();
         ui.horizontal(|ui| {
             if ui.add_enabled(!self.files.back.is_empty(), egui::Button::new("<")).on_hover_text("Back").clicked() {
@@ -1683,7 +1699,7 @@ impl ArgusApp {
         ui.painter().rect_filled(card, 12.0, pal.sidebar);
         let inner = card.shrink(18.0);
         let connected = self.worker.is_some() && self.info.is_some();
-        let pulling = self.busy == Some(Op::Captures);
+        let pulling = self.pulling();
         let (session, datastore) = {
             let b = self.bridge.lock().unwrap_or_else(|e| e.into_inner());
             (b.session().map(|(_, n)| n.to_string()), b.datastore_path().to_string())
@@ -1730,9 +1746,9 @@ impl ArgusApp {
                     ("Pull Sub-GHz", vec!["/ext/subghz".to_string()]),
                 ] {
                     if ui.add_enabled(can, egui::Button::new(label)).clicked() {
+                        // the C++ console's pullAll/pullPath: through the bridge, so the API sees the same pull
                         let what = if roots.len() > 1 { "all capture folders".to_string() } else { roots[0].clone() };
-                        self.busy = Some(Op::Captures);
-                        self.send(Cmd::Captures { roots, label: what });
+                        self.bridge.lock().unwrap_or_else(|e| e.into_inner()).start_pull(roots, &what);
                     }
                 }
             });
@@ -1985,6 +2001,7 @@ impl ArgusApp {
 impl Drop for ArgusApp {
     fn drop(&mut self) {
         self.api = None;
+        self.bridge.lock().unwrap_or_else(|e| e.into_inner()).detach_device("the app closed");
         self.worker = None;
     }
 }

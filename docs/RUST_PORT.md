@@ -765,9 +765,13 @@ The console (CONSOLE in the footer: qFlipper's Chymaera console and the capture 
 captures from the device (all capture folders, NFC, Sub-GHz; `argus_capture::sync`, the allowlist, secrets never read)
 into the shared datastore, lists the stored captures, starts and ends sessions, takes notes and shows the event log,
 and starts and stops the Sarina control API (`Server::run_shared`: the app's console and the API share one bridge and
-one event log). In the app, the API has no device attached yet: `device.status` says so, and `capture.pull` over the
-API needs `argus-cli chymaera serve --port` for now (the device belongs to the app's worker). Settings: the style
-(follow the system, light, dark), auto-connect, the update check, hidden files, the API's port.
+one event log). The connected device is attached to the bridge as the C++ app attaches its current one
+(`argus_api::device::Device::external`): `device.status` names it, and `capture.pull`/`capture.pullAll` from the API
+run on the app's own device worker (`argus_api::device::pull`, the same code as `argus-cli chymaera serve --port`),
+between the app's own requests. The console's pull buttons go through the same bridge call (`start_pull`), so the
+console and the API share one pull at a time, and nothing that changes the device starts while a pull reads from it.
+A device in recovery mode is not attached (it has no RPC session). Settings: the style (follow the system, light,
+dark), auto-connect, the update check, hidden files, the API's port.
 
 Recovery mode: a device in its bootloader shows as "Recovery mode" (the blue light on the device, no file manager);
 the main button is Repair. The repair takes local files (firmware `.dfu`, the option bytes file, optionally the
@@ -809,7 +813,10 @@ now has an explicit id; the console tests click right after the console opens.
 - The console (`tests/console.rs`): a pull of all capture folders (26 rows; nothing under `/ext/u2f` or an `assets`
   folder read; nothing changed on the device; a second pull finds nothing new), notes and the log, and the API started
   from the app on a free port with the test's token (ping, a wrong token refused, `log.tail` sees the console's note),
-  then stopped (the port closes). The settings window saves what changes.
+  then stopped (the port closes). With the fake connected, the API's `device.status` names it, `capture.pull` of
+  `/int` is refused, of `/ext/nfc` runs on the app's worker (the console shows its steps and rows), and the console's
+  own pull is seen by the API's `capture.list` (26 rows); without a device the API says so. The settings window saves
+  what changes.
 - Recovery (`tests/recovery.rs`) against the fake STM32WB55 bootloader across its resets: recovery mode shown
   (snapshot), the repair and leaving recovery mode each cancelled (not one request reaches the bootloader, the flash
   untouched) and confirmed (firmware written, the wireless stack deleted and installed, the chip starts its firmware;

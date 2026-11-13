@@ -16,6 +16,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use argus_api::bridge::Bridge;
+use argus_api::device::{Note, PullRequest};
 use flipper_rpc::ops::{Entry, InfoSource};
 use flipper_rpc::proto::pb_gui::{InputKey, InputType};
 use flipper_rpc::screen::Frame;
@@ -187,10 +188,11 @@ pub enum Cmd {
     Restore(PathBuf),
     Erase,
     Update(Box<UpdateJob>),
-    /// Capture pull into the shared datastore, logged through the console's bridge.
+    /// A capture pull into the shared datastore, asked for by the bridge (the console or the Sarina API); its steps go
+    /// back as notes the bridge logs.
     Captures {
-        roots: Vec<String>,
-        label: String,
+        request: PullRequest,
+        notes: Sender<Note>,
     },
     Disconnect,
 }
@@ -243,6 +245,17 @@ impl Worker {
 
     pub fn send(&self, cmd: Cmd) {
         let _ = self.tx.send(cmd);
+    }
+
+    /// The device for the bridge (the console and the Sarina API): pulls it asks for run on this worker, between the
+    /// UI's own commands, and each step wakes the UI. The app detaches it when the worker reports the device gone.
+    pub fn api_device(&self, name: String, waker: Waker) -> argus_api::device::Device {
+        let tx = self.tx.clone();
+        argus_api::device::Device::external(name, move |request, notes| {
+            let sent = tx.send(Cmd::Captures { request, notes }).is_ok();
+            waker();
+            sent
+        })
     }
 }
 
@@ -396,7 +409,7 @@ fn run(found: Found, timeout: Duration, rx: Receiver<Cmd>, tx: Sender<Event>, br
                     }
                     streaming = false;
                 }
-                let (event, left) = handle(&mut s, other, &bridge);
+                let (event, left) = handle(&mut s, other, &bridge, &waker);
                 let broken = matches!(&event, Some(Event::Listing { result: Err(_), .. }) | Some(Event::Done { result: Err(_), .. }))
                     && s.protobuf_version().is_err();
                 if let Some(e) = event {
@@ -420,7 +433,7 @@ fn done(op: Op, r: Result<String, String>) -> Option<Event> {
 }
 
 /// Runs one command; returns the event to send and, when the device leaves after it, why.
-fn handle<T: Transport>(s: &mut Session<T>, cmd: Cmd, bridge: &Arc<Mutex<Bridge>>) -> (Option<Event>, Option<String>) {
+fn handle<T: Transport>(s: &mut Session<T>, cmd: Cmd, bridge: &Arc<Mutex<Bridge>>, waker: &Waker) -> (Option<Event>, Option<String>) {
     let err = |e: RpcError| e.to_string();
     match cmd {
         Cmd::Refresh => match read_info(s) {
@@ -519,27 +532,18 @@ fn handle<T: Transport>(s: &mut Session<T>, cmd: Cmd, bridge: &Arc<Mutex<Bridge>
                 Err(e) => (done(Op::Update, Err(e.to_string())), None),
             }
         }
-        Cmd::Captures { roots, label } => {
+        Cmd::Captures { request, notes } => {
             let path = bridge.lock().unwrap_or_else(|e| e.into_inner()).datastore_path().to_string();
-            let r = (|| {
-                let store = argus_capture::store::Store::open(Path::new(&path)).map_err(|e| e.0)?;
-                let session = bridge.lock().unwrap_or_else(|e| e.into_inner()).session().map(|(id, _)| id);
-                let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
-                bridge.lock().unwrap_or_else(|e| e.into_inner()).append(
-                    argus_api::eventlog::Severity::Notice,
-                    argus_api::eventlog::Source::Device,
-                    &format!("Pulling {label} from device…"),
-                    "",
-                );
-                let mut log = |sev, src, msg: &str, detail: &str| {
-                    bridge.lock().unwrap_or_else(|e| e.into_inner()).append(sev, src, msg, detail);
-                    Ok(())
-                };
-                argus_capture::sync::pull_logged(s, &store, session, &roots, &label, &flipper_rpc::transfer::Limits::default(), &mut log)
-                    .map(|r| format!("{} new capture(s), {} already stored, {} failed", r.new, r.duplicates, r.failed.len()))
-                    .map_err(|e| e.to_string())
-            })();
-            (done(Op::Captures, r), None)
+            let mut summary = String::new();
+            let r = argus_api::device::pull(s, Path::new(&path), &request, &mut |n| {
+                if let Note::Event(_, _, msg, _) = &n {
+                    summary.clone_from(msg);
+                }
+                let _ = notes.send(n);
+                waker();
+            });
+            // the pull's last line ("Pulled ...: n new, ...") is its summary; a device that stopped answering ends it
+            (done(Op::Captures, r.map(|_| summary).map_err(err)), None)
         }
         Cmd::Disconnect | Cmd::Screen(_) | Cmd::Input(..) => (None, None),
     }

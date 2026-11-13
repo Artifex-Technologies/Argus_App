@@ -367,10 +367,10 @@ impl Bridge {
         self.append_q(Severity::Debug, Source::Sarina, m, QString::new());
     }
 
-    /// `startPull` with no device attached (`serve` has none): logged and refused.
     /// `startPull`: refused (and logged) without a device or while a pull runs; otherwise the
-    /// pull starts on the device's worker and this returns at once, as in the C++ app.
-    fn start_pull(&mut self, roots: Vec<String>, label: &str) -> bool {
+    /// pull starts on the device's worker and this returns at once, as in the C++ app. The
+    /// app's console calls it too (`pullPath`/`pullAll`), so the console and the API share one pull.
+    pub fn start_pull(&mut self, roots: Vec<String>, label: &str) -> bool {
         let session = self.session.as_ref().map(|s| s.0);
         let why = match &mut self.device {
             None => "no device attached",
@@ -398,6 +398,19 @@ impl Bridge {
         self.device.is_some()
     }
 
+    /// Whether a pull runs on the attached device (`isPulling`).
+    pub fn is_pulling(&self) -> bool {
+        self.device.as_ref().is_some_and(Device::is_pulling)
+    }
+
+    /// The device left (`isOnlineChanged`, then `detachDevice`): logged as the C++ app does.
+    pub fn detach_device(&mut self, why: &str) {
+        if self.device.take().is_some() {
+            self.append(Severity::Notice, Source::Device, "Device offline", why);
+            self.append(Severity::Notice, Source::Device, "Device detached", "");
+        }
+    }
+
     /// Takes in what the device's worker reported: pull steps, the end of a pull, a lost device.
     pub fn poll_device(&mut self) {
         let Some(d) = &mut self.device else { return };
@@ -406,11 +419,7 @@ impl Bridge {
             match n {
                 Note::Event(sev, src, msg, detail) => self.append(sev, src, &msg, &detail),
                 Note::PullDone(_) => {}
-                Note::Gone(why) => {
-                    self.device = None;
-                    self.append(Severity::Notice, Source::Device, "Device offline", &why);
-                    self.append(Severity::Notice, Source::Device, "Device detached", "");
-                }
+                Note::Gone(why) => self.detach_device(&why),
             }
         }
     }

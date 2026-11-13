@@ -1,6 +1,7 @@
 //! The console: capture pulls from the fake into the test's own datastore (only the capture folders; secrets never
 //! read; nothing changed on the device), the capture list, notes and sessions in the event log, and the Sarina control
-//! API started and stopped from the app (on a free port with the test's token, never 44700), answering over loopback.
+//! API started and stopped from the app (on a free port with the test's token, never 44700), answering over loopback,
+//! with the app's device attached: `device.status` and `capture.pull` run on the app's own device worker.
 
 mod common;
 
@@ -96,4 +97,54 @@ fn the_control_api_starts_and_stops_from_the_app() {
         std::thread::sleep(Duration::from_millis(20));
     }
     panic!("the API still listens on {port}");
+}
+
+fn start_api(h: &mut Harness) -> u16 {
+    h.click("Start API");
+    h.wait("the API", |h| h.app.api_port().is_some() && h.has("Stop API"));
+    h.app.api_port().unwrap()
+}
+
+#[test]
+fn the_api_reaches_the_apps_device() {
+    let (mut h, fake) = console("api-device");
+    let port = start_api(&mut h);
+    let status = ask(port, r#"{"cmd":"device.status","id":1,"token":"test-token"}"#);
+    assert!(status.contains(r#""connected":true"#) && status.contains(r#""name":"Fakeflip""#), "{status}");
+    // only the capture folders, as everywhere
+    let refused = ask(port, r#"{"cmd":"capture.pull","id":2,"token":"test-token","path":"/int"}"#);
+    assert!(refused.contains(r#""ok":false"#) && refused.contains("only the capture folders"), "{refused}");
+    let started = ask(port, r#"{"cmd":"capture.pull","id":3,"token":"test-token","path":"/ext/nfc"}"#);
+    assert!(started.contains(r#""started":true"#), "{started}");
+    // the pull runs on the app's worker; the console shows its steps and what came
+    h.wait("the API's pull to end", |h| h.shows_text("Pulled /ext/nfc") && !h.app.pulling());
+    assert!(h.shows_text("Pulling /ext/nfc from device"));
+    let rows = h.widgets().iter().filter(|w| w.label == "nfc").count();
+    assert!(rows > 0, "the NFC captures are listed");
+    let tail = ask(port, r#"{"cmd":"log.tail","id":4,"token":"test-token","limit":5}"#);
+    assert!(tail.contains("Pulled /ext/nfc"), "{tail}");
+    // the console's own pull goes through the same device, and the API sees it
+    h.click("Pull all captures");
+    h.wait("the console's pull", |h| h.shows_text("Pulled all capture folders") && !h.app.pulling());
+    assert!(h.shows("Captures (26)"));
+    assert!(fake.changes().is_empty(), "pulls only read");
+    let list = ask(port, r#"{"cmd":"capture.list","id":5,"token":"test-token","limit":100}"#);
+    assert_eq!(list.matches(r#""source_path""#).count(), 26, "{list}");
+    h.click("Stop API");
+    h.wait("the API to stop", |h| h.has("Start API"));
+}
+
+#[test]
+fn without_a_device_the_api_says_so() {
+    let dir = tempdir("api-nodev");
+    let opts = Options { settings: "api_port = 0\n".into(), ..Options::default() };
+    let mut h = Harness::new(&dir, Vec::new(), opts);
+    h.click("CONSOLE");
+    let port = start_api(&mut h);
+    let status = ask(port, r#"{"cmd":"device.status","id":1,"token":"test-token"}"#);
+    assert!(status.contains(r#""connected":false"#), "{status}");
+    let pull = ask(port, r#"{"cmd":"capture.pull","id":2,"token":"test-token","path":"/ext/nfc"}"#);
+    assert!(pull.contains(r#""ok":false"#), "{pull}");
+    h.step();
+    assert!(h.shows_text("Cannot pull /ext/nfc: no device attached"));
 }
