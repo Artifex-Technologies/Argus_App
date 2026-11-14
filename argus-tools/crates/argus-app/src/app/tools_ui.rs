@@ -6,7 +6,10 @@ use std::path::PathBuf;
 
 use eframe::egui::{self, Id, RichText, UiBuilder};
 
+use super::draw::{Kind, QButton};
+
 use super::{Action, ArgusApp, Dialog, Field};
+use crate::fonts;
 use crate::theme::Palette;
 use crate::tools::{self, Dirs, Reply, Sess, Tab};
 
@@ -68,7 +71,7 @@ impl ArgusApp {
     }
 
     pub(super) fn tools_ui(&mut self, ui: &mut egui::Ui, card: egui::Rect, pal: &Palette) {
-        ui.painter().rect_filled(card, 12.0, pal.sidebar);
+        super::cover(ui, card, pal);
         if !self.tools.loaded && self.tools.busy.is_none() {
             self.tools.loaded = true;
             self.refresh_snapshots();
@@ -78,7 +81,7 @@ impl ArgusApp {
         let inner = card.shrink(16.0);
         ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 20))).max_rect(inner), |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Argus tools").size(20.0));
+                ui.label(RichText::new("Argus tools").font(fonts::sporty(30.0)).color(pal.accent));
                 for (t, label) in [
                     (Tab::Apps, "Apps"),
                     (Tab::Checkup, "Check-up"),
@@ -87,11 +90,7 @@ impl ArgusApp {
                     (Tab::Captures, "Captures"),
                 ] {
                     let on = self.tools.tab == t;
-                    let b = egui::Button::new(RichText::new(label).color(if on { pal.on_accent() } else { pal.text })).fill(if on {
-                        pal.accent
-                    } else {
-                        pal.field
-                    });
+                    let b = QButton::fit(label, Kind::Toggle(on), pal, 28.0);
                     if ui.add(b).clicked() {
                         self.tools.tab = t;
                     }
@@ -99,7 +98,7 @@ impl ArgusApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let api = self.tools_api().text();
                     let from = if self.info.as_ref().and_then(|i| tools::firmware_api(&i.pairs)).is_some() { "device" } else { "default" };
-                    ui.label(RichText::new(format!("API {api} ({from})")).color(pal.dim).size(12.0));
+                    ui.label(RichText::new(format!("API {api} ({from})")).color(pal.dim));
                 });
             });
             // the status line: what runs, else how the last job ended
@@ -113,9 +112,9 @@ impl ArgusApp {
             };
             ui.horizontal(|ui| {
                 if !idle {
-                    ui.add(egui::Spinner::new().size(12.0));
+                    ui.add(egui::Spinner::new());
                 }
-                ui.label(RichText::new(text).color(colour).size(12.0));
+                ui.label(RichText::new(text).color(colour));
             });
             ui.separator();
             let can_card = idle && connected;
@@ -162,13 +161,13 @@ impl ArgusApp {
                     if let Some(p) = self.tools.picked.get_mut(i) {
                         ui.checkbox(p, name);
                     }
-                    ui.label(RichText::new(format!("{}/{}", a.category, a.file_name)).color(pal.dim).size(12.0));
+                    ui.label(RichText::new(format!("{}/{}", a.category, a.file_name)).color(pal.dim));
                     let (status, colour) = match a.compat.as_ref().map(|c| c.status) {
                         Some(argus_tools::api::Status::Compatible) => ("compatible", pal.green),
                         Some(argus_tools::api::Status::Incompatible) => ("will not load", pal.red),
                         _ => ("unknown", pal.amber),
                     };
-                    let r = ui.label(RichText::new(status).color(colour).size(12.0));
+                    let r = ui.label(RichText::new(status).color(colour));
                     if let Some(c) = &a.compat {
                         r.on_hover_text(&c.reason);
                     }
@@ -191,13 +190,13 @@ impl ArgusApp {
             egui::ScrollArea::vertical().id_salt("tools-plan").max_height(70.0).auto_shrink([false, true]).show(ui, |ui| {
                 for p in self.tools.plan.iter_mut() {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(&p.remote).size(12.0));
+                        ui.label(RichText::new(&p.remote));
                         if p.refused {
-                            ui.label(RichText::new(&p.reason).color(pal.red).size(12.0));
+                            ui.label(RichText::new(&p.reason).color(pal.red));
                         } else if p.exists {
-                            ui.checkbox(&mut p.overwrite, RichText::new("on the card: overwrite").size(12.0));
+                            ui.checkbox(&mut p.overwrite, RichText::new("on the card: overwrite"));
                         } else {
-                            ui.label(RichText::new("new").color(pal.green).size(12.0));
+                            ui.label(RichText::new("new").color(pal.green));
                         }
                     });
                 }
@@ -219,17 +218,16 @@ impl ArgusApp {
         egui::ScrollArea::vertical().id_salt("tools-checkup").auto_shrink([false, false]).show(ui, |ui| {
             for a in v["apps"].as_array().cloned().unwrap_or_default() {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(a["path"].as_str().unwrap_or_default()).size(12.0));
+                    ui.label(RichText::new(a["path"].as_str().unwrap_or_default()));
                     let status = a["compat"]["status"].as_str().unwrap_or_default().to_string();
                     let colour = match status.as_str() {
                         "compatible" => pal.green,
                         "incompatible" => pal.red,
                         _ => pal.amber,
                     };
-                    ui.label(RichText::new(&status).color(colour).size(12.0))
-                        .on_hover_text(a["compat"]["reason"].as_str().unwrap_or_default());
+                    ui.label(RichText::new(&status).color(colour)).on_hover_text(a["compat"]["reason"].as_str().unwrap_or_default());
                     if let Some(name) = a["replacement"]["file_name"].as_str() {
-                        ui.label(RichText::new(format!("a compatible copy: {name}")).color(pal.accent).size(12.0));
+                        ui.label(RichText::new(format!("a compatible copy: {name}")).color(pal.accent));
                     }
                 });
             }
@@ -257,10 +255,10 @@ impl ArgusApp {
         }
         if let Some(b) = &self.tools.built {
             for f in &b.faps {
-                ui.label(RichText::new(format!("{} ({} bytes): {:?}", f.file_name, f.size, f.compat.status)).size(12.0));
+                ui.label(RichText::new(format!("{} ({} bytes): {:?}", f.file_name, f.size, f.compat.status)));
             }
             egui::ScrollArea::vertical().id_salt("tools-log").auto_shrink([false, false]).show(ui, |ui| {
-                ui.label(RichText::new(&b.log_tail).monospace().size(11.0).color(pal.dim));
+                ui.label(RichText::new(&b.log_tail).monospace().color(pal.dim));
             });
         }
     }
@@ -288,7 +286,7 @@ impl ArgusApp {
                         s.file_count,
                         if s.label.is_empty() { String::new() } else { format!("  {}", s.label) }
                     );
-                    if ui.selectable_label(sel, RichText::new(text).size(12.0)).clicked() {
+                    if ui.selectable_label(sel, RichText::new(text)).clicked() {
                         self.tools.selected = Some(s.id.clone());
                         self.tools.diff = None;
                         self.tools.restore = None;
@@ -348,7 +346,7 @@ impl ArgusApp {
                         [("added", &d.added, pal.green), ("removed", &d.removed, pal.red), ("changed", &d.changed, pal.amber)]
                     {
                         for c in list {
-                            ui.label(RichText::new(format!("{what}: {}", c.path)).color(colour).size(12.0));
+                            ui.label(RichText::new(format!("{what}: {}", c.path)).color(colour));
                         }
                     }
                 });
@@ -379,7 +377,7 @@ impl ArgusApp {
             if (ui.add_enabled(idle, egui::Button::new("Search")).clicked() || enter) && idle {
                 self.search_captures();
             }
-            ui.label(RichText::new(format!("{} of {}", self.tools.captures.len(), self.tools.total)).color(pal.dim).size(12.0));
+            ui.label(RichText::new(format!("{} of {}", self.tools.captures.len(), self.tools.total)).color(pal.dim));
         });
         let list = self.tools.captures.clone();
         ui.columns(2, |cols| {
@@ -391,8 +389,7 @@ impl ArgusApp {
                         c.kind,
                         c.name,
                         if c.tags.is_empty() { String::new() } else { format!("[{}]", c.tags.join(", ")) }
-                    ))
-                    .size(12.0);
+                    ));
                     if ui.selectable_label(sel, text).clicked() && idle {
                         self.tools.capture = Some(c.id.clone());
                         let id = c.id.clone();
@@ -403,13 +400,13 @@ impl ArgusApp {
             let ui = &mut cols[1];
             if let Some(groups) = &self.tools.dupes {
                 for g in groups.iter().take(20) {
-                    ui.label(RichText::new(format!("{}: {}", g.kind, g.paths.join(", "))).size(11.0).color(pal.dim));
+                    ui.label(RichText::new(format!("{}: {}", g.kind, g.paths.join(", "))).color(pal.dim));
                 }
             }
             let Some((c, text)) = self.tools.detail.clone() else { return };
             ui.label(RichText::new(&c.name).strong());
             egui::ScrollArea::vertical().id_salt("tools-explain").max_height(130.0).auto_shrink([false, false]).show(ui, |ui| {
-                ui.label(RichText::new(text).size(12.0));
+                ui.label(RichText::new(text));
             });
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.tools.tags).id(Id::new("tools-tags")).hint_text("tags").desired_width(150.0));

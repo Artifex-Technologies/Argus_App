@@ -48,9 +48,9 @@ What talks to the device, by channel:
 | nanopb (`3rdparty/nanopb`) | zlib | Not used by the Rust code. The tests build the C++ app's nanopb code to check the Rust encoding against it |
 | QtSingleApplication (`application/qtsingleapplication`) | BSD (Digia) | Not ported; a lock file or socket in Rust replaces it |
 | libwdi (`driver-tool/libwdi`) | LGPL-3.0 (`COPYING-LGPL`) | Windows only, not ported |
-| Fonts in `application/assets/fonts` (Born2bSporty, HaxrCorp 4089, ProggySquare, Share Tech, Share Tech Mono) | Check each when the UI is ported | Not used: the Rust app uses egui's built-in fonts, as Yggdrasil's own apps do |
-| qFlipper's artwork (`application/assets/gfx`: the device picture, dolphin art, logo) | Flipper's trademarks and art | Not used: the Rust app draws the device and its icons as plain shapes |
-| Rust crates added now | prost, prost-build (Apache-2.0); serialport (MPL-2.0); proptest (MIT/Apache-2.0); serde_json (MIT/Apache-2.0); rusqlite (MIT); libc (MIT/Apache-2.0); md-5 for tests (MIT/Apache-2.0); ureq (MIT/Apache-2.0), rustls and rustls-native-certs (Apache-2.0/ISC/MIT), ring (Apache-2.0 and ISC) for HTTPS; eframe/egui (MIT/Apache-2.0) and png (MIT/Apache-2.0) for the app | All compatible with GPL-3.0 |
+| Fonts in `application/assets/fonts` (Born2bSporty, HaxrCorp 4089, ProggySquare, Share Tech, Share Tech Mono) | Checked 2026-11-14: Share Tech and Share Tech Mono SIL OFL 1.1 (their name tables), ProggySquare MIT (byte for byte bluescan/proggyfonts); HaxrCorp 4089 CC BY-SA 3.0 (not GPL-compatible, and a clone of another font); Born2bSportyV2 no licence found | `argus-app` embeds ProggySquare, Share Tech and Share Tech Mono (their licences now sit next to them); in place of HaxrCorp 4089 it embeds m5x7 (Daniel Linssen, CC0), of Born2bSportyV2 Jersey 15 (OFL 1.1), and Pixel Operator (CC0) as egui's body font, in `crates/argus-app/assets/fonts` with their licences and a `NOTICE` |
+| qFlipper's artwork (`application/assets/gfx`: the device picture, dolphin art, logo) | GPL-3.0 with qFlipper; the wordmark, dolphin and logo are Flipper's trademarks and art | `argus-app` draws the device from `flipper.svg`'s path data without its wordmark ("ARGUS" in its place), the plug from `typec.svg`, and the symbolic icons as the pixels they are made of (`app/icons.rs`); no dolphin, wordmark or logo |
+| Rust crates added now | prost, prost-build (Apache-2.0); serialport (MPL-2.0); proptest (MIT/Apache-2.0); serde_json (MIT/Apache-2.0); rusqlite (MIT); libc (MIT/Apache-2.0); md-5 for tests (MIT/Apache-2.0); ureq (MIT/Apache-2.0), rustls and rustls-native-certs (Apache-2.0/ISC/MIT), ring (Apache-2.0 and ISC) for HTTPS; eframe/egui (MIT/Apache-2.0) and png (MIT/Apache-2.0) for the app; the fonts in the row above | All compatible with GPL-3.0 |
 | Qt's JSON rules (`qjsonparser.cpp`, `qjsonwriter.cpp`, `qlocale_tools.cpp`, Qt 6.12) | LGPL-3.0/GPL | Not copied: `argus-api::qjson` is written from scratch to behave the same, and checked against Qt itself |
 
 ## 3. The order
@@ -727,26 +727,52 @@ failed, and does not read `devinfo` or start the screen.
 `egui::Ui`) and the `argus-app` binary (eframe 0.36.2, wgpu, as Yggdrasil's apps). It ships as a second program next
 to the Qt app until I switch; nothing of `application/` is removed yet.
 
-**How it looks and moves (decided 2026-11-12).** I like qFlipper's look and motion, so the app follows qFlipper's layout
-and animations (application/ is a fork of it, GPL-3.0, so both may be carried over) but is drawn in Yggdrasil's style:
+**How it looks and moves.** I like qFlipper's look and motion, and application/ is a fork of it (GPL-3.0), so its QML
+design, shapes, geometry and animations are carried over. On 2026-11-12 the app took qFlipper's layout and motion but drew
+them in Yggdrasil's flat style; since 2026-11-14 it has qFlipper's design itself, with the user's accent where qFlipper has
+orange:
 
-- Layout as `MainWindow.qml`: a title strip, one content card (830 x 390), a footer with LOGS, CONSOLE (the Chymaera
-  console), TOOLS (qFlipper's ARGUS button: the Argus tools window), SETTINGS and the status bar, and a log drawer below. In the card, one
-  overlay per stage of `ApplicationBackend`: no device, home (tabs Info, Actions, Files on the left, the device on the
-  right with its name, state, the main button, the channel link and "Install from file"), an operation, its end (with
-  the partial-success warning), the full-size screen with the keypad.
+- Layout as `MainWindow.qml`: the window controls (minimize, close) over one content card (830 x 390), a footer with
+  LOGS, CONSOLE (the Chymaera console), TOOLS (qFlipper's ARGUS button: the Argus tools window), SETTINGS and the status
+  bar, and a log drawer below. In the card, one overlay per stage of `ApplicationBackend`: no device (the device with
+  the USB plug pointing at it, "CONNECT YOUR FLIPPER ZERO"), home (icon tabs Info, Actions, Files and, in developer
+  mode, Developer on the left; the device on the right with its name, the CONNECTED and port badges, the main button,
+  the channel link and "Install from file"), an operation (its title, the progress box with qFlipper's dots, the
+  message), its end or an error (FinishOverlay: the title, the warning of a partial success, CONTINUE; for an error the
+  device showing "!", the text box, BACK), the full-size screen with the round keypad.
+- qFlipper's design (`theme.rs`, `fonts.rs`, `app/draw.rs`, `app/icons.rs`): a black window with a dim accent border;
+  the card's dark gradient, its grid of 30 cells at 15 %, its 3 px bright border and the version at half strength;
+  labels and buttons in capitals in a pixel font, values in the light step of the accent and labels in the dim one
+  (DeviceInfo.qml); the tab pane outlined solid at the top and bottom and dotted on the sides (TabPane.qml), the tabs
+  as outlined icons with the current one filled; buttons as DefaultAmber's (Button, SmallButton, SmallButtonRed,
+  MainButton, LinkButton: outline, fill and text per state); the main button green to update and blue to repair as
+  qFlipper's, the release link green; the status bar in the dark accent with qFlipper's "i" and its text in capitals,
+  dark red with the "i" upside down on an error; dialogs as CustomDialog.qml (black, a bright outline, the title
+  inverted in a header, the window dimmed behind; OK and Cancel side by side, a dangerous OK red); the file manager's
+  rows in Share Tech with qFlipper's folder and file icons, the selected one filled; the log and the console in Share
+  Tech Mono. The device is drawn from `flipper.svg`'s path data (its angled body with the gradient fill, the inner line,
+  the screen's frame, the keypad's outline, D-pad ring, arrows, OK, back and light), with the screen live at one pixel
+  per device pixel as qFlipper's, in the accent with dark pixels; where Flipper's wordmark is, "ARGUS" in the title
+  font. No dolphin, no wordmark, no logo.
+- The palette: every orange of qFlipper's `Theme.qml` is made from the accent with the saturation and brightness steps
+  qFlipper takes from its own orange (`#fe8a2c`); its greens, blues and reds stay. The accent is Yggdrasil's (Settings
+  > Appearance, `~/.config/yggdrasil/appearance.conf`, re-read once a second) or Yggdrasil's purple (124,84,214); a very
+  dark accent is lifted so it reads on black. qFlipper is dark only, and so is the app: Yggdrasil's light style is no
+  longer followed, and the app's own setting is now which accent (follow the system, or purple), not light or dark.
+- Fonts (licences in section 2): m5x7 in place of HaxrCorp 4089 (labels, values, buttons: the same 7 px capitals at two
+  screen pixels per font pixel), Jersey 15 in place of Born2bSportyV2 (the name, titles, the main button), ProggySquare
+  (the version and the badges), Share Tech and Share Tech Mono as qFlipper uses them, Pixel Operator for the text egui
+  lays out itself. Each pixel font is used only at whole multiples of its pixel grid, unhinted, so it stays sharp.
+  Long dialog messages (Argus's are longer than qFlipper's) are drawn in the body font as they are, not in capitals, so
+  they fit the window.
 - Motion as the QML's Behaviors, same durations and curves: overlays and dialogs fade in 150 ms (InOutQuad), the device
   slides between its home and its operation position in 350 ms (InOutQuad), the log drawer opens in 500 ms (InOutQuad),
-  the status bar turns red in 150 ms (OutQuad), the connection spinner turns once in 1.5 s, the keypad's long press
-  comes after 350 ms and repeats every 150 ms (`KeypadButton.qml`).
-- Light: egui asks for frames only while something moves, the screen stream only repaints on a new frame, and an idle
-  window does no work. qFlipper's grid background sweeps a scanline for ever; here the grid is still.
-- Yggdrasil's style: its palette (mirrored from `yggdrasil-ui` in `theme.rs`, since Argus's CI has no Yggdrasil
-  checkout), light or dark from Settings > Appearance (`~/.config/yggdrasil/appearance.conf`, re-read once a second),
-  the user's accent colour (Yggdrasil's purple 124,84,214 by default) wherever qFlipper has orange, the screen's LCD
-  in light and dark tints of the accent, rounded shapes, egui's fonts, Yggdrasil's title strip with traffic lights.
-- No Flipper artwork or branding: the device is drawn as plain shapes (a rounded body, the screen, a round keypad), the
-  app is "Argus" in its chrome; "Flipper Zero" appears only where text names the device.
+  the status bar turns red in 150 ms (OutQuad), the connection spinner turns once in 1.5 s, the progress dots step every
+  500 ms, the keypad's long press comes after 350 ms and repeats every 150 ms (`KeypadButton.qml`).
+- Light: egui asks for frames only while something moves (the progress dots ask for one every 500 ms, the spinner
+  while it turns), the screen stream only repaints on a new frame, and an idle window does no work. qFlipper's grid
+  background sweeps a scanline for ever; here the grid is still. The icons are drawn as one mesh of quads each, the
+  device as a handful of lines and one gradient fan; the fonts add about 0.3 MB to the binary.
 
 **What it does so far.** Devices are found by reading sysfs only (`/sys/class/tty/ttyACM*` and
 `/sys/bus/usb/devices/*`, Flipper's IDs; no device node is opened until the app connects); with exactly one found and
@@ -776,8 +802,8 @@ one event log). The connected device is attached to the bridge as the C++ app at
 run on the app's own device worker (`argus_api::device::pull`, the same code as `argus-cli chymaera serve --port`),
 between the app's own requests. The console's pull buttons go through the same bridge call (`start_pull`), so the
 console and the API share one pull at a time, and nothing that changes the device starts while a pull reads from it.
-A device in recovery mode is not attached (it has no RPC session). Settings: the style (follow the system, light,
-dark), auto-connect, the update check, hidden files, developer mode, the API's port.
+A device in recovery mode is not attached (it has no RPC session). Settings: the accent (follow the system, or
+purple), auto-connect, the update check, hidden files, developer mode, the API's port.
 
 The Argus tools window (TOOLS in the footer, the Qt app's ARGUS button; `tools.rs`, `app/tools_ui.rs`) is the port of
 `ArgusToolsWindow.qml` and `ArgusController`, on the same `argus_tools` library in process instead of the
@@ -856,9 +882,11 @@ now has an explicit id; the console tests click right after the console opens.
   label, bounds, disabled), so a test clicks "Delete…" as a person would, never by calling the app's methods.
 - Pixel snapshots: egui's own output (the tessellated meshes and textures a GPU would get) is rasterised in software
   and compared with the pictures in `tests/snapshots/` (no GPU, no window, no compositor). A missing snapshot fails;
-  `ARGUS_UPDATE_SNAPSHOTS=1` writes them. Snapshots so far: no device (dark and light), home with the device
-  information and the live screen, home with an update offered, the full-size screen with the keypad, the file manager
-  on the SD card, the end of an operation.
+  `ARGUS_UPDATE_SNAPSHOTS=1` writes them. Snapshots so far: no device (purple, and another accent), home with the device
+  information and the live screen, home with an update offered, a confirmation dialog (erase), the full-size screen
+  with the keypad, the file manager on the SD card, the end of an operation, recovery mode, the partial-success
+  warning, the Developer tab, the tools window, the picker. The rasteriser gives a pixel centre that lies exactly on an
+  edge two triangles share a little slack, so rounding does not leave gaps a GPU would not leave.
 - The fake on a Unix socket, session after session, recording every request as it arrives: the app's reads are the
   C++ helper's (protobuf version, devinfo, `/ext` space, `/ext/Manifest`) and then the stream; the keypad sends
   qFlipper's sequences (press-short-release for a click, press-long-repeat-release for a hold, the keyboard's keys).
@@ -940,7 +968,7 @@ passed on 2026-11-13. Yggdrasil's CI skips it (it has no Argus checkout).
    The legacy update keeps the fresh region data over the backup's (both apps). The firmware's NULL `country_code`
    read is noted for Argus_Firmware (its local PROGRESS.md). The Rust app shows the partial-success warning (snapshot
    `finished-warning.png`); the Qt GUI's is still unseen on a screen.
-5. The UI phase (section 6): `crates/argus-app`, qFlipper's layout and motion in Yggdrasil's style, tested headless
+5. The UI phase (section 6): `crates/argus-app`, qFlipper's layout, design and motion with my accent, tested headless
    (accessibility-tree clicks, software pixel snapshots, a test per confirmation, never a real device or a window).
    Done: shell, device information, live screen and keypad, file manager, backup, restore, erase, the update from the
    server and from a file, the console (capture pulls and list, sessions, notes, the Sarina API toggle, the API with

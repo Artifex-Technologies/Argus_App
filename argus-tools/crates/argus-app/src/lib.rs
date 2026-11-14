@@ -7,6 +7,7 @@ pub mod app;
 pub mod device;
 pub mod discovery;
 pub mod firmware;
+pub mod fonts;
 pub mod net;
 pub mod recovery;
 pub mod settings;

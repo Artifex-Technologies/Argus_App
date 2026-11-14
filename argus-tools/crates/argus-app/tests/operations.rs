@@ -119,6 +119,8 @@ fn erase_needs_its_dialog_and_resets_the_device() {
     actions(&mut h);
     h.click("Erase");
     assert!(h.shows("Erase device?"));
+    h.settle();
+    h.snapshot("dialog-erase");
     cancel(&mut h, &fake);
     h.click("Erase");
     h.click("Erase");

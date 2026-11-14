@@ -1,0 +1,28 @@
+Fonts embedded in argus-app (src/fonts.rs)
+==========================================
+
+argus-app draws qFlipper's look (application/, GPL-3.0) with the fonts below. Each is embedded in the binary; its
+licence allows that in a GPL-3.0 program, and its notice travels with the source here.
+
+| Font | Used for | Where | Licence |
+|---|---|---|---|
+| m5x7 (Daniel Linssen) | labels, values, buttons: the place of qFlipper's HaxrCorp 4089 | this folder | CC0 1.0 (public domain dedication), m5x7-LICENSE.md |
+| Jersey 15 (The Soft Type Project Authors, 2023) | the device name, the main button, titles: the place of qFlipper's Born2bSportyV2 | this folder | SIL Open Font License 1.1, Jersey15-OFL.txt |
+| Pixel Operator (Jayvee Enaguas, 2009-2018) | the text egui lays out itself (dialog messages, settings, the tools window) | this folder | CC0 1.0 (public domain dedication), PixelOperator-LICENSE.txt |
+| ProggySquare (Tristan Grimmer, 2004) | the version and the connection badges, as in qFlipper | application/assets/fonts | MIT, application/assets/fonts/ProggySquare-LICENSE.txt |
+| Share Tech (Carrois Type Design, 2012) | file names, as in qFlipper | application/assets/fonts | SIL Open Font License 1.1, application/assets/fonts/ShareTech-OFL.txt |
+| Share Tech Mono (Carrois Type Design, 2012) | the log, the console, as in qFlipper | application/assets/fonts | SIL Open Font License 1.1, application/assets/fonts/ShareTechMono-OFL.txt |
+
+Sources: m5x7 from the m5x7 1.0.0 crate on crates.io (its licence CC0-1.0, as the author's page on itch.io says; credit
+to Daniel Linssen is asked for and given here). Jersey 15 from github.com/google/fonts (ofl/jersey15). Pixel Operator
+from its author's release (dafont "pixel_operator", 2018-10-04; its name table and LICENSE.txt say CC0 1.0).
+ProggySquare.ttf is byte for byte the one in github.com/bluescan/proggyfonts (ProggyOriginal), whose LICENSE is MIT.
+Share Tech and Share Tech Mono name the SIL OFL 1.1 in their own name tables (Reserved Font Name "Share"; the fonts are
+embedded unchanged).
+
+Not embedded: qFlipper's other two fonts, which the Qt app still loads.
+- HaxrCorp 4089 (sahwar, FontStruct): Creative Commons Attribution-ShareAlike 3.0, which the FSF lists as not
+  compatible with the GPL, and the font is itself a clone of another font (HaxrCorp 4088) of unknown licence.
+- Born2bSportyV2 (JapanYoshi): no licence in the file or anywhere I could find; the Born2bSporty fonts it seems to
+  come from are under FontStruct's non-commercial licence.
+m5x7 and Jersey 15 are the closest freely licensed pixel fonts I found for their places.

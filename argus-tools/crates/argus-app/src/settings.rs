@@ -8,12 +8,13 @@ use std::path::{Path, PathBuf};
 
 pub const FILE: &str = "argus-app.conf";
 
+/// Where the accent colour comes from. The look is qFlipper's, dark only; only its accent changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Style {
-    /// Follow Yggdrasil's Settings > Appearance.
+pub enum Accent {
+    /// Yggdrasil's Settings > Appearance.
     System,
-    Light,
-    Dark,
+    /// Yggdrasil's purple, whatever the desktop says.
+    Purple,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +30,7 @@ pub struct Settings {
     pub api_port: u16,
     /// Shows the developer tab (recovery tools), as the Qt app's developer mode.
     pub developer: bool,
-    pub style: Style,
+    pub accent: Accent,
 }
 
 impl Default for Settings {
@@ -41,7 +42,7 @@ impl Default for Settings {
             auto_connect: true,
             api_port: argus_api::server::DEFAULT_PORT,
             developer: false,
-            style: Style::System,
+            accent: Accent::System,
         }
     }
 }
@@ -70,11 +71,10 @@ impl Settings {
                 "auto_connect" => s.auto_connect = flag(v).unwrap_or(s.auto_connect),
                 "developer" => s.developer = flag(v).unwrap_or(s.developer),
                 "api_port" => s.api_port = v.parse().unwrap_or(s.api_port),
-                "style" => {
-                    s.style = match v {
-                        "light" => Style::Light,
-                        "dark" => Style::Dark,
-                        _ => Style::System,
+                "accent" => {
+                    s.accent = match v {
+                        "purple" => Accent::Purple,
+                        _ => Accent::System,
                     }
                 }
                 _ => {}
@@ -84,13 +84,12 @@ impl Settings {
     }
 
     pub fn render(&self) -> String {
-        let style = match self.style {
-            Style::System => "system",
-            Style::Light => "light",
-            Style::Dark => "dark",
+        let accent = match self.accent {
+            Accent::System => "system",
+            Accent::Purple => "purple",
         };
         format!(
-            "# Argus (Rust app) settings\nupdate_channel = {}\ncheck_updates = {}\nshow_hidden = {}\nauto_connect = {}\napi_port = {}\ndeveloper = {}\nstyle = {style}\n",
+            "# Argus (Rust app) settings\nupdate_channel = {}\ncheck_updates = {}\nshow_hidden = {}\nauto_connect = {}\napi_port = {}\ndeveloper = {}\naccent = {accent}\n",
             self.update_channel, self.check_updates, self.show_hidden, self.auto_connect, self.api_port, self.developer
         )
     }
@@ -129,11 +128,11 @@ mod tests {
             update_channel: "development".into(),
             show_hidden: true,
             api_port: 45000,
-            style: Style::Light,
+            accent: Accent::Purple,
             ..Settings::default()
         };
         assert_eq!(Settings::parse(&s.render()), s);
-        let odd = Settings::parse("api_port = 70000\ncheck_updates = maybe\nupdate_channel = a b\nstyle = blue\n");
+        let odd = Settings::parse("api_port = 70000\ncheck_updates = maybe\nupdate_channel = a b\naccent = blue\nstyle = light\n");
         assert_eq!(odd, Settings::default());
     }
 }

@@ -156,17 +156,13 @@ impl Fake {
 
 // ---------------------------------------------------------------------------- the app, headless
 
+#[derive(Default)]
 pub struct Options {
     pub check_updates: bool,
     pub net: Option<Net>,
-    pub dark: bool,
+    /// The accent colour (None: Yggdrasil's purple).
+    pub accent: Option<[u8; 3]>,
     pub settings: String,
-}
-
-impl Default for Options {
-    fn default() -> Options {
-        Options { check_updates: false, net: None, dark: true, settings: String::new() }
-    }
 }
 
 pub struct Harness {
@@ -193,7 +189,7 @@ pub struct Widget {
 }
 
 impl Harness {
-    /// The app with `devices` as its only devices, its files in `dir`, a fixed dark style.
+    /// The app with `devices` as its only devices, its files in `dir`, a fixed accent.
     pub fn new(dir: &Path, devices: Vec<Found>, opts: Options) -> Harness {
         Harness::with_discovery(dir, Box::new(Fixed(devices)), opts)
     }
@@ -214,7 +210,7 @@ impl Harness {
             library_dir: dir.join("data/captures"),
             // an address nothing listens on: a test that did not start an update server must not reach any
             net: opts.net.unwrap_or_else(|| Net::new("https://127.0.0.1:9".into(), None)),
-            theme: Some(theme::Source::Fixed { dark: opts.dark, accent: None }),
+            theme: Some(theme::Source::Fixed { accent: opts.accent }),
             yggdrasil_config: None,
             timeout: Duration::from_secs(2),
             home,
@@ -526,7 +522,8 @@ pub fn render(prims: &[egui::ClippedPrimitive], textures: &HashMap<TextureId, Co
                     let w0 = edge(v[1].pos, v[2].pos, p) / area;
                     let w1 = edge(v[2].pos, v[0].pos, p) / area;
                     let w2 = 1.0 - w0 - w1;
-                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                    // a little slack, so a pixel centre on an edge two triangles share is not lost to rounding
+                    if w0 < -1e-4 || w1 < -1e-4 || w2 < -1e-4 {
                         continue;
                     }
                     let lerp = |f: &dyn Fn(usize) -> f32| w0 * f(0) + w1 * f(1) + w2 * f(2);

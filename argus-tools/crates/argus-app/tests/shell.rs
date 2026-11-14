@@ -40,11 +40,11 @@ fn without_a_device_it_waits() {
 }
 
 #[test]
-fn the_light_style_follows_the_setting() {
-    let dir = tempdir("light");
-    let mut h = Harness::new(&dir, vec![], Options { dark: false, ..Options::default() });
+fn another_accent_takes_the_place_of_purple() {
+    let dir = tempdir("accent");
+    let mut h = Harness::new(&dir, vec![], Options { accent: Some([40, 160, 90]), ..Options::default() });
     h.settle();
-    h.snapshot("no-device-light");
+    h.snapshot("no-device-green");
 }
 
 #[test]
@@ -162,11 +162,11 @@ fn settings_are_saved_as_they_change() {
     let mut h = Harness::new(&dir, vec![], Options::default());
     h.click("SETTINGS");
     h.wait("the settings", |h| h.has("Show hidden files"));
-    h.click("Light");
+    h.click("Purple");
     h.click("Show hidden files");
     h.click("Done");
     h.settle();
     assert!(!h.shows("Show hidden files"), "closed");
     let saved = std::fs::read_to_string(dir.join("config").join(argus_app::settings::FILE)).unwrap();
-    assert!(saved.contains("style = light") && saved.contains("show_hidden = true"), "{saved}");
+    assert!(saved.contains("accent = purple") && saved.contains("show_hidden = true"), "{saved}");
 }

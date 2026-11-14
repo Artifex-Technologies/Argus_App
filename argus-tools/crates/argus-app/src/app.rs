@@ -1,17 +1,21 @@
-//! The window: qFlipper's layout and motion (application/components/*.qml), drawn in Yggdrasil's style.
+//! The window: qFlipper's layout, look and motion (application/components/*.qml, the DefaultAmber style), with the
+//! user's accent where qFlipper has orange.
 //!
-//! - **Layout** as qFlipper's `MainWindow.qml`: a title strip, one content card (830 x 390), a footer with LOGS, CONSOLE,
-//!   TOOLS (the Argus tools window, `app/tools_ui.rs`), SETTINGS and the status bar, and a log drawer under it. In the card, the stages of `ApplicationBackend` each have
-//!   their overlay: no device (`NoDeviceOverlay`), home with the tabs on the left and the device on the right
-//!   (`HomeOverlay`), an operation in progress (`UpdateOverlay`), its end (`FinishOverlay`, with the partial-success
-//!   warning) and the full-size screen with the keypad (`StreamOverlay`).
+//! - **Layout** as qFlipper's `MainWindow.qml`: the window controls over one content card (830 x 390), a footer with LOGS,
+//!   CONSOLE, TOOLS (the Argus tools window, `app/tools_ui.rs`), SETTINGS and the status bar, and a log drawer under it.
+//!   In the card, the stages of `ApplicationBackend` each have their overlay: no device (`NoDeviceOverlay`), home with
+//!   the tabs on the left and the device on the right (`HomeOverlay`), an operation in progress (`UpdateOverlay`), its
+//!   end or an error (`FinishOverlay`, with the partial-success warning) and the full-size screen with the keypad
+//!   (`StreamOverlay`).
+//! - **Look** is qFlipper's (`theme.rs`, `fonts.rs`, `app/draw.rs`, `app/icons.rs`): black, the grid card with its bright
+//!   border, pixel fonts and capitals, outlined buttons, the dotted tab pane, the device drawn from flipper.svg's
+//!   geometry, qFlipper's pixel icons; dark only. No Flipper artwork: no wordmark (the app's name is in its place), no
+//!   dolphin, no logo.
 //! - **Motion** as the QML's Behaviors: overlays and dialogs fade in 150 ms (InOutQuad), the device view slides between
 //!   the home position and the operation position in 350 ms (InOutQuad), the log drawer opens in 500 ms (InOutQuad), the
-//!   connection spinner turns once in 1.5 s, the keypad's long press comes after 350 ms and repeats every 150 ms. egui
-//!   asks for frames only while something moves: an idle window does no work (no scanline sweep, which qFlipper's grid
-//!   background runs for ever).
-//! - **Look** is Yggdrasil's (`theme.rs`): its palette, light or dark from the desktop, rounded shapes, egui's fonts, the
-//!   user's accent colour where qFlipper has orange. The device is drawn as plain shapes; no Flipper artwork or logo.
+//!   connection spinner turns once in 1.5 s, the progress dots step every 500 ms, the keypad's long press comes after
+//!   350 ms and repeats every 150 ms. egui asks for frames only while something moves: an idle window does no work (no
+//!   scanline sweep, which qFlipper's grid background runs for ever).
 //!
 //! Nothing that changes the device runs without its confirmation dialog: every such action becomes an [`Action`] held by
 //! a [`Dialog`], and only the dialog's confirm button hands it to [`ArgusApp::execute`].
@@ -25,8 +29,8 @@ use std::time::Duration;
 use argus_api::bridge::Bridge;
 use argus_api::eventlog::{severity_name, source_name, Severity, Source as LogSource};
 use eframe::egui::{
-    self, emath::easing, pos2, vec2, Align2, Color32, CornerRadius, FontId, Id, Key, Rect, RichText, Sense, Stroke, StrokeKind,
-    TextureHandle, TextureOptions, UiBuilder, WidgetInfo, WidgetType,
+    self, emath::easing, pos2, vec2, Align2, Color32, FontId, Id, Key, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle,
+    TextureOptions, UiBuilder, WidgetInfo, WidgetType,
 };
 use flipper_rpc::ops::{Entry, FileKind};
 use flipper_rpc::proto::pb_gui::{InputKey, InputType};
@@ -36,12 +40,17 @@ use flipper_updates::directory::Directory;
 use crate::device::{self, Cmd, DeviceInfo, Event, Op, Waker, Worker};
 use crate::discovery::{Discovery, Found};
 use crate::firmware::{self, UpdateState};
+use crate::fonts;
 use crate::net::{Net, NetEvent, PackageSource};
-use crate::settings::{Settings, Style};
+use crate::settings::{Accent, Settings};
 use crate::theme::{self, Palette, Theme};
 
+mod draw;
+mod icons;
 mod picker;
 mod tools_ui;
+
+use draw::{Kind, QButton};
 
 pub use picker::PickFor;
 use picker::Picker;
@@ -55,14 +64,15 @@ const STRIP: f32 = 38.0;
 const CARD_W: f32 = 830.0;
 const CARD_H: f32 = 390.0;
 const LOG_H: f32 = 200.0;
-/// The device view: its size, and where its left edge sits at home and during an operation (card coordinates).
-const DEVICE: [f32; 2] = [360.0, 160.0];
+/// Where the device's left edge sits at home and otherwise (card coordinates): at home from the card's middle, as
+/// qFlipper's; otherwise centred (216 in qFlipper's 806-wide card).
 const DEVICE_HOME_X: f32 = 415.0;
-/// Centred in the card, where qFlipper puts its device (216 in its 800-wide card, for its own picture).
-const DEVICE_BUSY_X: f32 = (CARD_W - DEVICE[0]) / 2.0;
+const DEVICE_BUSY_X: f32 = (CARD_W - draw::DEVICE.x) / 2.0;
 const DEVICE_Y: f32 = 82.0;
 /// Where the name, the main button and its links centre on the home screen.
 const CENTER_X: f32 = 595.0;
+/// ConfirmationDialog.qml's width.
+const DIALOG_W: f32 = 430.0;
 
 const FADE: f32 = 0.150;
 const SLIDE: f32 = 0.350;
@@ -329,7 +339,7 @@ fn ease(t: f32) -> f32 {
 impl ArgusApp {
     pub fn new(cfg: Config) -> ArgusApp {
         let settings = Settings::load(&cfg.config_dir);
-        let source = cfg.theme.clone().unwrap_or_else(|| style_source(settings.style, cfg.yggdrasil_config.clone()));
+        let source = cfg.theme.clone().unwrap_or_else(|| accent_source(settings.accent, cfg.yggdrasil_config.clone()));
         let bridge = Arc::new(Mutex::new(Bridge::new(&cfg.datastore, cfg.library_dir.clone())));
         let (net_tx, net_rx) = mpsc::channel();
         let (rec_tx, rec_rx) = mpsc::channel();
@@ -408,7 +418,7 @@ impl ArgusApp {
             self.logline(format!("Cannot save the settings: {e}"));
         }
         if self.cfg.theme.is_none() {
-            self.theme.set_source(style_source(self.settings.style, self.cfg.yggdrasil_config.clone()));
+            self.theme.set_source(accent_source(self.settings.accent, self.cfg.yggdrasil_config.clone()));
         }
     }
 
@@ -1242,8 +1252,8 @@ impl ArgusApp {
     // ------------------------------------------------------------------ drawing
 
     fn lcd(&self) -> Lcd {
-        let p = theme::palette(self.theme.dark, self.theme.accent);
-        Lcd { background: mix(p.accent, Color32::WHITE, 0.62), pixel: mix(p.accent, Color32::BLACK, 0.85) }
+        let p = theme::palette(self.theme.accent);
+        Lcd { background: p.accent, pixel: p.dark1 }
     }
 
     /// The whole window, once a frame. `main` calls it from eframe; the tests call it headless.
@@ -1253,7 +1263,10 @@ impl ArgusApp {
             let c = ctx.clone();
             self.waker = Some(Arc::new(move || c.request_repaint()));
         }
-        let pal = self.theme.frame(&ctx);
+        let Some(pal) = self.theme.frame(&ctx) else {
+            ui.painter().rect_filled(ui.max_rect(), 0.0, Color32::BLACK);
+            return;
+        };
         let now = ctx.input(|i| i.time);
         self.poll();
         self.scan(now);
@@ -1262,15 +1275,15 @@ impl ArgusApp {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
 
+        // MainWindow.qml: a black window with a dim accent border
         let full = ui.max_rect();
-        ui.painter().rect_filled(full, 0.0, pal.bg);
+        ui.painter().rect_filled(full, 0.0, Color32::BLACK);
+        ui.painter().rect_stroke(full, 10.0, Stroke::new(2.0, pal.medium3), StrokeKind::Inside);
         let origin = full.min;
 
-        // the title strip: name, version, window buttons; dragging it moves the window
-        let strip = Rect::from_min_size(origin, vec2(full.width(), STRIP));
-        self.title_strip(ui, strip, &pal);
-
         let card = Rect::from_min_size(origin + vec2(15.0, STRIP), vec2(CARD_W, CARD_H));
+        let strip = Rect::from_min_size(origin, vec2(full.width(), STRIP));
+        self.title_strip(ui, strip, card, &pal);
         self.card(ui, card, &pal);
 
         let footer = Rect::from_min_size(pos2(card.left(), card.bottom() + 13.0), vec2(CARD_W, 42.0));
@@ -1278,7 +1291,7 @@ impl ArgusApp {
 
         let open = ctx.animate_bool_with_time_and_easing(Id::new("log-drawer"), self.log_open, DRAWER, ease);
         if open > 0.0 {
-            let r = Rect::from_min_size(pos2(card.left(), footer.bottom() + 14.0), vec2(CARD_W, (LOG_H - 28.0) * open));
+            let r = Rect::from_min_size(pos2(card.left(), footer.bottom() + 14.0), vec2(CARD_W, (LOG_H - 42.0) * open));
             self.log_drawer(ui, r, &pal);
         }
 
@@ -1287,67 +1300,80 @@ impl ArgusApp {
         self.settings_ui(&ctx, &pal);
         if let Some(op) = self.busy {
             if !op.is_big() {
-                egui::Modal::new(Id::new("busy")).show(&ctx, |ui| {
-                    ui.set_width(300.0);
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().size(18.0));
-                        ui.label(RichText::new("Please wait").strong());
+                // ProgressDialog.qml: "Please wait" over the window
+                modal(Id::new("busy"), &pal).show(&ctx, |ui| {
+                    ui.set_width(330.0);
+                    dialog_header(ui, "Please wait", &pal);
+                    egui::Frame::NONE.inner_margin(20).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::hover());
+                            let a = (ui.ctx().input(|i| i.time) / 1.5).fract() as f32 * std::f32::consts::TAU;
+                            draw::spinner(ui.painter(), r.center(), a, &pal);
+                            ui.ctx().request_repaint();
+                            ui.label(RichText::new(op.title()).color(pal.accent));
+                        });
                     });
-                    ui.label(op.title());
                 });
             }
         }
     }
 
-    fn title_strip(&mut self, ui: &mut egui::Ui, strip: Rect, pal: &Palette) {
+    /// WindowControls.qml: minimize and close at the right, over the card's edge; the rest of the strip moves the window.
+    fn title_strip(&mut self, ui: &mut egui::Ui, strip: Rect, card: Rect, pal: &Palette) {
         let drag = ui.interact(strip, Id::new("title-drag"), Sense::click_and_drag());
         if drag.drag_started_by(egui::PointerButton::Primary) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
-        let p = ui.painter();
-        p.text(strip.left_center() + vec2(18.0, 0.0), Align2::LEFT_CENTER, "Argus", FontId::proportional(15.0), pal.text);
-        p.text(strip.left_center() + vec2(68.0, 1.0), Align2::LEFT_CENTER, VERSION, FontId::proportional(12.0), pal.dim);
-        // traffic lights in Yggdrasil's order (minimize, maximize, close)
-        let colours = [
-            (Color32::from_rgb(0xfe, 0xbc, 0x2e), "Minimize"),
-            (Color32::from_rgb(0x28, 0xc8, 0x40), "Maximize"),
-            (Color32::from_rgb(0xff, 0x5f, 0x57), "Close"),
-        ];
-        for (i, (c, tip)) in colours.iter().enumerate() {
-            let centre = pos2(strip.right() - 76.0 + i as f32 * 21.0, strip.center().y);
-            let r = Rect::from_center_size(centre, vec2(16.0, 16.0));
-            let resp = ui.interact(r, Id::new(("window-button", i)), Sense::click()).on_hover_text(*tip);
-            resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, *tip));
-            ui.painter().circle_filled(centre, 6.5, *c);
+        let y = strip.top() + 2.0 + (card.top() - strip.top() - 2.0) / 2.0;
+        for (i, (icon, tip)) in [(&icons::MINIMIZE, "Minimize"), (&icons::CLOSE, "Close")].into_iter().enumerate() {
+            let r = Rect::from_center_size(pos2(card.right() - 10.0 - (1 - i) as f32 * 32.0, y), vec2(20.0, 20.0));
+            let resp = ui.interact(r, Id::new(("window-button", i)), Sense::click());
+            resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tip));
+            let down = resp.is_pointer_button_down_on();
+            let p = ui.painter();
+            // the _hover and _down pictures: filled, the glyph dark; close turns red
+            let fill = match (i, down, resp.hovered()) {
+                (1, true, _) => Some(pal.red1),
+                (1, false, true) => Some(pal.red3),
+                (_, true, _) => Some(pal.light1),
+                (_, false, true) => Some(pal.accent),
+                _ => None,
+            };
+            if let Some(f) = fill {
+                p.rect_filled(r, 0.0, f);
+            }
+            icon.draw(p, r.center(), if fill.is_some() { pal.dark1 } else { pal.accent });
             if resp.clicked() {
-                let cmd = match i {
-                    0 => egui::ViewportCommand::Minimized(true),
-                    1 => egui::ViewportCommand::Maximized(!ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false))),
-                    _ => egui::ViewportCommand::Close,
-                };
-                ui.ctx().send_viewport_cmd(cmd);
+                ui.ctx().send_viewport_cmd(if i == 0 { egui::ViewportCommand::Minimized(true) } else { egui::ViewportCommand::Close });
             }
         }
     }
 
     fn card(&mut self, ui: &mut egui::Ui, card: Rect, pal: &Palette) {
         let ctx = ui.ctx().clone();
+        // GridBackground.qml: a dark gradient, a still grid of 30 cells across (its scanline sweep stays off: an idle
+        // window does no work), a 3 px bright border
         let p = ui.painter().with_clip_rect(card);
-        p.rect_filled(card, 12.0, pal.sidebar);
-        // qFlipper's grid, still and faint, in the accent colour
-        let grid = Color32::from_rgba_unmultiplied(pal.accent.r(), pal.accent.g(), pal.accent.b(), 14);
-        let cell = CARD_W / 30.0;
-        let mut x = card.left() + cell;
-        while x < card.right() {
-            p.line_segment([pos2(x.floor(), card.top()), pos2(x.floor(), card.bottom())], Stroke::new(1.0, grid));
-            x += cell;
+        draw::gradient_polygon(&p, &draw::rounded(card, 9.0), &[(card.top(), pal.card_top), (card.bottom(), pal.card_bottom)]);
+        let inner = card.shrink(3.0);
+        let grid = Stroke::new(2.0, pal.grid.gamma_multiply(0.15));
+        let cell = inner.width() / 30.0;
+        let gp = p.with_clip_rect(inner);
+        let mut k = cell;
+        while k < inner.width() {
+            let x = inner.left() + k.floor();
+            gp.line_segment([pos2(x, inner.top()), pos2(x, inner.bottom())], grid);
+            k += cell;
         }
-        let mut y = card.top() + cell;
-        while y < card.bottom() {
-            p.line_segment([pos2(card.left(), y.floor()), pos2(card.right(), y.floor())], Stroke::new(1.0, grid));
-            y += cell;
+        let mut k = cell;
+        while k < inner.height() {
+            let y = inner.top() + k.floor();
+            gp.line_segment([pos2(inner.left(), y), pos2(inner.right(), y)], grid);
+            k += cell;
         }
-        p.rect_stroke(card, 12.0, Stroke::new(1.0, pal.border), StrokeKind::Inside);
+        p.rect_stroke(card, 9.0, Stroke::new(3.0, pal.accent), StrokeKind::Inside);
+        // the version, top right, half strength (MainWindow.qml's versionLabel)
+        p.text(card.right_top() + vec2(-16.0, 10.0), Align2::RIGHT_TOP, VERSION, fonts::proggy(), pal.accent.gamma_multiply(0.5));
 
         let fade = |name: &str, on: bool| ctx.animate_bool_with_time_and_easing(Id::new(("overlay", name)), on, FADE, ease);
         let console = fade("console", self.console);
@@ -1359,14 +1385,15 @@ impl ArgusApp {
         let error = fade("error", matches!(self.stage, Stage::Error { .. }) && !self.covered());
         let stream = fade("stream", self.stage == Stage::Streaming && !self.covered());
 
-        // the device view: at home on the right, during an operation further left; it slides between them
-        let device_shown = matches!(self.stage, Stage::Ready | Stage::Busy(_) | Stage::Finished { .. }) && !self.covered();
+        // the device (DeviceWidget.qml): shown but while streaming or after an error; at home on the right, else
+        // centred further left, sliding between the two
+        let device_shown = !matches!(self.stage, Stage::Streaming | Stage::Error { .. }) && !self.covered();
         let device_alpha = ctx.animate_bool_with_time_and_easing(Id::new("device-alpha"), device_shown, SLIDE, ease);
         let at_home = ctx.animate_bool_with_time_and_easing(Id::new("device-x"), self.stage == Stage::Ready, SLIDE, ease);
         if device_alpha > 0.0 {
             let x = DEVICE_BUSY_X + (DEVICE_HOME_X - DEVICE_BUSY_X) * at_home;
-            let r = Rect::from_min_size(card.min + vec2(x, DEVICE_Y), vec2(DEVICE[0], DEVICE[1]));
-            self.layer(ui, "device_alpha", card, device_alpha, device_shown, |app, ui| app.device_view(ui, r, pal));
+            let at = card.min + vec2(x.round(), DEVICE_Y);
+            self.layer(ui, "device_alpha", card, device_alpha, device_shown, |app, ui| app.device_view(ui, at, pal));
         }
         if waiting > 0.0 {
             self.layer(ui, "waiting", card, waiting, matches!(self.stage, Stage::Waiting | Stage::Connecting), |app, ui| {
@@ -1398,14 +1425,15 @@ impl ArgusApp {
         }
     }
 
-    /// One overlay at `alpha`; an overlay that is fading out takes no input. Each has an explicit id (an `id_salt` is
-    /// not enough: egui derives the widgets' automatic ids from the parent's counter), so its widgets keep their ids
-    /// while other overlays come and go (a press and its release must meet the same widget).
+    /// One overlay at `alpha`; an overlay that is fading out, or under a dialog, takes no input. Each has an explicit id
+    /// (an `id_salt` is not enough: egui derives the widgets' automatic ids from the parent's counter), so its widgets
+    /// keep their ids while other overlays come and go (a press and its release must meet the same widget).
     fn layer(&mut self, ui: &mut egui::Ui, name: &str, rect: Rect, alpha: f32, active: bool, f: impl FnOnce(&mut Self, &mut egui::Ui)) {
+        let under_dialog = self.dialog.is_some() || self.picker.is_some() || self.settings_open;
         ui.scope_builder(UiBuilder::new().id(Id::new(("overlay", name))).max_rect(rect), |ui| {
-            ui.set_clip_rect(rect);
+            ui.set_clip_rect(rect.shrink(3.0));
             ui.multiply_opacity(alpha);
-            if !active {
+            if !active || under_dialog {
                 ui.disable();
             }
             f(self, ui);
@@ -1427,49 +1455,24 @@ impl ArgusApp {
         self.texture.as_ref().map(TextureHandle::id)
     }
 
-    /// The device, in neutral shapes: a rounded body, the screen (live when the stream runs), a round keypad.
-    fn device_view(&mut self, ui: &mut egui::Ui, r: Rect, pal: &Palette) {
-        let lcd = self.lcd();
+    /// The device as qFlipper draws it (flipper.svg's outline, without Flipper's wordmark), its screen live while the
+    /// stream runs; a click on the live screen opens it full size.
+    fn device_view(&mut self, ui: &mut egui::Ui, at: egui::Pos2, pal: &Palette) {
         let tex = if self.stream_wanted { self.screen_texture(ui.ctx()) } else { None };
-        let p = ui.painter();
-        p.rect_filled(r, 30.0, pal.field);
-        p.rect_stroke(r, 30.0, Stroke::new(1.5, pal.border), StrokeKind::Inside);
-        let bezel = Rect::from_min_size(r.min + vec2(20.0, 16.0), vec2(256.0 + 16.0, 128.0 + 16.0));
-        p.rect_filled(bezel, 10.0, pal.strip);
-        let screen = Rect::from_min_size(bezel.min + vec2(8.0, 8.0), vec2(256.0, 128.0));
-        p.rect_filled(screen, 3.0, lcd.background);
-        match (&self.stage, tex) {
-            (Stage::Finished { warning, .. }, _) => {
-                let c = screen.center();
-                let ink = Stroke::new(6.0, lcd.pixel);
-                if warning.is_some() {
-                    p.text(c, Align2::CENTER_CENTER, "!", FontId::proportional(64.0), lcd.pixel);
-                } else {
-                    p.line_segment([c + vec2(-34.0, 0.0), c + vec2(-10.0, 24.0)], ink);
-                    p.line_segment([c + vec2(-10.0, 24.0), c + vec2(36.0, -26.0)], ink);
-                }
-            }
-            (_, Some(tex)) => {
-                p.image(tex, screen, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-            }
-            _ => {
-                p.text(screen.center(), Align2::CENTER_CENTER, "ARGUS", FontId::monospace(26.0), lcd.pixel);
-            }
-        }
-        // the keypad: a ring with its centre button, and back below it
-        let c = pos2(r.right() - 46.0, r.top() + 66.0);
-        p.circle_stroke(c, 30.0, Stroke::new(1.5, pal.border));
-        p.circle_filled(c, 11.0, pal.strip);
-        p.circle_filled(pos2(r.right() - 26.0, r.bottom() - 34.0), 9.0, pal.strip);
-        if self.recovery() {
-            p.circle_filled(pos2(r.right() - 70.0, r.top() + 18.0), 4.0, pal.blue);
-        }
-        // the live screen opens full size on a click, as qFlipper's
+        let screen = match (&self.stage, tex) {
+            (Stage::Finished { warning: Some(_) }, _) => draw::Screen::Warning,
+            (Stage::Finished { warning: None }, _) => draw::Screen::Success,
+            _ if self.recovery() => draw::Screen::Recovery,
+            (_, Some(t)) => draw::Screen::Live(t),
+            _ => draw::Screen::Blank,
+        };
+        let lcd = draw::device(ui.painter(), at, pal, screen, self.recovery());
         if self.stage == Stage::Ready && tex.is_some() {
-            let resp = ui.interact(screen, Id::new("open-screen"), Sense::click()).on_hover_text("Open the screen");
+            let resp = ui.interact(lcd, Id::new("open-screen"), Sense::click()).on_hover_text("Open the screen");
             resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Open the screen"));
             if resp.hovered() {
-                ui.painter().rect_stroke(screen.expand(2.0), 4.0, Stroke::new(2.0, pal.accent), StrokeKind::Outside);
+                // ExpandWidget.qml: a frame around the screen while the pointer is on it
+                ui.painter().rect_stroke(lcd.expand(4.0), 3.0, Stroke::new(2.0, pal.light1), StrokeKind::Middle);
             }
             if resp.clicked() {
                 self.stage = Stage::Streaming;
@@ -1479,35 +1482,30 @@ impl ArgusApp {
 
     // ---------------------------------------------------------------- overlays
 
+    /// NoDeviceOverlay.qml: the device, the plug pointing at it, "Connect your Flipper", the spinner while connecting.
     fn waiting_ui(&mut self, ui: &mut egui::Ui, card: Rect, pal: &Palette) {
-        let c = card.center();
-        let p = ui.painter();
-        // a plug: the cable and the connector, plain shapes
-        let plug = Rect::from_center_size(c + vec2(0.0, -70.0), vec2(56.0, 34.0));
-        p.line_segment([plug.left_center() + vec2(-120.0, 0.0), plug.left_center()], Stroke::new(4.0, pal.dim));
-        p.rect_filled(plug, 8.0, pal.field);
-        p.rect_stroke(plug, 8.0, Stroke::new(2.0, pal.accent), StrokeKind::Inside);
-        p.rect_filled(Rect::from_min_size(plug.right_center() + vec2(0.0, -8.0), vec2(16.0, 16.0)), 3.0, pal.accent);
-        label_at(ui, c + vec2(0.0, -6.0), Align2::CENTER_CENTER, "Connect your Flipper Zero", FontId::proportional(24.0), pal.text);
+        draw::plug(ui.painter(), pos2(card.right() - 216.0, card.top() + 145.0), pal);
+        caps_at(
+            ui,
+            pos2(card.center().x, card.top() + 260.0),
+            Align2::CENTER_TOP,
+            "Connect your Flipper Zero",
+            fonts::sporty(fonts::TITLE),
+            pal.accent,
+        );
         if self.stage == Stage::Connecting {
             // qFlipper's spinner: one turn in 1.5 s, only while a device is being opened
-            let t = ui.ctx().input(|i| i.time);
-            let a = (t / 1.5).fract() as f32 * std::f32::consts::TAU;
-            let centre = c + vec2(0.0, 40.0);
-            for k in 0..8 {
-                let ang = a + k as f32 * std::f32::consts::TAU / 8.0;
-                let col = Color32::from_rgba_unmultiplied(pal.accent.r(), pal.accent.g(), pal.accent.b(), 40 + k * 26);
-                ui.painter().circle_filled(centre + vec2(ang.cos(), ang.sin()) * 14.0, 3.0, col);
-            }
+            let a = (ui.ctx().input(|i| i.time) / 1.5).fract() as f32 * std::f32::consts::TAU;
+            draw::spinner(ui.painter(), card.right_bottom() + vec2(-43.0, -33.0), a, pal);
             ui.ctx().request_repaint();
         } else if !self.found.is_empty() && (!self.settings.auto_connect || self.found.len() > 1 || self.failed.is_some()) {
-            let list = Rect::from_center_size(c + vec2(0.0, 70.0), vec2(460.0, 110.0));
+            let list = Rect::from_min_size(pos2(card.center().x - 260.0, card.top() + 312.0), vec2(520.0, 70.0));
             ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 1))).max_rect(list), |ui| {
                 for f in self.found.clone() {
                     ui.horizontal(|ui| {
                         let what = if f.is_recovery() { "Recovery mode" } else { "Flipper Zero" };
-                        ui.label(RichText::new(format!("{what} at {}", f.location())).color(pal.dim));
-                        if ui.button("Connect").clicked() {
+                        ui.label(RichText::new(format!("{what} at {}", f.location())).color(pal.accent));
+                        if ui.add(QButton::fit("Connect", Kind::Small { highlighted: true }, pal, 28.0)).clicked() {
                             self.connect(f.clone());
                         }
                     });
@@ -1516,34 +1514,37 @@ impl ArgusApp {
         }
     }
 
+    /// HomeOverlay.qml: the tabs and their pane on the left; the name, the connection badges, the main button and its
+    /// links over and under the device on the right.
     fn home_ui(&mut self, ui: &mut egui::Ui, card: Rect, pal: &Palette) {
         let name = if self.recovery() { "Recovery mode".to_string() } else { self.device_name() };
-        let top = card.top() + 19.0;
-        label_at(ui, pos2(card.left() + CENTER_X - 4.0, top + 22.0), Align2::RIGHT_BOTTOM, &name, FontId::proportional(28.0), pal.text);
-        let (state, colour) = if self.recovery() { ("Recovery mode", pal.blue) } else { ("Connected", pal.green) };
-        label_at(ui, pos2(card.left() + CENTER_X + 6.0, top + 4.0), Align2::LEFT_TOP, state, FontId::proportional(13.0), colour);
+        let (state_text, state_colour) = if self.recovery() { ("Recovery mode", pal.blue) } else { ("Connected", pal.green) };
         let loc = self.current.as_ref().map(Found::location).unwrap_or_default();
-        label_at(ui, pos2(card.left() + CENTER_X + 6.0, top + 20.0), Align2::LEFT_TOP, &loc, FontId::proportional(12.0), pal.dim);
+        // the name ends 4 px left of the centre line, the badges start 4 px right of it; a long location moves both left
+        let badge_w = ui.painter().layout_no_wrap(loc.clone(), fonts::proggy(), Color32::WHITE).size().x + 6.0;
+        let centre = card.left() + CENTER_X + (card.width() - (CENTER_X + badge_w + 12.0)).min(0.0);
+        let top = card.top() + 19.0;
+        label_at(ui, pos2(centre - 4.0, top), Align2::RIGHT_TOP, &name, fonts::sporty(fonts::TITLE), pal.accent);
+        let baseline = top + 36.0;
+        badge(ui, pos2(centre + 4.0, baseline - 35.0), state_text, true, Some(&icons::USB), state_colour);
+        badge(ui, pos2(centre + 4.0, baseline - 15.0), &loc, false, None, state_colour);
 
-        // the main button and its links; in recovery mode it repairs from local files
+        // the main button (MainButton.qml): green to update, blue to repair, else the accent; in recovery mode it
+        // repairs from the update server
         let state = if self.recovery() { UpdateState::CanRepair } else { self.update_state() };
-        let fill = match state {
-            UpdateState::CanUpdate => pal.green,
-            UpdateState::CanRepair => pal.blue,
-            _ => pal.accent,
+        let kind = match state {
+            UpdateState::CanUpdate => Kind::Green,
+            UpdateState::CanRepair => Kind::Blue,
+            _ => Kind::Normal,
         };
-        let button = Rect::from_center_size(pos2(card.left() + CENTER_X, card.top() + 290.0), vec2(220.0, 48.0));
+        let button = Rect::from_min_size(pos2(card.left() + CENTER_X - 140.0, card.top() + 265.0), vec2(280.0, 56.0));
         let enabled = state.enabled() && (self.worker.is_some() || self.recovery()) && !self.pulling();
-        let resp = ui.put(
-            button,
-            egui::Button::new(RichText::new(state.button().to_uppercase()).size(20.0).color(if enabled {
-                pal.on_accent()
-            } else {
-                pal.dim
-            }))
-            .fill(if enabled { fill } else { pal.field })
-            .corner_radius(CornerRadius::same(12)),
-        );
+        let label = state.button().to_uppercase();
+        let mut main = QButton::main(&label, kind, pal);
+        if matches!(state, UpdateState::Error(_)) {
+            main = main.icon(&icons::UPDATE);
+        }
+        let resp = ui.add_enabled_ui(enabled, |ui| ui.put(button, main)).inner;
         let resp = if state.tooltip().is_empty() { resp } else { resp.on_hover_text(state.tooltip()) };
         if resp.clicked() && enabled {
             if let UpdateState::Error(_) = state {
@@ -1554,224 +1555,278 @@ impl ArgusApp {
                 self.ask_update();
             }
         }
-        let links_y = button.bottom() + 16.0;
-        if let Some(label) = self.latest_label() {
-            let r = Rect::from_min_size(pos2(card.left() + CENTER_X - 206.0, links_y - 9.0), vec2(200.0, 18.0));
-            ui.scope_builder(
-                UiBuilder::new().id(Id::new(("scope", 2))).max_rect(r).layout(egui::Layout::right_to_left(egui::Align::Center)),
-                |ui| {
-                    ui.label(RichText::new(label).color(pal.accent));
-                },
-            );
+        // the links under it (LinkButton.qml): the channel's version in the channel's colour, "Install from file"
+        let links_y = button.bottom() + 5.0;
+        if let Some(text) = self.latest_label() {
+            let colour = match self.settings.update_channel.as_str() {
+                "release" => pal.green,
+                "development" => pal.red,
+                "release-candidate" => Color32::from_rgb(0x8a, 0x2b, 0xe2),
+                _ => pal.accent,
+            };
+            let size = draw::link_size(ui, &text);
+            let r = Rect::from_min_size(pos2(card.left() + CENTER_X - 6.0 - size.x, links_y), size);
+            ui.put(r, QButton::new(&text, Kind::Link(colour), pal, size));
         }
         if !self.recovery() {
-            let r = Rect::from_min_size(pos2(card.left() + CENTER_X + 6.0, links_y - 9.0), vec2(200.0, 18.0));
-            ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 3))).max_rect(r), |ui| {
-                if ui.add_enabled(self.worker.is_some(), egui::Button::new("Install from file").frame(false)).clicked() {
-                    self.ask(Action::InstallFile);
-                }
-            });
+            let size = draw::link_size(ui, "Install from file");
+            let r = Rect::from_min_size(pos2(card.left() + CENTER_X + 6.0, links_y), size);
+            let can = self.worker.is_some();
+            if ui.add_enabled_ui(can, |ui| ui.put(r, QButton::new("Install from file", Kind::Link(pal.accent), pal, size))).inner.clicked()
+            {
+                self.ask(Action::InstallFile);
+            }
         }
 
-        // the tabs and their pane on the left
-        let tabs = Rect::from_min_size(card.min + vec2(28.0, 22.0), vec2(360.0, 34.0));
-        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 4))).max_rect(tabs), |ui| {
-            ui.horizontal(|ui| {
-                let mut tabs = vec![(Tab::Info, "Info"), (Tab::Actions, "Actions"), (Tab::Files, "Files")];
-                if self.settings.developer {
-                    tabs.push((Tab::Developer, "Developer"));
-                } else if self.tab == Tab::Developer {
-                    self.tab = Tab::Info;
-                }
-                for (t, label) in tabs {
-                    let enabled = !(t == Tab::Files && self.recovery());
-                    let on = self.tab == t;
-                    let b = egui::Button::new(RichText::new(label).color(if on { pal.on_accent() } else { pal.text }))
-                        .fill(if on { pal.accent } else { pal.field })
-                        .min_size(vec2(80.0, 30.0));
-                    if ui.add_enabled(enabled, b).clicked() {
-                        self.tab = t;
-                    }
-                }
-            });
-        });
-        let pane = Rect::from_min_size(card.min + vec2(28.0, 62.0), vec2(372.0, 306.0));
-        ui.painter().rect_filled(pane, 12.0, pal.bg);
-        ui.painter().rect_stroke(pane, 12.0, Stroke::new(1.0, pal.border), StrokeKind::Inside);
-        let inner = pane.shrink(10.0);
-        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 5))).max_rect(inner), |ui| match self.tab {
-            Tab::Info => self.info_tab(ui, pal),
-            Tab::Actions => self.actions_tab(ui, pal),
-            Tab::Files => self.files_tab(ui, pal),
-            Tab::Developer => self.developer_tab(ui, pal),
-        });
-    }
-
-    fn info_tab(&mut self, ui: &mut egui::Ui, pal: &Palette) {
-        let Some(i) = self.info.clone() else {
-            ui.label(RichText::new("Recovery mode").color(pal.blue));
-            ui.label(RichText::new("The device is in its bootloader (USB DFU). Repair it from the Actions tab.").color(pal.dim));
-            return;
-        };
-        let stack = match i.stack_type {
-            1 => "Full".to_string(),
-            2 => "HCI".into(),
-            3 => "Lite".into(),
-            n => n.to_string(),
-        };
-        let rows = [
-            ("Firmware", i.firmware_shown().to_string()),
-            ("Build Date", short_date(&i.build_date)),
-            ("SD Card", if i.sd_present { format!("{}% Free", i.sd_free) } else { "Not present".into() }),
-            ("Databases", if i.assets_installed { "Installed".into() } else { "Missing".into() }),
-            ("Hardware", i.hardware.clone()),
-            ("Radio FW", if i.radio_version.is_empty() { "Corrupted".into() } else { format!("{} {stack}", i.radio_version) }),
+        // the tabs (TabBar.qml, TabButton.qml): icons, overlapping by their border
+        let mut tabs = vec![
+            (Tab::Info, "Info", &icons::INFO, "Device information"),
+            (Tab::Actions, "Actions", &icons::WRENCH, "Advanced controls"),
+            (Tab::Files, "Files", &icons::FILE, "File manager"),
         ];
-        egui::Grid::new("info-grid").num_columns(2).spacing(vec2(18.0, 10.0)).show(ui, |ui| {
-            for (k, v) in rows {
-                ui.label(RichText::new(k).color(pal.dim).size(15.0));
-                ui.label(RichText::new(v).size(15.0));
-                ui.end_row();
+        if self.settings.developer {
+            tabs.push((Tab::Developer, "Developer", &icons::DEVELOPER, "Developer mode. Use with caution!"));
+        } else if self.tab == Tab::Developer {
+            self.tab = Tab::Info;
+        }
+        // the pane under them (TabPane.qml), as big as its page; the file manager's is wide and black, over the device
+        let (w, h) = match self.tab {
+            Tab::Info => (322.0, if self.info.is_some() { 195.0 } else { 104.0 }),
+            Tab::Actions => (322.0, if self.recovery() { 196.0 } else { 214.0 }),
+            Tab::Files => (749.0, 306.0),
+            Tab::Developer => (322.0, 196.0),
+        };
+        let pane = Rect::from_min_size(card.min + vec2(28.0, 67.0), vec2(w, h));
+        draw::pane(ui.painter(), pane, if self.tab == Tab::Files { Color32::BLACK } else { Color32::TRANSPARENT }, pal);
+        for (i, (t, label, icon, tip)) in tabs.into_iter().enumerate() {
+            let r = Rect::from_min_size(card.min + vec2(28.0 + i as f32 * 45.0, 28.0), vec2(47.0, 41.0));
+            let enabled = !(t == Tab::Files && self.recovery());
+            if draw::tab(ui, r, icon, label, self.tab == t, enabled, pal).on_hover_text(tip).clicked() {
+                self.tab = t;
             }
+        }
+        let inner = Rect::from_min_max(pane.min + vec2(2.0, 9.0), pane.max - vec2(2.0, 9.0));
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 5))).max_rect(inner), |ui| match self.tab {
+            Tab::Info => self.info_tab(ui, inner, pal),
+            Tab::Actions => self.actions_tab(ui, inner, pal),
+            Tab::Files => self.files_tab(ui, inner, pal),
+            Tab::Developer => self.developer_tab(ui, inner, pal),
         });
     }
 
-    fn actions_tab(&mut self, ui: &mut egui::Ui, pal: &Palette) {
-        if self.recovery() {
-            ui.label(RichText::new("Recovery").color(pal.dim));
-            let size = vec2(150.0, 32.0);
-            ui.horizontal(|ui| {
+    /// DeviceInfo.qml: labels right-aligned in the dim accent, values in the light one (the firmware row bright).
+    fn info_tab(&mut self, ui: &mut egui::Ui, inner: Rect, pal: &Palette) {
+        let rows: Vec<(&str, String, bool)> = match self.info.clone() {
+            None => vec![("Mode", "Recovery".to_string(), true)],
+            Some(i) => {
+                let stack = match i.stack_type {
+                    1 => "Full".to_string(),
+                    2 => "HCI".into(),
+                    3 => "Lite".into(),
+                    n => n.to_string(),
+                };
+                vec![
+                    ("Firmware", i.firmware_shown().to_string(), true),
+                    ("Build Date", short_date(&i.build_date), true),
+                    ("SD Card", if i.sd_present { format!("{}% Free", i.sd_free) } else { "Not present".into() }, i.sd_present),
+                    ("Databases", if i.assets_installed { "Installed".into() } else { "Missing".into() }, i.assets_installed),
+                    ("Hardware", i.hardware.clone(), true),
+                    (
+                        "Radio FW",
+                        if i.radio_version.is_empty() { "Corrupted".into() } else { format!("{} {stack}", i.radio_version) },
+                        !i.radio_version.is_empty(),
+                    ),
+                ]
+            }
+        };
+        let font = fonts::label();
+        let width = |t: &str| ui.painter().layout_no_wrap(fonts::pixel_text(t), font.clone(), Color32::WHITE).size().x;
+        let lw = rows.iter().map(|r| width(r.0)).fold(0.0, f32::max);
+        let vw = rows.iter().map(|r| width(&r.1)).fold(0.0, f32::max);
+        let left = inner.left() + ((318.0 - (lw + 30.0 + vw)) / 2.0).floor().max(0.0) + 5.0;
+        for (k, (label, value, good)) in rows.iter().enumerate() {
+            let y = inner.top() + 10.0 + k as f32 * 27.0;
+            let (lc, vc) = if k == 0 { (pal.accent, pal.accent) } else { (pal.medium4, pal.light3) };
+            caps_at(ui, pos2(left + lw, y), Align2::RIGHT_TOP, label, font.clone(), lc);
+            caps_at(ui, pos2(left + lw + 30.0, y), Align2::LEFT_TOP, value, font.clone(), if *good { vc } else { pal.red3 });
+        }
+        if self.info.is_none() {
+            let r = Rect::from_min_size(pos2(inner.left() + 10.0, inner.top() + 44.0), vec2(inner.width() - 20.0, 40.0));
+            ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 12))).max_rect(r), |ui| {
+                ui.label(RichText::new("The device is in its bootloader (USB DFU). Repair it from the Actions tab.").color(pal.medium4));
+            });
+        }
+    }
+
+    /// DeviceActions.qml: the update channel, then backup, restore, erase and reinstall as small buttons.
+    fn actions_tab(&mut self, ui: &mut egui::Ui, inner: Rect, pal: &Palette) {
+        let content = inner.shrink2(vec2(10.0, 10.0));
+        let half = vec2((content.width() - 10.0) / 2.0, 34.0);
+        let full = vec2(content.width(), 34.0);
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 13))).max_rect(content), |ui| {
+            ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
+            if self.recovery() {
+                badge_here(ui, "Recovery", pal.accent);
                 if ui
-                    .add(egui::Button::new("Repair…").min_size(size))
+                    .add(QButton::new("Repair…", Kind::Small { highlighted: false }, pal, full).icon(&icons::UPDATE))
                     .on_hover_text("Install the latest firmware from the update server.")
                     .clicked()
                 {
                     self.ask(Action::Repair);
                 }
                 if ui
-                    .add(egui::Button::new("Repair from files…").min_size(size))
+                    .add(QButton::new("Repair from files…", Kind::Small { highlighted: false }, pal, full).icon(&icons::RESTORE))
                     .on_hover_text("Install firmware from local files.")
                     .clicked()
                 {
                     self.ask(Action::RepairFiles);
                 }
+                if ui.add(QButton::new("Leave recovery mode", Kind::Small { highlighted: false }, pal, full)).clicked() {
+                    self.ask(Action::ExitRecovery);
+                }
+                if let Some(why) = self.current.as_ref().and_then(|f| crate::recovery::unreachable(&f.kind)) {
+                    ui.label(RichText::new(why).color(pal.red));
+                }
+                return;
+            }
+            // nothing that changes the device starts while a capture pull reads from it
+            let connected = self.worker.is_some() && !self.recovery() && !self.pulling();
+            badge_here(ui, "Firmware update channel", pal.accent);
+            let names: Vec<String> = match &self.directory {
+                DirState::Ready(d) => d.channel_names().iter().map(|s| s.to_string()).collect(),
+                _ => Vec::new(),
+            };
+            let mut chosen = self.settings.update_channel.clone();
+            ui.add_enabled_ui(!names.is_empty(), |ui| {
+                egui::ComboBox::from_id_salt("channel")
+                    .selected_text(RichText::new(chosen.to_uppercase()).font(fonts::label()))
+                    .width(content.width() - 8.0)
+                    .height(200.0)
+                    .show_ui(ui, |ui| {
+                        for n in &names {
+                            ui.selectable_value(&mut chosen, n.clone(), RichText::new(n.to_uppercase()).font(fonts::label()));
+                        }
+                    })
+                    .response
+                    .on_hover_text("Change the firmware update channel");
             });
-            if ui.add(egui::Button::new("Leave recovery mode").min_size(size)).clicked() {
-                self.ask(Action::ExitRecovery);
+            if chosen != self.settings.update_channel {
+                self.settings.update_channel = chosen;
+                self.save_settings();
             }
-            if let Some(why) = self.current.as_ref().and_then(|f| crate::recovery::unreachable(&f.kind)) {
-                ui.label(RichText::new(why).color(pal.amber));
-            }
-            return;
-        }
-        // nothing that changes the device starts while a capture pull reads from it
-        let connected = self.worker.is_some() && !self.recovery() && !self.pulling();
-        ui.label(RichText::new("Firmware update channel").color(pal.dim));
-        let names: Vec<String> = match &self.directory {
-            DirState::Ready(d) => d.channel_names().iter().map(|s| s.to_string()).collect(),
-            _ => Vec::new(),
-        };
-        let mut chosen = self.settings.update_channel.clone();
-        ui.add_enabled_ui(!names.is_empty(), |ui| {
-            egui::ComboBox::from_id_salt("channel").selected_text(&chosen).width(200.0).show_ui(ui, |ui| {
-                for n in &names {
-                    ui.selectable_value(&mut chosen, n.clone(), n);
+            badge_here(ui, "Backup & Restore", pal.accent);
+            let small = Kind::Small { highlighted: false };
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(connected, QButton::new("Backup", small, pal, half).icon(&icons::BACKUP))
+                    .on_hover_text("Save the device's internal storage to this computer.")
+                    .clicked()
+                {
+                    self.ask(Action::Backup);
+                }
+                if ui
+                    .add_enabled(connected, QButton::new("Restore", small, pal, half).icon(&icons::RESTORE))
+                    .on_hover_text("Write a backup back to the device's internal storage.")
+                    .clicked()
+                {
+                    self.ask(Action::Restore);
                 }
             });
-        });
-        if chosen != self.settings.update_channel {
-            self.settings.update_channel = chosen;
-            self.save_settings();
-        }
-        ui.add_space(10.0);
-        ui.label(RichText::new("Backup & Restore").color(pal.dim));
-        let size = vec2(150.0, 32.0);
-        egui::Grid::new("actions-grid").num_columns(2).spacing(vec2(10.0, 10.0)).show(ui, |ui| {
-            if ui
-                .add_enabled(connected, egui::Button::new("Backup").min_size(size))
-                .on_hover_text("Save the device's internal storage to this computer.")
-                .clicked()
-            {
-                self.ask(Action::Backup);
-            }
-            if ui
-                .add_enabled(connected, egui::Button::new("Restore").min_size(size))
-                .on_hover_text("Write a backup back to the device's internal storage.")
-                .clicked()
-            {
-                self.ask(Action::Restore);
-            }
-            ui.end_row();
-            let erase = egui::Button::new(RichText::new("Erase").color(if connected { pal.red } else { pal.dim })).min_size(size);
-            if ui
-                .add_enabled(connected, erase)
-                .on_hover_text("Revert the device to its default settings. All progress will be lost!")
-                .clicked()
-            {
-                self.ask(Action::Erase);
-            }
-            let reinstall = connected && self.update_state() == UpdateState::NoUpdates;
-            if ui
-                .add_enabled(reinstall, egui::Button::new("Reinstall").min_size(size))
-                .on_hover_text("Install the current firmware version again.")
-                .clicked()
-            {
-                self.ask_update();
-                if let Some(d) = &mut self.dialog {
-                    d.title = "Reinstall firmware?".into();
-                    d.message = "The current firmware version will be reinstalled".into();
-                    d.confirm = "Reinstall".into();
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(connected, QButton::new("Erase", Kind::Red, pal, half).icon(&icons::TRASH))
+                    .on_hover_text("Revert the device to its default settings. All progress will be lost!")
+                    .clicked()
+                {
+                    self.ask(Action::Erase);
                 }
-            }
-            ui.end_row();
+                let reinstall = connected && self.update_state() == UpdateState::NoUpdates;
+                if ui
+                    .add_enabled(reinstall, QButton::new("Reinstall", small, pal, half).icon(&icons::UPDATE))
+                    .on_hover_text("Install the current firmware version again.")
+                    .clicked()
+                {
+                    self.ask_update();
+                    if let Some(d) = &mut self.dialog {
+                        d.title = "Reinstall firmware?".into();
+                        d.message = "The current firmware version will be reinstalled".into();
+                        d.confirm = "Reinstall".into();
+                    }
+                }
+            });
         });
     }
 
-    /// qFlipper's developer tab: the wireless stack and FUS installs, both red, both behind their dialogs, for a device
-    /// in recovery mode on a bootloader the app can reach, or a running firmware the app can follow into its bootloader
-    /// (it reboots it there first, as the C++ operations do).
-    fn developer_tab(&mut self, ui: &mut egui::Ui, pal: &Palette) {
-        ui.label(RichText::new("Developer Mode").color(pal.amber));
+    /// qFlipper's developer tab (DeveloperActions.qml): the wireless stack and FUS installs, both red, both behind
+    /// their dialogs, for a device in recovery mode on a bootloader the app can reach, or a running firmware the app
+    /// can follow into its bootloader (it reboots it there first, as the C++ operations do).
+    fn developer_tab(&mut self, ui: &mut egui::Ui, inner: Rect, pal: &Palette) {
+        let content = inner.shrink2(vec2(10.0, 10.0));
         let why = match &self.current {
             Some(f) if f.is_recovery() => crate::recovery::unreachable(&f.kind),
             Some(f) if self.worker.is_some() => crate::recovery::unreachable_from_firmware(&f.kind),
             _ => Some("No device.".into()),
         };
         let can = why.is_none() && self.stage == Stage::Ready && !self.pulling();
-        let size = vec2(220.0, 32.0);
-        let red = |t: &str| RichText::new(t.to_string()).color(if can { pal.red } else { pal.dim });
-        if ui
-            .add_enabled(can, egui::Button::new(red("Install wireless fw")).min_size(size))
-            .on_hover_text("Install a custom wireless stack. WARNING! This may result in a non-functional Flipper!")
-            .clicked()
-        {
-            self.ask(Action::InstallRadio);
-        }
-        if ui
-            .add_enabled(can, egui::Button::new(red("Install FUS firmware")).min_size(size))
-            .on_hover_text("Install a custom FUS firmware. !!MEGA WARNING!! It WILL result in encryption keys loss!")
-            .clicked()
-        {
-            self.ask(Action::InstallFus);
-        }
-        if let Some(w) = why {
-            ui.label(RichText::new(w).color(pal.dim));
-        }
+        let size = vec2(content.width(), 34.0);
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 14))).max_rect(content), |ui| {
+            ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
+            badge_here(ui, "Developer Mode", pal.red);
+            if ui
+                .add_enabled(can, QButton::new("Install wireless fw", Kind::Red, pal, size).icon(&icons::UPDATE))
+                .on_hover_text("Install a custom wireless stack. WARNING! This may result in a non-functional Flipper!")
+                .clicked()
+            {
+                self.ask(Action::InstallRadio);
+            }
+            if ui
+                .add_enabled(can, QButton::new("Install FUS firmware", Kind::Red, pal, size).icon(&icons::UPDATE))
+                .on_hover_text("Install a custom FUS firmware. !!MEGA WARNING!! It WILL result in encryption keys loss!")
+                .clicked()
+            {
+                self.ask(Action::InstallFus);
+            }
+            if let Some(w) = why {
+                ui.label(RichText::new(w).color(pal.medium4));
+            }
+        });
     }
 
-    fn files_tab(&mut self, ui: &mut egui::Ui, pal: &Palette) {
+    /// FileManager.qml: back, forward and the path on top, the actions, then the list in Share Tech.
+    fn files_tab(&mut self, ui: &mut egui::Ui, inner: Rect, pal: &Palette) {
+        let content = inner.shrink2(vec2(10.0, 6.0));
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 15))).max_rect(content), |ui| self.files_page(ui, pal));
+    }
+
+    fn files_page(&mut self, ui: &mut egui::Ui, pal: &Palette) {
         let idle = self.busy.is_none() && self.worker.is_some() && !self.pulling();
         let root = self.files.is_root();
+        let small = Kind::Small { highlighted: false };
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.files.back.is_empty(), egui::Button::new("<")).on_hover_text("Back").clicked() {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let nav = vec2(30.0, 30.0);
+            if ui
+                .add_enabled(!self.files.back.is_empty(), QButton::new("<", small, pal, nav).icon(&icons::BACK_SMALL).icon_only())
+                .on_hover_text("Back")
+                .clicked()
+            {
                 self.history(true);
             }
-            if ui.add_enabled(!self.files.forward.is_empty(), egui::Button::new(">")).on_hover_text("Forward").clicked() {
+            if ui
+                .add_enabled(!self.files.forward.is_empty(), QButton::new(">", small, pal, nav).icon(&icons::FORWARD_SMALL).icon_only())
+                .on_hover_text("Forward")
+                .clicked()
+            {
                 self.history(false);
             }
-            ui.label(RichText::new(shown_path(&self.files.path)).color(pal.text));
+            ui.add_space(4.0);
+            ui.label(RichText::new(shown_path(&self.files.path)).font(fonts::share(18.0)).color(pal.accent));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(idle, egui::Button::new("Refresh")).clicked() {
+                if ui
+                    .add_enabled(idle, QButton::new("Refresh", small, pal, nav).icon(&icons::REFRESH).icon_only())
+                    .on_hover_text("Refresh")
+                    .clicked()
+                {
                     self.files.loaded = None;
                 }
                 let mut hidden = self.settings.show_hidden;
@@ -1783,69 +1838,67 @@ impl ArgusApp {
         });
         let selected = self.files.selected.clone().and_then(|n| self.files.entries.iter().find(|e| e.name == n).cloned());
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            ui.spacing_mut().button_padding = vec2(5.0, 2.0);
-            ui.style_mut().override_font_id = Some(FontId::proportional(13.0));
+            ui.spacing_mut().item_spacing.x = 8.0;
             let dir = self.files.path.clone();
-            if ui.add_enabled(idle && !root, egui::Button::new("Upload…")).clicked() {
+            let b = |label: &'static str, kind: Kind| QButton::fit(label, kind, pal, 28.0);
+            if ui.add_enabled(idle && !root, b("Upload…", small)).clicked() {
                 self.ask(Action::Upload { dir: dir.clone() });
             }
-            if ui.add_enabled(idle && !root, egui::Button::new("New folder")).clicked() {
+            if ui.add_enabled(idle && !root, b("New folder", small)).clicked() {
                 self.ask(Action::Mkdir { dir: dir.clone() });
             }
             let sel = selected.clone();
-            if ui.add_enabled(idle && sel.is_some(), egui::Button::new("Download…")).clicked() {
+            if ui.add_enabled(idle && sel.is_some(), b("Download…", small)).clicked() {
                 if let Some(e) = &sel {
                     self.ask(Action::Download { remote: device::join(&dir, &e.name) });
                 }
             }
             let changeable = idle && !root && sel.is_some();
-            if ui.add_enabled(changeable, egui::Button::new("Rename")).clicked() {
+            if ui.add_enabled(changeable, b("Rename", small)).clicked() {
                 if let Some(e) = &sel {
                     self.ask(Action::Rename { dir: dir.clone(), old: e.name.clone() });
                 }
             }
-            if ui
-                .add_enabled(changeable, egui::Button::new(RichText::new("Delete…").color(if changeable { pal.red } else { pal.dim })))
-                .clicked()
-            {
+            if ui.add_enabled(changeable, b("Delete…", Kind::Red).icon(&icons::TRASH)).clicked() {
                 if let Some(e) = &sel {
                     self.ask(Action::Delete { path: device::join(&dir, &e.name), dir: e.kind == FileKind::Dir });
                 }
             }
         });
-        ui.separator();
+        ui.add_space(2.0);
         if let Some(e) = &self.files.error {
             ui.label(RichText::new(e).color(pal.red));
         }
         let entries: Vec<Entry> =
             self.files.entries.iter().filter(|e| self.settings.show_hidden || !e.name.starts_with('.')).cloned().collect();
         let mut open = None;
-        egui::ScrollArea::vertical().max_height(ui.available_height() - 22.0).auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().max_height(ui.available_height() - 20.0).auto_shrink([false, false]).show(ui, |ui| {
             for e in &entries {
                 let is_sel = self.files.selected.as_deref() == Some(e.name.as_str());
                 let label = if root { storage_name(&e.name).to_string() } else { e.name.clone() };
-                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
                 resp.widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, true, is_sel, &label));
-                if is_sel {
-                    ui.painter().rect_filled(rect, 6.0, pal.select);
+                // FileManagerDelegate.qml: the selected row filled with the accent, its text dark
+                let (fill, ink) = if is_sel {
+                    (Some(pal.accent), pal.dark1)
                 } else if resp.hovered() {
-                    ui.painter().rect_filled(rect, 6.0, pal.hover);
-                }
-                let icon = Rect::from_center_size(rect.left_center() + vec2(14.0, 0.0), vec2(14.0, 11.0));
-                if e.kind == FileKind::Dir {
-                    ui.painter().rect_filled(icon, 2.0, pal.folder);
+                    (Some(pal.medium2), pal.light1)
                 } else {
-                    ui.painter().rect_stroke(icon.shrink2(vec2(2.0, 0.0)), 1.0, Stroke::new(1.2, pal.dim), StrokeKind::Inside);
+                    (None, pal.accent)
+                };
+                if let Some(f) = fill {
+                    ui.painter().rect_filled(rect, 3.0, f);
                 }
-                ui.painter().text(rect.left_center() + vec2(30.0, 0.0), Align2::LEFT_CENTER, &label, FontId::proportional(14.0), pal.text);
+                let icon = if e.kind == FileKind::Dir { &icons::FOLDER } else { &icons::FILE_SMALL };
+                icon.draw(ui.painter(), rect.left_center() + vec2(16.0, 0.0), ink);
+                ui.painter().text(rect.left_center() + vec2(34.0, 0.0), Align2::LEFT_CENTER, &label, fonts::share(16.0), ink);
                 if e.kind == FileKind::File {
                     ui.painter().text(
-                        rect.right_center() - vec2(6.0, 0.0),
+                        rect.right_center() - vec2(8.0, 0.0),
                         Align2::RIGHT_CENTER,
                         size_text(u64::from(e.size)),
-                        FontId::proportional(12.0),
-                        pal.dim,
+                        fonts::share(16.0),
+                        if is_sel { pal.dark1 } else { pal.medium4 },
                     );
                 }
                 if resp.clicked() {
@@ -1856,11 +1909,11 @@ impl ArgusApp {
                 }
             }
             if entries.is_empty() && self.files.error.is_none() {
-                ui.label(RichText::new("Empty").color(pal.dim));
+                ui.label(RichText::new("Empty").color(pal.medium4));
             }
         });
         if let Some(n) = &self.note {
-            ui.label(RichText::new(n).color(pal.dim).size(12.0));
+            ui.label(RichText::new(n).color(pal.medium4));
         }
         if let Some(name) = open {
             let to = device::join(&self.files.path, &name);
@@ -1912,117 +1965,101 @@ impl ArgusApp {
         }
     }
 
+    /// UpdateOverlay.qml: the title over the device, the progress box under it (the library reports no progress, so
+    /// qFlipper's indeterminate dots: one more every 500 ms), the message.
     fn busy_ui(&mut self, ui: &mut egui::Ui, card: Rect, pal: &Palette) {
         let Stage::Busy(op) = self.stage else { return };
-        label_at(ui, card.center_top() + vec2(0.0, 40.0), Align2::CENTER_CENTER, op.title(), FontId::proportional(26.0), pal.text);
-        // indeterminate progress (the library reports none): a bar sweeping once a second, only while working
-        let bar = Rect::from_center_size(pos2(card.center().x, card.top() + 290.0), vec2(460.0, 10.0));
-        ui.painter().rect_filled(bar, 5.0, pal.field);
-        let t = (ui.ctx().input(|i| i.time) % 1.4 / 1.4) as f32;
-        let w = 120.0;
-        let x0 = bar.left() - w + (bar.width() + w) * ease(t);
-        let seg = Rect::from_min_max(pos2(x0.max(bar.left()), bar.top()), pos2((x0 + w).min(bar.right()), bar.bottom()));
-        if seg.width() > 0.0 {
-            ui.painter().rect_filled(seg, 5.0, pal.accent);
-        }
-        label_at(
-            ui,
-            bar.center_bottom() + vec2(0.0, 18.0),
-            Align2::CENTER_CENTER,
-            "Do not unplug the device",
-            FontId::proportional(14.0),
-            pal.dim,
-        );
-        ui.ctx().request_repaint();
+        label_at(ui, pos2(card.center().x, card.top() + 19.0), Align2::CENTER_TOP, op.title(), fonts::sporty(fonts::TITLE), pal.accent);
+        let bar = Rect::from_min_size(pos2((card.center().x - 140.0).round(), card.top() + 270.0), vec2(280.0, 56.0));
+        ui.painter().rect_stroke(bar, 9.0, Stroke::new(3.0, pal.accent), StrokeKind::Inside);
+        let t = ui.ctx().input(|i| i.time);
+        let dots = 1 + (t / 0.5) as usize % 4;
+        ui.painter().text(bar.center(), Align2::CENTER_CENTER, ".".repeat(dots), fonts::sporty(fonts::TITLE), pal.accent);
+        ui.ctx().request_repaint_after(Duration::from_secs_f64(0.5 - t % 0.5));
+        caps_at(ui, pos2(card.center().x, bar.bottom() + 20.0), Align2::CENTER_TOP, "Do not unplug the device", fonts::label(), pal.accent);
     }
 
+    /// FinishOverlay.qml at the end of an operation: the title, the warning of a partial success, CONTINUE.
     fn finished_ui(&mut self, ui: &mut egui::Ui, card: Rect, pal: &Palette) {
         let Stage::Finished { warning } = self.stage.clone() else { return };
-        let title = if warning.is_some() { "Done, with a warning" } else { "Success!" };
-        label_at(ui, card.center_top() + vec2(0.0, 40.0), Align2::CENTER_CENTER, title, FontId::proportional(26.0), pal.text);
-        let text = Rect::from_center_size(pos2(card.center().x, card.top() + 278.0), vec2(600.0, 40.0));
-        ui.scope_builder(
-            UiBuilder::new().id(Id::new(("scope", 6))).max_rect(text).layout(egui::Layout::top_down(egui::Align::Center)),
-            |ui| {
-                if let Some(w) = &warning {
-                    ui.label(RichText::new(w).color(pal.amber));
-                }
-            },
-        );
-        let b = Rect::from_center_size(pos2(card.center().x, card.top() + 338.0), vec2(200.0, 42.0));
-        let resp = ui.put(
-            b,
-            egui::Button::new(RichText::new("CONTINUE").size(18.0).color(pal.on_accent()))
-                .fill(pal.accent)
-                .corner_radius(CornerRadius::same(12)),
-        );
-        if resp.clicked() {
+        let (title, colour) = if warning.is_some() { ("Done, with a warning", pal.red) } else { ("Success!", pal.accent) };
+        label_at(ui, pos2(card.center().x, card.top() + 19.0), Align2::CENTER_TOP, title, fonts::sporty(fonts::TITLE), colour);
+        if let Some(w) = &warning {
+            let r = Rect::from_center_size(pos2(card.center().x, card.top() + 262.0), vec2(640.0, 36.0));
+            ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 6))).max_rect(r), |ui| {
+                paragraph(ui, w, w.len() <= 60, pal.red, r.width());
+            });
+        }
+        let b = Rect::from_min_size(pos2((card.center().x - 140.0).round(), card.top() + 300.0), vec2(280.0, 56.0));
+        if ui.put(b, QButton::main("CONTINUE", Kind::Normal, pal)).clicked() {
             self.finish();
         }
     }
 
+    /// FinishOverlay.qml after an error: the title over the device showing "!", qFlipper's text box on the right,
+    /// BACK at the bottom left.
     fn error_ui(&mut self, ui: &mut egui::Ui, card: Rect, pal: &Palette) {
         let Stage::Error { title, text } = self.stage.clone() else { return };
-        let c = card.center();
-        ui.painter().circle_stroke(c + vec2(0.0, -110.0), 26.0, Stroke::new(3.0, pal.red));
-        ui.painter().text(c + vec2(0.0, -110.0), Align2::CENTER_CENTER, "!", FontId::proportional(30.0), pal.red);
-        label_at(ui, c + vec2(0.0, -56.0), Align2::CENTER_CENTER, &title, FontId::proportional(26.0), pal.text);
-        let r = Rect::from_center_size(c + vec2(0.0, 10.0), vec2(620.0, 70.0));
-        ui.scope_builder(
-            UiBuilder::new().id(Id::new(("scope", 7))).max_rect(r).layout(egui::Layout::top_down(egui::Align::Center)),
-            |ui| {
-                ui.label(RichText::new(text).color(pal.dim));
-            },
-        );
-        let b = Rect::from_center_size(c + vec2(0.0, 120.0), vec2(160.0, 38.0));
-        if ui.put(b, egui::Button::new(RichText::new("Back").size(16.0)).corner_radius(CornerRadius::same(10))).clicked() {
+        let left_w = card.width() - 335.0 - 36.0;
+        let cx = card.left() + left_w / 2.0;
+        label_at(ui, pos2(cx, card.top() + 36.0), Align2::CENTER_TOP, &title, fonts::sporty(fonts::TITLE), pal.accent);
+        draw::device(ui.painter(), pos2((cx - 190.0).round(), card.top() + 110.0), pal, draw::Screen::Error, false);
+        // TextBox.qml: Share Tech Mono in a bright outline
+        let box_r = Rect::from_min_size(pos2(card.right() - 36.0 - 335.0, card.top() + 90.0), vec2(335.0, 190.0));
+        ui.painter().rect_filled(box_r, 6.0, Color32::BLACK);
+        ui.painter().rect_stroke(box_r, 6.0, Stroke::new(1.0, pal.accent), StrokeKind::Inside);
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 7))).max_rect(box_r.shrink(20.0)), |ui| {
+            ui.label(RichText::new(text).font(FontId::monospace(16.0)).color(pal.accent));
+        });
+        let b = Rect::from_min_size(card.left_bottom() + vec2(25.0, -25.0 - 42.0), vec2(110.0, 42.0));
+        if ui.put(b, QButton::new("Back", Kind::Normal, pal, b.size()).icon(&icons::ARROW_BACK)).clicked() {
             self.finish();
         }
     }
 
+    /// StreamOverlay.qml: the screen four times its size in an accent frame, the round keypad (DirectionalKeypad.qml)
+    /// on the right, BACK and SAVE SCREENSHOT (and COPY) under the screen.
     fn stream_ui(&mut self, ui: &mut egui::Ui, card: Rect, pal: &Palette) {
         let lcd = self.lcd();
         let tex = self.screen_texture(ui.ctx());
-        let frame = Rect::from_min_size(card.min + vec2(32.0, 36.0), vec2(512.0 + 20.0, 256.0 + 20.0));
-        ui.painter().rect_filled(frame, 14.0, pal.field);
-        ui.painter().rect_stroke(frame, 14.0, Stroke::new(1.0, pal.border), StrokeKind::Inside);
-        let screen = Rect::from_min_size(frame.min + vec2(10.0, 10.0), vec2(512.0, 256.0));
-        ui.painter().rect_filled(screen, 4.0, lcd.background);
+        let screen = Rect::from_min_size(card.min + vec2(38.0, 32.0), vec2(512.0, 256.0));
+        let bg = screen.expand(11.0);
+        ui.painter().rect_filled(bg, 10.0, lcd.background);
+        ui.painter().rect_stroke(bg, 10.0, Stroke::new(3.0, pal.medium1), StrokeKind::Inside);
         if let Some(tex) = tex {
             ui.painter().image(tex, screen, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
-        // the keypad, as qFlipper's DirectionalKeypad: a cross with OK in the middle, Back below right
-        let c = pos2(card.right() - 150.0, card.top() + 164.0);
+        // the keypad: a 168 px disc, the four triangles and OK on it; back below it on the right
+        let pad = card.min + vec2(590.0, 52.0);
+        let c = pad + vec2(84.0, 84.0);
+        ui.painter().circle_filled(c, 84.0, pal.dark1);
+        ui.painter().circle_stroke(c, 83.0, Stroke::new(2.0, pal.light1));
         let now = ui.ctx().input(|i| i.time);
         let keys = [
-            (InputKey::Up, c + vec2(0.0, -62.0), "Up"),
-            (InputKey::Left, c + vec2(-62.0, 0.0), "Left"),
+            (InputKey::Up, c + vec2(0.0, -51.0), "Up"),
+            (InputKey::Left, c + vec2(-51.0, 0.0), "Left"),
             (InputKey::Ok, c, "OK"),
-            (InputKey::Right, c + vec2(62.0, 0.0), "Right"),
-            (InputKey::Down, c + vec2(0.0, 62.0), "Down"),
-            (InputKey::Back, c + vec2(74.0, 118.0), "Back key"),
+            (InputKey::Right, c + vec2(51.0, 0.0), "Right"),
+            (InputKey::Down, c + vec2(0.0, 51.0), "Down"),
+            (InputKey::Back, c + vec2(76.0, 112.0), "Back key"),
         ];
-        ui.painter().circle_filled(c, 96.0, pal.field);
-        ui.painter().circle_stroke(c, 96.0, Stroke::new(1.0, pal.border));
         let mut pressed_now = None;
         let mut released = false;
         for (key, centre, label) in keys {
-            let r = Rect::from_center_size(centre, vec2(50.0, 50.0));
+            let r = Rect::from_center_size(centre, vec2(52.0, 52.0));
             let resp = ui.interact(r, Id::new(("key", label)), Sense::click_and_drag());
             resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
             let down = resp.is_pointer_button_down_on();
             let held = self.keypad.down.map(|d| d.key) == Some(key);
+            // the _hover and _down pictures: filled dim, or filled bright
             let fill = if down || held {
-                pal.accent
+                Some(pal.accent)
             } else if resp.hovered() {
-                pal.hover
+                Some(pal.medium2)
             } else {
-                pal.bg
+                None
             };
-            ui.painter().circle_filled(centre, 24.0, fill);
-            ui.painter().circle_stroke(centre, 24.0, Stroke::new(1.0, pal.border));
-            let ink = if down || held { pal.on_accent() } else { pal.text };
-            draw_key_glyph(ui.painter(), key, centre, ink);
+            key_shape(ui.painter(), key, centre, fill, pal);
             if down && self.keypad.down.is_none() {
                 pressed_now = Some((key, true));
             }
@@ -2070,25 +2107,27 @@ impl ArgusApp {
             }
         }
 
-        let row = Rect::from_min_size(pos2(frame.left(), frame.bottom() + 16.0), vec2(frame.width(), 34.0));
-        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 8))).max_rect(row), |ui| {
-            ui.horizontal(|ui| {
-                if ui.add(egui::Button::new("Back").min_size(vec2(90.0, 32.0))).clicked() {
-                    self.release_keypad();
-                    self.stage = Stage::Ready;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add_enabled(self.frame.is_some(), egui::Button::new("Save Screenshot").min_size(vec2(140.0, 32.0))).clicked() {
-                        self.ask(Action::SaveScreenshot);
-                    }
-                    if ui.add_enabled(self.frame.is_some(), egui::Button::new("Copy").min_size(vec2(70.0, 32.0))).clicked() {
-                        if let Some(f) = &self.frame {
-                            ui.ctx().copy_image(frame_image(f, &lcd, 4));
-                        }
-                    }
-                });
-            });
-        });
+        let y = card.bottom() - 22.0 - 42.0;
+        let back = Rect::from_min_size(pos2(bg.left(), y), vec2(110.0, 42.0));
+        if ui.put(back, QButton::new("Back", Kind::Normal, pal, back.size()).icon(&icons::ARROW_BACK)).clicked() {
+            self.release_keypad();
+            self.stage = Stage::Ready;
+        }
+        let has = self.frame.is_some();
+        let save = Rect::from_min_size(pos2(bg.right() - 230.0, y), vec2(230.0, 42.0));
+        if ui
+            .add_enabled_ui(has, |ui| ui.put(save, QButton::new("Save Screenshot", Kind::Normal, pal, save.size()).icon(&icons::SAVE)))
+            .inner
+            .clicked()
+        {
+            self.ask(Action::SaveScreenshot);
+        }
+        let copy = Rect::from_min_size(pos2(save.left() - 20.0 - 90.0, y), vec2(90.0, 42.0));
+        if ui.add_enabled_ui(has, |ui| ui.put(copy, QButton::new("Copy", Kind::Normal, pal, copy.size()))).inner.clicked() {
+            if let Some(f) = &self.frame {
+                ui.ctx().copy_image(frame_image(f, &lcd, 4));
+            }
+        }
     }
 
     /// The end of a press: short when it was released before the long press, then the release.
@@ -2103,8 +2142,9 @@ impl ArgusApp {
 
     // ---------------------------------------------------------------- the console (captures and the Sarina API)
 
+    /// ChymaeraConsole.qml's content in the card: Share Tech Mono, the accent on black.
     fn console_ui(&mut self, ui: &mut egui::Ui, card: Rect, pal: &Palette) {
-        ui.painter().rect_filled(card, 12.0, pal.sidebar);
+        cover(ui, card, pal);
         let inner = card.shrink(18.0);
         let connected = self.worker.is_some() && self.info.is_some();
         let pulling = self.pulling();
@@ -2112,32 +2152,33 @@ impl ArgusApp {
             let b = self.bridge.lock().unwrap_or_else(|e| e.into_inner());
             (b.session().map(|(_, n)| n.to_string()), b.datastore_path().to_string())
         };
+        let small = Kind::Small { highlighted: false };
         ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 9))).max_rect(inner), |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Console").size(20.0));
+                ui.label(RichText::new("Console").font(fonts::sporty(30.0)).color(pal.accent));
                 ui.label(
                     RichText::new(match &session {
                         Some(n) => format!("Session: {n}"),
                         None => "No active session".into(),
                     })
-                    .color(pal.dim),
+                    .color(pal.medium4),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if self.api.is_some() { "Stop API" } else { "Start API" };
-                    if ui.button(label).clicked() {
+                    if ui.add(QButton::fit(label, Kind::Small { highlighted: true }, pal, 28.0)).clicked() {
                         self.toggle_api();
                     }
                     let (text, colour) = match self.api_port() {
                         Some(p) => (format!("API :{p}"), pal.green),
-                        None => ("API off".to_string(), pal.dim),
+                        None => ("API off".to_string(), pal.medium4),
                     };
                     ui.label(RichText::new(text).color(colour));
                 });
             });
-            ui.label(RichText::new(format!("Datastore: {datastore}")).color(pal.dim).size(12.0));
+            ui.label(RichText::new(format!("Datastore: {datastore}")).font(FontId::monospace(13.0)).color(pal.medium4));
             ui.horizontal(|ui| {
                 let text = if session.is_some() { "End session" } else { "Start session" };
-                if ui.button(text).clicked() {
+                if ui.add(QButton::fit(text, small, pal, 28.0)).clicked() {
                     let mut b = self.bridge.lock().unwrap_or_else(|e| e.into_inner());
                     if session.is_some() {
                         b.end_session();
@@ -2153,7 +2194,7 @@ impl ArgusApp {
                     ("Pull NFC", vec!["/ext/nfc".to_string()]),
                     ("Pull Sub-GHz", vec!["/ext/subghz".to_string()]),
                 ] {
-                    if ui.add_enabled(can, egui::Button::new(label)).clicked() {
+                    if ui.add_enabled(can, QButton::fit(label, small, pal, 28.0)).clicked() {
                         // the C++ console's pullAll/pullPath: through the bridge, so the API sees the same pull
                         let what = if roots.len() > 1 { "all capture folders".to_string() } else { roots[0].clone() };
                         self.bridge.lock().unwrap_or_else(|e| e.into_inner()).start_pull(roots, &what);
@@ -2178,7 +2219,7 @@ impl ArgusApp {
                             Severity::Error | Severity::Critical => pal.red,
                             Severity::Warning => pal.amber,
                             Severity::Notice => pal.green,
-                            _ => pal.text,
+                            _ => pal.accent,
                         };
                         let _ = severity_name(e.severity);
                         (source_name(e.source).to_uppercase(), msg, colour)
@@ -2186,31 +2227,32 @@ impl ArgusApp {
                     .collect()
             };
             let h = ui.available_height() - 40.0;
+            let mono = |size: f32| FontId::monospace(size);
             ui.columns(2, |cols| {
-                cols[0].label(RichText::new(format!("Captures ({})", rows.len())).color(pal.dim));
+                cols[0].label(RichText::new(format!("Captures ({})", rows.len())).color(pal.medium4));
                 egui::ScrollArea::vertical().id_salt("captures").max_height(h - 20.0).auto_shrink([false, false]).show(
                     &mut cols[0],
                     |ui| {
                         for r in &rows {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(&r.kind).color(pal.accent).size(12.0));
-                                ui.label(RichText::new(r.name.clone().unwrap_or_default()).size(12.0));
-                                ui.label(RichText::new(size_text(r.size.unwrap_or(0).max(0) as u64)).color(pal.dim).size(12.0));
+                                ui.label(RichText::new(&r.kind).font(mono(14.0)).color(pal.light1));
+                                ui.label(RichText::new(r.name.clone().unwrap_or_default()).font(mono(14.0)).color(pal.accent));
+                                ui.label(RichText::new(size_text(r.size.unwrap_or(0).max(0) as u64)).font(mono(14.0)).color(pal.medium4));
                             });
                         }
                         if rows.is_empty() {
-                            ui.label(RichText::new("No captures yet").color(pal.dim));
+                            ui.label(RichText::new("No captures yet").color(pal.medium4));
                         }
                     },
                 );
-                cols[1].label(RichText::new("Events").color(pal.dim));
+                cols[1].label(RichText::new("Events").color(pal.medium4));
                 egui::ScrollArea::vertical().id_salt("events").max_height(h - 20.0).stick_to_bottom(true).auto_shrink([false, false]).show(
                     &mut cols[1],
                     |ui| {
                         for (src, msg, colour) in &lines {
                             ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new(src).color(pal.dim).size(11.0));
-                                ui.label(RichText::new(msg).color(*colour).size(12.0));
+                                ui.label(RichText::new(src).font(mono(13.0)).color(pal.medium4));
+                                ui.label(RichText::new(msg).font(mono(14.0)).color(*colour));
                             });
                         }
                     },
@@ -2218,16 +2260,16 @@ impl ArgusApp {
             });
             ui.horizontal(|ui| {
                 let field = ui
-                    .add(egui::TextEdit::singleline(&mut self.console_note).hint_text("Log a note…").desired_width(inner.width() - 150.0));
+                    .add(egui::TextEdit::singleline(&mut self.console_note).hint_text("Log a note…").desired_width(inner.width() - 190.0));
                 let enter = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                if ui.button("Add").clicked() || enter {
+                if ui.add(QButton::fit("Add", small, pal, 28.0)).clicked() || enter {
                     let text = self.console_note.trim().to_string();
                     if !text.is_empty() {
                         self.bridge.lock().unwrap_or_else(|e| e.into_inner()).append(Severity::Info, LogSource::User, &text, "");
                         self.console_note.clear();
                     }
                 }
-                if ui.button("Clear").clicked() {
+                if ui.add(QButton::fit("Clear", small, pal, 28.0)).clicked() {
                     self.bridge.lock().unwrap_or_else(|e| e.into_inner()).clear_log();
                 }
             });
@@ -2236,52 +2278,69 @@ impl ArgusApp {
 
     // ---------------------------------------------------------------- footer, log, dialogs
 
+    /// MainWindow.qml's footer: LOGS (and CONSOLE, TOOLS, SETTINGS, Argus's own) as outlined buttons, then the status
+    /// bar (StatusBar.qml).
     fn footer(&mut self, ui: &mut egui::Ui, r: Rect, pal: &Palette) {
-        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 10))).max_rect(r), |ui| {
-            ui.horizontal_centered(|ui| {
-                let size = vec2(100.0, r.height());
-                for (label, which) in [("LOGS", 0), ("CONSOLE", 1), ("TOOLS", 3), ("SETTINGS", 2)] {
-                    let on = match which {
-                        0 => self.log_open,
-                        1 => self.console,
-                        3 => self.tools_open,
-                        _ => self.settings_open,
-                    };
-                    let b = egui::Button::new(RichText::new(label).color(if on { pal.on_accent() } else { pal.text }))
-                        .fill(if on { pal.accent } else { pal.field })
-                        .min_size(size)
-                        .corner_radius(CornerRadius::same(10));
-                    if ui.add(b).clicked() {
-                        match which {
-                            0 => {
-                                self.log_open = !self.log_open;
-                                let h = WINDOW[1] + if self.log_open { LOG_H } else { 0.0 };
-                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(WINDOW[0], h)));
-                            }
-                            1 => {
-                                self.console = !self.console;
-                                self.tools_open = false;
-                            }
-                            3 => {
-                                self.tools_open = !self.tools_open;
-                                self.console = false;
-                            }
-                            _ => self.settings_open = !self.settings_open,
-                        }
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 10))).max_rect(r), |ui| self.footer_row(ui, r, pal));
+    }
+
+    fn footer_row(&mut self, ui: &mut egui::Ui, r: Rect, pal: &Palette) {
+        let mut x = r.left();
+        for (label, which, w) in [("LOGS", 0, 110.0), ("CONSOLE", 1, 104.0), ("TOOLS", 3, 90.0), ("SETTINGS", 2, 110.0)] {
+            let on = match which {
+                0 => false,
+                1 => self.console,
+                3 => self.tools_open,
+                _ => self.settings_open,
+            };
+            let mut b = QButton::new(label, Kind::Toggle(on), pal, vec2(w, r.height()));
+            if which == 0 {
+                b = b.icon(if self.log_open { &icons::ARROW_UP } else { &icons::ARROW_DOWN });
+            }
+            let rect = Rect::from_min_size(pos2(x, r.top()), vec2(w, r.height()));
+            x += w + 15.0;
+            if ui.put(rect, b).clicked() {
+                match which {
+                    0 => {
+                        self.log_open = !self.log_open;
+                        let h = WINDOW[1] + if self.log_open { LOG_H } else { 0.0 };
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(WINDOW[0], h)));
                     }
+                    1 => {
+                        self.console = !self.console;
+                        self.tools_open = false;
+                    }
+                    3 => {
+                        self.tools_open = !self.tools_open;
+                        self.console = false;
+                    }
+                    _ => self.settings_open = !self.settings_open,
                 }
-                // the status bar, red while something went wrong (its colour changes in 150 ms, OutQuad)
-                let (text, bad) = self.status_text();
-                let t = ui.ctx().animate_bool_with_time_and_easing(Id::new("status-bad"), bad, FADE, easing::quadratic_out);
-                let rest = ui.available_rect_before_wrap();
-                let fill = mix(pal.field, pal.red, 0.35 * t);
-                ui.painter().rect_filled(rest, 10.0, fill);
-                ui.painter().rect_stroke(rest, 10.0, Stroke::new(1.0, pal.border), StrokeKind::Inside);
-                ui.painter().text(rest.left_center() + vec2(14.0, 0.0), Align2::LEFT_CENTER, &text, FontId::proportional(14.0), pal.text);
-                let resp = ui.allocate_rect(rest, Sense::hover());
-                resp.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &text));
-            });
-        });
+            }
+        }
+        // the status bar: the dark accent, dark red while something went wrong (its colour changes in 150 ms, OutQuad)
+        let (text, bad) = self.status_text();
+        let t = ui.ctx().animate_bool_with_time_and_easing(Id::new("status-bad"), bad, FADE, easing::quadratic_out);
+        let rest = Rect::from_min_max(pos2(x, r.top()), r.max);
+        let p = ui.painter().with_clip_rect(rest);
+        p.rect_filled(rest, 0.0, pal.dark1.lerp_to_gamma(pal.red_dark2, t));
+        let ink = pal.accent.lerp_to_gamma(pal.red4, t);
+        let icon_c = rest.left_center() + vec2(10.0 + 11.0, 0.0);
+        if bad {
+            // info-small.svg turned upside down: an exclamation mark
+            icons::INFO_SMALL.draw_flipped(&p, icon_c, ink);
+        } else {
+            icons::INFO_SMALL.draw(&p, icon_c, ink);
+        }
+        // qFlipper's label font when the text fits; a longer one (Argus's statuses can be) in the body font, on two lines
+        let room = rest.right() - 10.0 - (icon_c.x + 21.0);
+        let mut shown = p.layout_no_wrap(fonts::pixel_text(&text), fonts::label(), ink);
+        if shown.size().x > room {
+            shown = p.layout(text.to_uppercase(), FontId::proportional(fonts::BODY), ink, room);
+        }
+        p.galley(pos2(icon_c.x + 21.0, (rest.center().y - shown.size().y / 2.0).round()), shown, ink);
+        let resp = ui.allocate_rect(rest, Sense::hover());
+        resp.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &text));
     }
 
     /// qFlipper's status bar text.
@@ -2302,60 +2361,72 @@ impl ArgusApp {
         (s.to_string(), false)
     }
 
+    /// TextView.qml: the log in Share Tech Mono, the accent on black.
     fn log_drawer(&mut self, ui: &mut egui::Ui, r: Rect, pal: &Palette) {
-        ui.painter().rect_filled(r, 10.0, pal.field);
-        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 11))).max_rect(r.shrink(8.0)), |ui| {
+        ui.scope_builder(UiBuilder::new().id(Id::new(("scope", 11))).max_rect(r), |ui| {
             ui.set_clip_rect(r);
             egui::ScrollArea::vertical().id_salt("log").stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                 for l in &self.log {
-                    ui.label(RichText::new(l).monospace().size(12.0).color(pal.dim));
+                    ui.label(RichText::new(l).font(FontId::monospace(fonts::MONO)).color(pal.accent));
                 }
             });
         });
     }
 
+    /// ConfirmationDialog.qml (CustomDialog.qml): a black box with a bright outline, the title inverted in its header,
+    /// the message in capitals, then OK and Cancel side by side (the suggested one filled; a dangerous OK is red).
     fn dialog_ui(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(mut d) = self.dialog.take() else { return };
         let mut result: Option<bool> = None;
         let mut browse: Option<usize> = None;
-        let resp = egui::Modal::new(Id::new("confirm")).show(ctx, |ui| {
+        let resp = modal(Id::new("confirm"), pal).show(ctx, |ui| {
             let t = ctx.animate_bool_with_time_and_easing(Id::new("confirm-fade"), true, FADE, ease);
             ui.multiply_opacity(t);
-            ui.set_width(420.0);
-            ui.label(RichText::new(&d.title).size(20.0).strong());
-            ui.add_space(4.0);
-            ui.label(&d.message);
-            if let Some(w) = &d.warning {
-                ui.add_space(4.0);
-                ui.label(RichText::new(w).color(pal.amber));
-            }
-            for (i, f) in d.fields.iter_mut().enumerate() {
-                ui.add_space(6.0);
-                ui.label(RichText::new(&f.label).color(pal.dim));
-                if f.kind == FieldKind::Text {
-                    ui.add(egui::TextEdit::singleline(&mut f.value).id(Id::new(("dialog-field", i))).desired_width(f32::INFINITY));
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut f.value).id(Id::new(("dialog-field", i))).desired_width(330.0));
-                        if ui.add(egui::Button::new("Browse…")).on_hover_text("Choose the file").clicked() {
-                            browse = Some(i);
-                        }
-                    });
+            ui.set_width(DIALOG_W);
+            dialog_header(ui, &d.title, pal);
+            egui::Frame::NONE.inner_margin(egui::Margin { left: 20, right: 20, top: 20, bottom: 20 }).show(ui, |ui| {
+                ui.set_width(DIALOG_W - 40.0);
+                paragraph(ui, &d.message, d.message.len() <= 60, pal.accent, DIALOG_W - 40.0);
+                if let Some(w) = &d.warning {
+                    ui.add_space(6.0);
+                    paragraph(ui, w, w.len() <= 60, pal.red, DIALOG_W - 40.0);
                 }
-            }
-            if let Some(e) = &d.error {
-                ui.add_space(4.0);
-                ui.label(RichText::new(e).color(pal.red));
-            }
-            ui.add_space(12.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (fill, text) = if d.danger { (pal.red, Color32::WHITE) } else { (pal.accent, pal.on_accent()) };
-                if ui.add(egui::Button::new(RichText::new(&d.confirm).color(text)).fill(fill).min_size(vec2(100.0, 32.0))).clicked() {
-                    result = Some(true);
+                for (i, f) in d.fields.iter_mut().enumerate() {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(&f.label).color(pal.medium4));
+                    if f.kind == FieldKind::Text {
+                        ui.add(egui::TextEdit::singleline(&mut f.value).id(Id::new(("dialog-field", i))).desired_width(f32::INFINITY));
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut f.value).id(Id::new(("dialog-field", i))).desired_width(DIALOG_W - 180.0),
+                            );
+                            if ui
+                                .add(QButton::fit("Browse…", Kind::Small { highlighted: false }, pal, 26.0))
+                                .on_hover_text("Choose the file")
+                                .clicked()
+                            {
+                                browse = Some(i);
+                            }
+                        });
+                    }
                 }
-                if ui.add(egui::Button::new("Cancel").min_size(vec2(100.0, 32.0))).clicked() {
-                    result = Some(false);
+                if let Some(e) = &d.error {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(e).color(pal.red));
                 }
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 30.0;
+                    let size = vec2((DIALOG_W - 40.0 - 30.0) / 2.0, 42.0);
+                    let ok = if d.danger { Kind::Red } else { Kind::Small { highlighted: true } };
+                    if ui.add(QButton::new(&d.confirm, ok, pal, size).radius(7.0)).clicked() {
+                        result = Some(true);
+                    }
+                    if ui.add(QButton::new("Cancel", Kind::Small { highlighted: d.danger }, pal, size).radius(7.0)).clicked() {
+                        result = Some(false);
+                    }
+                });
             });
         });
         // the picker on top: the dialog stays open under it (Escape or a click outside closes the picker, not the dialog)
@@ -2395,33 +2466,32 @@ impl ArgusApp {
             return;
         }
         let mut s = self.settings.clone();
-        let resp = egui::Modal::new(Id::new("settings")).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.label(RichText::new("Settings").size(20.0).strong());
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("Style");
-                for (v, label) in [(Style::System, "Follow the system"), (Style::Light, "Light"), (Style::Dark, "Dark")] {
-                    ui.radio_value(&mut s.style, v, label);
-                }
-            });
-            ui.checkbox(&mut s.auto_connect, "Connect by itself when one device is found");
-            ui.checkbox(&mut s.check_updates, "Look for firmware updates when a device connects");
-            ui.checkbox(&mut s.show_hidden, "Show hidden files");
-            ui.checkbox(&mut s.developer, "Developer mode (the Developer tab)");
-            ui.horizontal(|ui| {
-                ui.label("Control API port");
-                ui.add(egui::DragValue::new(&mut s.api_port).range(1024..=65535));
-            });
-            ui.label(RichText::new(format!("Update server: {}", self.cfg.net.server)).color(pal.dim).size(12.0));
-            ui.add_space(8.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add(egui::Button::new(RichText::new("Done").color(pal.on_accent())).fill(pal.accent).min_size(vec2(90.0, 30.0)))
-                    .clicked()
-                {
-                    self.settings_open = false;
-                }
+        let resp = modal(Id::new("settings"), pal).show(ctx, |ui| {
+            ui.set_width(DIALOG_W);
+            dialog_header(ui, "Settings", pal);
+            egui::Frame::NONE.inner_margin(20).show(ui, |ui| {
+                ui.set_width(DIALOG_W - 40.0);
+                ui.horizontal(|ui| {
+                    ui.label("Accent");
+                    for (v, label) in [(Accent::System, "Follow the system"), (Accent::Purple, "Purple")] {
+                        ui.radio_value(&mut s.accent, v, label);
+                    }
+                });
+                ui.checkbox(&mut s.auto_connect, "Connect by itself when one device is found");
+                ui.checkbox(&mut s.check_updates, "Look for firmware updates when a device connects");
+                ui.checkbox(&mut s.show_hidden, "Show hidden files");
+                ui.checkbox(&mut s.developer, "Developer mode (the Developer tab)");
+                ui.horizontal(|ui| {
+                    ui.label("Control API port");
+                    ui.add(egui::DragValue::new(&mut s.api_port).range(1024..=65535));
+                });
+                ui.label(RichText::new(format!("Update server: {}", self.cfg.net.server)).color(pal.medium4));
+                ui.add_space(12.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(QButton::new("Done", Kind::Small { highlighted: true }, pal, vec2(120.0, 34.0))).clicked() {
+                        self.settings_open = false;
+                    }
+                });
             });
         });
         if resp.should_close() {
@@ -2444,20 +2514,135 @@ impl Drop for ArgusApp {
 
 /// Painted text that is also a label for assistive technology (and for the tests, which find widgets the same way).
 fn label_at(ui: &egui::Ui, pos: egui::Pos2, align: Align2, text: &str, font: FontId, color: Color32) -> Rect {
-    let r = ui.painter().text(pos, align, text, font, color);
+    let r = ui.painter().text(pos.round(), align, text, font, color);
     let resp = ui.interact(r, ui.id().with(("text", text)), Sense::hover());
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Label, ui.is_enabled(), text));
     r
 }
 
-fn style_source(style: Style, ygg: Option<PathBuf>) -> theme::Source {
-    match style {
-        Style::Light => theme::Source::Fixed { dark: false, accent: None },
-        Style::Dark => theme::Source::Fixed { dark: true, accent: None },
-        Style::System => match ygg {
-            Some(d) => theme::Source::System(d),
-            None => theme::Source::Fixed { dark: true, accent: None },
-        },
+/// As [`label_at`], drawn in capitals as qFlipper's `TextLabel` (assistive technology reads the text as it is).
+fn caps_at(ui: &egui::Ui, pos: egui::Pos2, align: Align2, text: &str, font: FontId, color: Color32) -> Rect {
+    let r = ui.painter().text(pos.round(), align, fonts::pixel_text(text), font, color);
+    let resp = ui.interact(r, ui.id().with(("text", text)), Sense::hover());
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Label, ui.is_enabled(), text));
+    r
+}
+
+/// A paragraph wrapped to `width`, taking its place in the layout: in capitals in qFlipper's label font (short texts),
+/// or as it is in the body font (the longer messages of Argus's dialogs, which would not fit the window in capitals).
+fn paragraph(ui: &mut egui::Ui, text: &str, caps: bool, color: Color32, width: f32) {
+    let (shown, font, line) =
+        if caps { (fonts::pixel_text(text), fonts::label(), 22.0) } else { (text.to_string(), FontId::proportional(fonts::BODY), 18.0) };
+    let mut job = egui::text::LayoutJob::simple(shown, font, color, width);
+    job.halign = egui::Align::Center;
+    job.sections.iter_mut().for_each(|s| s.format.line_height = Some(line));
+    let galley = ui.painter().layout_job(job);
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, galley.size().y), Sense::hover());
+    ui.painter().galley(pos2(rect.center().x, rect.top()).round(), galley, color);
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Label, ui.is_enabled(), text));
+}
+
+/// TransparentLabel.qml: ProggySquare in a colour on a fifth of it, an optional icon after the text; `at` is its top
+/// left corner.
+fn badge(ui: &egui::Ui, at: egui::Pos2, text: &str, caps: bool, icon: Option<&'static icons::Icon>, colour: Color32) -> Rect {
+    let shown = if caps { fonts::pixel_text(text) } else { text.to_string() };
+    let p = ui.painter();
+    let galley = p.layout_no_wrap(shown, fonts::proggy(), colour);
+    let icon_w = icon.map_or(0.0, |i| i.w as f32 + 5.0);
+    let r = Rect::from_min_size(at.round(), vec2(galley.size().x + icon_w + 6.0, 15.0));
+    p.rect_filled(r, 0.0, colour.gamma_multiply(0.2));
+    let text_pos = pos2(r.left() + 3.0, (r.center().y - galley.size().y / 2.0).round() + 1.0);
+    let text_w = galley.size().x;
+    p.galley(text_pos, galley, colour);
+    if let Some(i) = icon {
+        i.draw(p, pos2(r.left() + 3.0 + text_w + 5.0 + i.w as f32 / 2.0, r.center().y), colour);
+    }
+    let resp = ui.interact(r, ui.id().with(("badge", text)), Sense::hover());
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Label, ui.is_enabled(), text));
+    r
+}
+
+/// A badge in the layout, as the section titles of DeviceActions.qml.
+fn badge_here(ui: &mut egui::Ui, text: &str, colour: Color32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 15.0), Sense::hover());
+    badge(ui, rect.min, text, true, None, colour);
+}
+
+/// CustomDialog.qml's frame: black, a bright 2 px outline, round corners, the window dimmed to a fifth behind it.
+fn modal(id: Id, pal: &Palette) -> egui::Modal {
+    egui::Modal::new(id)
+        .backdrop_color(Color32::from_black_alpha(204))
+        .frame(egui::Frame::NONE.fill(Color32::BLACK).stroke(Stroke::new(2.0, pal.accent)).corner_radius(7).inner_margin(2))
+}
+
+/// CustomDialog.qml's header: 42 px of the accent with the title in capitals, dark.
+fn dialog_header(ui: &mut egui::Ui, title: &str, pal: &Palette) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::hover());
+    ui.painter().rect_filled(rect, egui::CornerRadius { nw: 5, ne: 5, sw: 0, se: 0 }, pal.accent);
+    caps_at(ui, rect.center(), Align2::CENTER_CENTER, title, fonts::label(), pal.dark1);
+}
+
+/// What covers the card for the console and the tools window: the card's own background, without its grid.
+fn cover(ui: &egui::Ui, card: Rect, pal: &Palette) {
+    let p = ui.painter();
+    draw::gradient_polygon(p, &draw::rounded(card, 9.0), &[(card.top(), pal.card_top), (card.bottom(), pal.card_bottom)]);
+    p.rect_stroke(card, 9.0, Stroke::new(3.0, pal.accent), StrokeKind::Inside);
+}
+
+/// A key of DirectionalKeypad.qml (controls/dpad: triangle, circle, back), filled when hovered or pressed.
+fn key_shape(p: &egui::Painter, key: InputKey, c: egui::Pos2, fill: Option<Color32>, pal: &Palette) {
+    let stroke = Stroke::new(2.0, pal.accent);
+    let ink = if fill == Some(pal.accent) { pal.dark1 } else { pal.accent };
+    let tri = |pts: [egui::Vec2; 3]| {
+        let pts: Vec<egui::Pos2> = pts.iter().map(|v| c + *v).collect();
+        egui::Shape::convex_polygon(pts, fill.unwrap_or(Color32::TRANSPARENT), stroke)
+    };
+    match key {
+        // triangle.svg (32 x 28), turned to point its way
+        InputKey::Up => {
+            p.add(tri([vec2(0.0, -12.0), vec2(14.0, 12.0), vec2(-14.0, 12.0)]));
+        }
+        InputKey::Down => {
+            p.add(tri([vec2(0.0, 12.0), vec2(-14.0, -12.0), vec2(14.0, -12.0)]));
+        }
+        InputKey::Left => {
+            p.add(tri([vec2(-12.0, 0.0), vec2(12.0, -14.0), vec2(12.0, 14.0)]));
+        }
+        InputKey::Right => {
+            p.add(tri([vec2(12.0, 0.0), vec2(-12.0, 14.0), vec2(-12.0, -14.0)]));
+        }
+        // circle.svg (52 x 52)
+        InputKey::Ok => {
+            if let Some(f) = fill {
+                p.circle_filled(c, 25.0, f);
+            }
+            p.circle_stroke(c, 25.0, stroke);
+        }
+        // back.svg: a circle with a turning arrow
+        InputKey::Back => {
+            p.circle_filled(c, 25.0, fill.unwrap_or(pal.dark1));
+            p.circle_stroke(c, 25.0, Stroke::new(2.0, pal.light1));
+            let s = Stroke::new(2.0, ink);
+            p.add(egui::Shape::line(
+                vec![
+                    c + vec2(-8.0, -8.0),
+                    c + vec2(6.0, -8.0),
+                    c + vec2(13.0, -4.0),
+                    c + vec2(13.0, 6.0),
+                    c + vec2(6.0, 10.0),
+                    c + vec2(-10.0, 10.0),
+                ],
+                s,
+            ));
+            p.add(egui::Shape::line(vec![c + vec2(-8.0, -15.0), c + vec2(-16.0, -8.0), c + vec2(-8.0, -1.0)], s));
+        }
+    }
+}
+
+fn accent_source(accent: Accent, ygg: Option<PathBuf>) -> theme::Source {
+    match (accent, ygg) {
+        (Accent::System, Some(d)) => theme::Source::System(d),
+        _ => theme::Source::Fixed { accent: None },
     }
 }
 
@@ -2537,11 +2722,6 @@ pub fn size_text(n: u64) -> String {
     }
 }
 
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
-    let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
-    Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
-}
-
 fn keyboard_key(k: Key) -> Option<InputKey> {
     Some(match k {
         Key::ArrowLeft | Key::H | Key::A => InputKey::Left,
@@ -2554,34 +2734,7 @@ fn keyboard_key(k: Key) -> Option<InputKey> {
     })
 }
 
-fn draw_key_glyph(p: &egui::Painter, key: InputKey, c: egui::Pos2, ink: Color32) {
-    let tri = |pts: [egui::Vec2; 3]| egui::Shape::convex_polygon(pts.iter().map(|v| c + *v).collect(), ink, Stroke::NONE);
-    match key {
-        InputKey::Up => {
-            p.add(tri([vec2(0.0, -8.0), vec2(-8.0, 6.0), vec2(8.0, 6.0)]));
-        }
-        InputKey::Down => {
-            p.add(tri([vec2(0.0, 8.0), vec2(8.0, -6.0), vec2(-8.0, -6.0)]));
-        }
-        InputKey::Left => {
-            p.add(tri([vec2(-8.0, 0.0), vec2(6.0, 8.0), vec2(6.0, -8.0)]));
-        }
-        InputKey::Right => {
-            p.add(tri([vec2(8.0, 0.0), vec2(-6.0, -8.0), vec2(-6.0, 8.0)]));
-        }
-        InputKey::Ok => {
-            p.circle_filled(c, 7.0, ink);
-        }
-        InputKey::Back => {
-            p.line_segment([c + vec2(6.0, -5.0), c + vec2(-6.0, -5.0)], Stroke::new(2.0, ink));
-            p.line_segment([c + vec2(-6.0, -5.0), c + vec2(-2.0, -9.0)], Stroke::new(2.0, ink));
-            p.line_segment([c + vec2(6.0, -5.0), c + vec2(6.0, 5.0)], Stroke::new(2.0, ink));
-            p.line_segment([c + vec2(6.0, 5.0), c + vec2(-4.0, 5.0)], Stroke::new(2.0, ink));
-        }
-    }
-}
-
-/// The screen's colours: the accent made light for the background, made dark for lit pixels.
+/// The screen's colours, as qFlipper's ScreenCanvas: the accent for the background, its dark step for lit pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Lcd {
     pub background: Color32,

@@ -152,6 +152,23 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 
 ### Coordination Log (newest first)
 
+### 2026-11-14 — `argus-app` looks like qFlipper (its design, not only its layout), in the user's accent
+- The Rust app now draws qFlipper's own design instead of Yggdrasil's flat style: the black window, the grid card with
+  its bright border, pixel fonts in capitals, DefaultAmber's outlined buttons (green UPDATE, blue REPAIR), icon tabs
+  over the dotted tab pane, the device drawn from `flipper.svg`'s path data (no wordmark: "ARGUS" in its place; no
+  dolphin, no logo), the badges, the status bar, CustomDialog-style dialogs, the file manager, the stream view with the
+  round keypad; every screen (`theme.rs`, `fonts.rs`, `app/draw.rs`, `app/icons.rs`). qFlipper's oranges are made from
+  the user's Yggdrasil accent (purple 124,84,214 by default) with qFlipper's own steps; its greens and reds stay.
+- Dark only, as qFlipper: the app no longer follows Yggdrasil's light style. Its setting is now `accent = system|purple`
+  in `argus-app.conf` (an old `style = ...` line is ignored).
+- Fonts checked: ProggySquare (MIT), Share Tech and Share Tech Mono (OFL) are embedded, their licences now next to
+  them in `application/assets/fonts`. HaxrCorp 4089 (CC BY-SA 3.0) and Born2bSportyV2 (no licence found) are not; m5x7
+  (CC0) and Jersey 15 (OFL) take their places, Pixel Operator (CC0) is the body font
+  (`argus-tools/crates/argus-app/assets/fonts/NOTICE`). The Qt app still loads all five of qFlipper's.
+- Snapshots redrawn and one added (`dialog-erase.png`; `no-device-light.png` became `no-device-green.png`); motion and
+  idle behaviour unchanged. Section 6 of docs/RUST_PORT.md describes the look.
+- **@Sarina:** nothing changes for you.
+
 ### 2026-11-13 — `argus-app`: developer installs from the running firmware, the legacy update, a Limbo rebuild tested
 - The Rust app's developer tab now also works on a running Flipper: it reboots the firmware into its bootloader over
   RPC first, waits for the bootloader, then installs the wireless stack or FUS there, as the C++ operations do. Only a
