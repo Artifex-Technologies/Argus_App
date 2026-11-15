@@ -1,3 +1,5 @@
+<p align="center"><img src="application/assets/icons/Argus-512.png" width="128" alt="Argus icon"></p>
+
 # Argus_App
 
 **An operator console for the [Flipper Zero](https://flipperzero.one/), built for authorized penetration-testing and red-team engagements.**
