@@ -244,6 +244,22 @@ The (mostly) complete guide is located [here](./.github/ISSUE_TEMPLATE/bug_repor
 
 `VERSION` is the Argus app's own version (1.0.0 since 2026-11-11); its package, `argus-git` (the app and the firmware), is `VERSION-<build number>`. The firmware keeps its `ARG-<upstream>r<N>` names. How the numbers work and how to make a release: [Labyrinth_OS docs/VERSIONING.md](https://github.com/Artifex-Technologies/Labyrinth_OS/blob/main/docs/VERSIONING.md).
 
+## Artifex Ecosystem
+
+| Repository | What it is |
+| --- | --- |
+| [Labyrinth_OS](https://github.com/Artifex-Technologies/Labyrinth_OS) | privacy- and security-first Linux distribution (CachyOS-based), made for gaming too |
+| [LykanOS](https://github.com/Artifex-Technologies/LykanOS) | the security edition, built on the same desktop and tools |
+| [Yggdrasil](https://github.com/Artifex-Technologies/Yggdrasil) | the desktop environment both systems use (panel, Settings, Agora, Minos, the compositor) |
+| [Sarina](https://github.com/Artifex-Technologies/Sarina) | optional local AI assistant that runs on this computer |
+| [Heimdall](https://github.com/Artifex-Technologies/Heimdall) | the security agent: watches the computer, its network and Sarina |
+| [Limbo](https://github.com/Artifex-Technologies/Limbo) | disposable sandboxes for apps, Windows programs and untrusted files |
+| [Kairos](https://github.com/Artifex-Technologies/Kairos) | frame generation for games (a Vulkan layer) |
+| [Argus_App](https://github.com/Artifex-Technologies/Argus_App) | **this repository**: desktop console for the Flipper Zero (a qFlipper fork) |
+| [Argus_Firmware](https://github.com/Artifex-Technologies/Argus_Firmware) | Flipper Zero firmware fork |
+| [Daedalus_CAD](https://github.com/Artifex-Technologies/Daedalus_CAD) | 3D modelling and CAD (SketchUp-style) |
+| [Icarus](https://github.com/Artifex-Technologies/Icarus) | vehicle diagnostics and tuning |
+
 ## License and attribution
 
 Argus_App is a fork of [qFlipper](https://github.com/flipperdevices/qFlipper) by Flipper Devices Inc. and is distributed under the **GNU General Public License v3** — see [LICENSE](./LICENSE). Full credit for the base application goes to the qFlipper authors; the Argus additions build on their work under the same license. Flipper Zero and qFlipper are names of Flipper Devices Inc., used here only to say what this project is based on and works with.
