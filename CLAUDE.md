@@ -10,6 +10,9 @@ Push every commit to `origin` as you make it; don't ask me first. Before pushing
 the diff names no host name, network address, SSID or MAC address. Never push to
 `upstream`.
 
+Plans, owner steps and other internal notes go in `docs/plans/` (private and git-ignored; ask the owner), never in the
+public docs.
+
 ---
 
 ## 1. What this project is
@@ -84,15 +87,15 @@ cli/                    Headless text interface (testing + automation surface)
 plugins/flipperproto0/  Protobuf message plumbing (nanopb-backed)
 3rdparty/nanopb         Protobuf runtime (submodule)
 driver-tool/libwdi      Windows driver install helper (submodule)
-docs/                   Chymaera engineering docs (ARCHITECTURE.md, ROADMAP.md)
+docs/                   Chymaera engineering docs (ARCHITECTURE.md, SARINA_API.md, RUST_PORT.md)
 ```
 
 **Where Chymaera features plug in:**
 - New device interactions → add an operation under `backend/flipperzero/rpc/`
   (one class per op, mirror an existing `storage*`/`gui*` op), then expose it through
   `utilityinterface` / `protobufsession`.
-- Streaming/offload/analysis → new `backend/` modules; see `docs/ROADMAP.md` for the
-  planned `chymaera/` subtree (bridge, datastore, exporters).
+- Streaming/offload/analysis → new `backend/` modules; the roadmap (in my private plans:
+  docs/plans/ROADMAP.md) has the planned `chymaera/` subtree (bridge, datastore, exporters).
 - UI → `application/` QML; keep the existing styling system.
 
 ## 4. Conventions
@@ -511,7 +514,7 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
   the device. Any other path fails with the list of allowed folders.
 - `fea8d2f`: builds never update themselves from upstream qFlipper's feed. `d0a0c98`: console log
   lines are plain text, and a firmware name is HTML-escaped in the update dialog.
-- Docs updated today: `docs/SARINA_API.md`, `docs/ROADMAP.md`, `docs/ARCHITECTURE.md` (it builds here).
+- Docs updated today: `docs/SARINA_API.md`, the roadmap (now in my private plans), `docs/ARCHITECTURE.md` (it builds here).
 
 ### 2026-10-24 — "Pull all captures" over USB, evidence hashes, shared datastore (API v1.2)
 - **`capture.pullAll`** / `qFlipper-cli chymaera pull-all` / a console button copy every
@@ -633,7 +636,7 @@ repositories. This `CLAUDE.md` is the **contract + message board** for this repo
 ### 2026-09-11 — Repo onboarding + Chymaera foundation
 - Established this `CLAUDE.md` as the team coordination board and agent guide.
 - Added `docs/ARCHITECTURE.md` (how qFlipper works + extension points) and
-  `docs/ROADMAP.md` (phased plan for the Chymaera operator-console vision).
+  the roadmap (phased plan for the Chymaera operator-console vision; now in my private plans, docs/plans/ROADMAP.md).
 - Reworked `README.md` to reflect the Argus_App fork identity while keeping
   qFlipper/GPLv3 attribution and the original build instructions.
 - Gitignored local editor state (`.vscode/`).

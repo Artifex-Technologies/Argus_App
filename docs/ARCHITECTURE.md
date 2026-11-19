@@ -1,8 +1,7 @@
 # Architecture
 
 How the app is put together today (inherited from qFlipper) and where the Chymaera
-extensions attach. Pair this with `../CLAUDE.md` (project overview + coordination) and
-`ROADMAP.md` (what we are building).
+extensions attach. Pair this with `../CLAUDE.md` (project overview + coordination).
 
 ## Layers
 
@@ -59,7 +58,7 @@ through `abstractoperationrunner`. **Follow this pattern for any new device inte
 
 `flipperzero/screenstreamer.*` already streams the device framebuffer. It is the
 reference implementation for a continuous data channel and the model to imitate for the
-Chymaera live-data streams (logs, capture events) described in `ROADMAP.md` Phase 1.
+Chymaera live-data streams (logs, capture events).
 
 ## Where Chymaera code lives
 

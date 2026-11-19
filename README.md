@@ -2,6 +2,9 @@
 
 # Argus_App
 
+[![Linux build](https://github.com/Artifex-Technologies/Argus_App/actions/workflows/linux.yml/badge.svg)](https://github.com/Artifex-Technologies/Argus_App/actions/workflows/linux.yml)
+[![argus-tools](https://github.com/Artifex-Technologies/Argus_App/actions/workflows/argus-tools.yml/badge.svg)](https://github.com/Artifex-Technologies/Argus_App/actions/workflows/argus-tools.yml)
+
 **An operator console for the [Flipper Zero](https://flipperzero.one/), built for authorized penetration-testing and red-team engagements.**
 
 Argus_App is a fork of the official [qFlipper](https://github.com/flipperdevices/qFlipper) desktop companion (Qt 6 / C++ / QML, GPLv3). It keeps everything qFlipper does — firmware update/repair, screen streaming, backups — and extends it into a full desktop console for operating the device and analyzing what it captures:
@@ -13,6 +16,12 @@ Argus_App is a fork of the official [qFlipper](https://github.com/flipperdevices
 
 > **Unofficial.** Argus_App is an independent fork. It is not affiliated with, endorsed by or
 > supported by Flipper Devices Inc. Please report Argus bugs here, not to Flipper Devices.
+
+**How it is tested.** Every push to `main` runs the `Linux build` workflow: it builds the app and runs its self-test, then
+gives the C++ code and its Rust port the same input and compares their answers (the CLIs against a fake Flipper, the Sarina
+API servers, the DfuSe and update parsers, the full repair). The Rust tools in `argus-tools/` have their own workflow
+(formatting, clippy, `cargo test`). None of this needs a real Flipper; [docs/RUST_PORT.md](docs/RUST_PORT.md) says how each
+part was checked.
 
 ## Download
 
@@ -41,10 +50,10 @@ This is a work in progress. See the current design and status:
 
 - **[CLAUDE.md](./CLAUDE.md)** — project overview + the Artifex Ecosystem coordination board (read this first if you're contributing).
 - **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)** — how the app is structured and where extensions attach.
-- **[docs/ROADMAP.md](./docs/ROADMAP.md)** — the phased plan and what's done vs. planned.
 - **[docs/SARINA_API.md](./docs/SARINA_API.md)** — the local control API (Sarina) command reference.
+- **[docs/RUST_PORT.md](./docs/RUST_PORT.md)** — the port of the desktop side to Rust, and how each part is checked against the C++.
 
-**Landed so far:** an operator **console** with a live event log; a SQLite **datastore** for sessions/events/captures; a **Wireshark exporter** (`.pcap`/`.pcapng`); **Flipper capture parsing** (`.nfc`, `.sub`); the loopback **Sarina control API** (v1.2, a token on every request); a **live device stream** and **pull all captures** to the datastore (NFC, Sub-GHz, RFID, IR, iButton, Marauder pcaps/logs, Argus app logs) with a SHA-256 per file and no duplicates on repeat pulls, also headless through `qFlipper-cli chymaera watch|pull|pull-all`; and a **warning before official firmware replaces a fork** (see below). See the roadmap for what's next.
+**Landed so far:** an operator **console** with a live event log; a SQLite **datastore** for sessions/events/captures; a **Wireshark exporter** (`.pcap`/`.pcapng`); **Flipper capture parsing** (`.nfc`, `.sub`); the loopback **Sarina control API** (v1.2, a token on every request); a **live device stream** and **pull all captures** to the datastore (NFC, Sub-GHz, RFID, IR, iButton, Marauder pcaps/logs, Argus app logs) with a SHA-256 per file and no duplicates on repeat pulls, also headless through `qFlipper-cli chymaera watch|pull|pull-all`; and a **warning before official firmware replaces a fork** (see below).
 
 ## Versions
 
@@ -226,7 +235,7 @@ You will likely need to set up udev rules in order to use qFlipper as a normal u
 - `driver-tool` - DFU driver installation tool for Windows (based on `libwdi`).
 - `docker` - Build container (Arch Linux, Qt 6).
 - `installer-assets` - Supplementary data for deployment.
-- `docs` - Argus engineering docs (architecture, roadmap, Sarina API, Linux build).
+- `docs` - Argus engineering docs (architecture, Sarina API, Linux build, the Rust port).
 
 ## Reporting bugs
 qFlipper is a project under active development. Please report any encountered bugs to make it better!
