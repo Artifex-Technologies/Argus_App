@@ -27,9 +27,9 @@ the exchange would not do anyway (hash, ELF/manifest parse, API check). If Limbo
 runs an outbox, `argus-tools/src/limbo.rs` (`parse_build_output`) is the one place to change.
 
 **Limits that come from Limbo, not Argus:**
-- The bundle is at most 40 KiB (`maxBundle` in Limbo's `internal/runs/runs.go`). A compressed app
-  source above that is refused with `bundle_too_big`. Most single-app sources fit; apps with
-  many images may not. Raising it is a Limbo change (a per-profile `max_bundle_bytes`, say).
+- The bundle is at most 40 KiB (`MAX_BUNDLE` in Limbo's `rust/limbo/src/runs.rs`). A compressed app
+  source above that is refused as a bad request ("the bundle is larger than 40960 bytes"). Most
+  single-app sources fit; apps with many images may not. The limit is Limbo's, not Argus's.
 - If Heimdall has contained Sarina, Limbo refuses all agent-socket runs, Argus's included.
 - Two agent runs at a time (Limbo's `maxConcurrent`).
 
