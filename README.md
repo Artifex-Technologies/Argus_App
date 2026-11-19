@@ -48,7 +48,8 @@ holds the same tarball for that commit.
 
 This is a work in progress. See the current design and status:
 
-- **[CLAUDE.md](./CLAUDE.md)** — project overview + the Artifex Ecosystem coordination board (read this first if you're contributing).
+- **[CLAUDE.md](./CLAUDE.md)** — project overview, build and test, and the rules (read this first if you're contributing).
+- **[docs/CONTRACTS.md](./docs/CONTRACTS.md)** — what other projects may rely on (the Sarina control API, the datastore).
 - **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)** — how the app is structured and where extensions attach.
 - **[docs/SARINA_API.md](./docs/SARINA_API.md)** — the local control API (Sarina) command reference.
 - **[docs/RUST_PORT.md](./docs/RUST_PORT.md)** — the port of the desktop side to Rust, and how each part is checked against the C++.

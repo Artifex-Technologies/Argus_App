@@ -951,37 +951,13 @@ only for reads (protobuf version, `devinfo`, the screen stream), and ends with e
 podman container (no devices, no network; the host's SQLite mounted beside the programs, which the image lacks). It
 passed on 2026-11-13. Yggdrasil's CI skips it (it has no Argus checkout).
 
-## Resume here
+## Known limitations (2026-11-19)
 
-1. Phase 4 continues: app installs (the argus-tools installer's writes through `flipper_rpc::write`, with the C++
-   `devicestorage` as the reference) and date/time set. Nothing reachable from the Sarina API may change the
-   device without my approval in the app.
-2. Phase 5 is done at the protocol level (update over the updater, factory reset), proven against the fake only.
-   Before either is used on my Flipper: run `argus-cli update` and `erase` against it once with me watching.
-3. Phase 6 (DFU and recovery) is done against the fakes: the DfuSe parser, layout and protocol, the STM32WB55 layer,
-   the full repair and the legacy update, compared with the C++ app (`compare-repair.sh`). Wiring `flipper_dfu::usb`
-   into argus-cli opens a real USB device: only when I say so, with me watching, and never from a test. No flashing in
-   tests, and none on my device until I say so.
-4. Phase 7 (update server) is done: `flipper-updates`, `argus-cli updates|region`, region data in `recovery
-   repair|legacy-update|finish` and in `update`, compared with the C++ app on the fakes. Checked once against Flipper's
-   real server (read only, 2026-11-12): the real directory parses and the real bundle gives 3 bands (58 bytes) for US.
-   The legacy update keeps the fresh region data over the backup's (both apps). The firmware's NULL `country_code`
-   read is noted for Argus_Firmware (its local PROGRESS.md). The Rust app shows the partial-success warning (snapshot
-   `finished-warning.png`); the Qt GUI's is still unseen on a screen.
-5. The UI phase (section 6): `crates/argus-app`, qFlipper's layout, design and motion with my accent, tested headless
-   (accessibility-tree clicks, software pixel snapshots, a test per confirmation, never a real device or a window).
-   Done: shell, device information, live screen and keypad, file manager, backup, restore, erase, the update from the
-   server and from a file, the console (capture pulls and list, sessions, notes, the Sarina API toggle, the API with
-   the app's device: `device.status`, `capture.pull`), recovery (the repair from the update server and from local
-   files, then the steps on the firmware; leaving recovery mode; only `--dfu-socket`, no USB) with the partial-success
-   warning, the Developer tab (wireless stack and FUS installs, in recovery mode or from the running firmware after a
-   reboot into the bootloader), the legacy update (no SD card or an old protobuf: through the bootloader, `/int` kept
-   and put back, the partial-success warning), the Argus tools window (the Limbo rebuild tested against a fake agent),
-   a file picker of its own, settings, and a smoke test of the real binary in Yggdrasil's headless compositor
-   (`smoke-yggdrasil.sh`). Open:
-   a. Yggdrasil's own chooser through the FileChooser portal, if I want it over the built-in picker (a D-Bus client);
-   b. a USB recovery transport (`flipper_dfu::usb`) in the app: until then a Flipper on USB in recovery mode cannot be
-      repaired from the app, and a running one is never rebooted into its bootloader by it (only with me watching);
-   c. the Qt GUI's partial-success screen is still unseen on a screen (the Rust app's is in `finished-warning.png`).
-   The app has never run on my desktop or against my Flipper. Its first run is with me watching, against the fake
-   first (`argus-app --socket PATH`, with `flipper-fake --socket PATH`), then my Flipper. The Qt app stays until then.
+- The Rust app and `argus-cli` have never run against a real Flipper: every change to the device (writes, restore, erase,
+  the update, recovery, the repair) is proven against the fakes only. The Qt app stays the one to use until then.
+- No USB transport for recovery: `flipper_dfu::usb` exists behind the `usb` feature, but neither argus-cli nor the app uses
+  it, so a Flipper on USB in recovery mode cannot be repaired from them, and the app never reboots a running one into its
+  bootloader. Recovery reaches a bootloader only through `--dfu-socket` (the fake).
+- `argus-cli` has no app install and no date/time set.
+- The app has its own file picker, not the desktop's chooser.
+- The Qt GUI's partial-success screen has not been seen on a screen (the Rust app's is the snapshot `finished-warning.png`).

@@ -1,10 +1,9 @@
 # Sarina control API
 
 The local, scriptable interface for driving Argus_App and querying its
-data (Roadmap Phase 4). **This is the cross-repo contract** — sibling Artifex
+data. **This is the cross-repo contract** — sibling Artifex
 Ecosystem projects that need to talk to the Flipper operator console do it through here.
-Changes to this document must be mirrored in `../CLAUDE.md` → Cross-repo
-contracts.
+Changes to this document must be mirrored in [CONTRACTS.md](CONTRACTS.md).
 
 ## Transport
 
