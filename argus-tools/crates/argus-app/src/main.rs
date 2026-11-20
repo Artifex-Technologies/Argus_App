@@ -12,6 +12,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use argus_app::discovery::{Discovery, Fixed, Found, Kind, Sysfs};
+use argus_app::single::{self, Instance};
 use argus_app::{app, net::Net, settings, theme, ArgusApp, Config};
 use eframe::egui;
 
@@ -55,6 +56,22 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
+    // one app at a time (`argus_app::single`); without a private runtime folder there is nowhere safe for the lock
+    let guard = match argus_api::server::runtime_dir().map(|rt| single::claim(&rt.join("argus"))) {
+        Some(Ok(Instance::First(guard))) => guard,
+        Some(Ok(Instance::Running)) => {
+            eprintln!("Argus is already running; it was asked to come forward");
+            return ExitCode::SUCCESS;
+        }
+        Some(Err(e)) => {
+            eprintln!("cannot check for a running Argus: {e}");
+            return ExitCode::from(1);
+        }
+        None => {
+            eprintln!("no private runtime folder (XDG_RUNTIME_DIR) for the one-app lock");
+            return ExitCode::from(1);
+        }
+    };
     let Some(config_dir) = config_dir else {
         eprintln!("no settings folder (HOME or XDG_CONFIG_HOME)");
         return ExitCode::from(1);
@@ -88,7 +105,9 @@ fn main() -> ExitCode {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(app::WINDOW)
+            // a fixed size, as qFlipper's; the log drawer changes both bounds (`app::window_size`)
             .with_min_inner_size(app::WINDOW)
+            .with_max_inner_size(app::WINDOW)
             .with_title("Argus")
             .with_app_id("argus-app")
             // draws its own title strip, as Yggdrasil's apps do
@@ -101,7 +120,19 @@ fn main() -> ExitCode {
             self.0.ui(ui);
         }
     }
-    match eframe::run_native("Argus", options, Box::new(|_| Ok(Box::new(Shell(ArgusApp::new(cfg)))))) {
+    match eframe::run_native(
+        "Argus",
+        options,
+        Box::new(|cc| {
+            let ctx = cc.egui_ctx.clone();
+            guard.on_show(move || {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                ctx.request_repaint();
+            });
+            Ok(Box::new(Shell(ArgusApp::new(cfg))))
+        }),
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e}");

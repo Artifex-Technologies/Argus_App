@@ -74,6 +74,19 @@ const CENTER_X: f32 = 595.0;
 /// ConfirmationDialog.qml's width.
 const DIALOG_W: f32 = 430.0;
 
+/// Grows or shrinks the window for the log drawer. A request for a new size alone is not enough: a compositor that
+/// reports every window as tiled, Hyprland among them, makes winit drop it. Minimum and maximum together are kept by
+/// floating windows on any compositor, and they keep the size fixed, as qFlipper's (set in this order so the minimum
+/// never exceeds the maximum).
+pub fn window_size(ctx: &egui::Context, log_open: bool) {
+    let size = vec2(WINDOW[0], WINDOW[1] + if log_open { LOG_H } else { 0.0 });
+    let bounds = [egui::ViewportCommand::MinInnerSize(size), egui::ViewportCommand::MaxInnerSize(size)];
+    for cmd in if log_open { bounds.into_iter().rev().collect::<Vec<_>>() } else { bounds.to_vec() } {
+        ctx.send_viewport_cmd(cmd);
+    }
+    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+}
+
 const FADE: f32 = 0.150;
 const SLIDE: f32 = 0.350;
 const DRAWER: f32 = 0.500;
@@ -1291,7 +1304,15 @@ impl ArgusApp {
 
         let open = ctx.animate_bool_with_time_and_easing(Id::new("log-drawer"), self.log_open, DRAWER, ease);
         if open > 0.0 {
-            let r = Rect::from_min_size(pos2(card.left(), footer.bottom() + 14.0), vec2(CARD_W, (LOG_H - 42.0) * open));
+            // Under the footer when the window grew; if the desktop kept it small, the drawer covers the card from
+            // the bottom instead, so the log is never drawn outside the window.
+            let h = (LOG_H - 42.0) * open;
+            let top = (footer.bottom() + 14.0).min(full.bottom() - 14.0 - h);
+            let r = Rect::from_min_size(pos2(card.left(), top), vec2(CARD_W, h));
+            if top < footer.bottom() {
+                ui.painter().rect_filled(r.expand(6.0), 0.0, Color32::BLACK);
+                ui.painter().rect_stroke(r.expand(6.0), 0.0, Stroke::new(2.0, pal.medium3), StrokeKind::Inside);
+            }
             self.log_drawer(ui, r, &pal);
         }
 
@@ -2303,8 +2324,7 @@ impl ArgusApp {
                 match which {
                     0 => {
                         self.log_open = !self.log_open;
-                        let h = WINDOW[1] + if self.log_open { LOG_H } else { 0.0 };
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(WINDOW[0], h)));
+                        window_size(ui.ctx(), self.log_open);
                     }
                     1 => {
                         self.console = !self.console;

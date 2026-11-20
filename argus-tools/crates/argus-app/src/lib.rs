@@ -11,6 +11,7 @@ pub mod fonts;
 pub mod net;
 pub mod recovery;
 pub mod settings;
+pub mod single;
 pub mod theme;
 pub mod tools;
 

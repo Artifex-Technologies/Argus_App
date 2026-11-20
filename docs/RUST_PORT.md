@@ -951,10 +951,26 @@ only for reads (protobuf version, `devinfo`, the screen stream), and ends with e
 podman container (no devices, no network; the host's SQLite mounted beside the programs, which the image lacks). It
 passed on 2026-11-13. Yggdrasil's CI skips it (it has no Argus checkout).
 
+**First run on my Flipper (2026-11-19, with me watching).** Against the fake first, then my Flipper on USB serial
+(`argus-app --port`): it connected, read the device information (Argus firmware, radio stack, SD card) and showed the
+live screen; nothing was written. Two things the headless tests could not see were found and fixed the same day:
+
+- The log drawer did not show: Hyprland reports every window as tiled, floating ones too, and winit then drops a
+  window's own request for a new size, so the window never grew. The window now sets its minimum and maximum size to
+  the size it wants (`app::window_size`), which a compositor keeps for a floating window; where even that is ignored,
+  the drawer covers the card from the bottom instead of being drawn outside the window.
+- Only one app runs at a time (`argus_app::single`): two would race for the same serial port and datastore. The first
+  holds a lock in the private runtime folder (`$XDG_RUNTIME_DIR/argus/app.lock`, flock, released when it exits) and
+  listens on `app.sock`; a later start asks it to come forward (unminimize and focus; a compositor may only mark it as
+  wanting attention) and exits.
+
+The update, erase and restore have still run only against the fakes.
+
 ## Known limitations (2026-11-19)
 
-- The Rust app and `argus-cli` have never run against a real Flipper: every change to the device (writes, restore, erase,
-  the update, recovery, the repair) is proven against the fakes only. The Qt app stays the one to use until then.
+- The Rust app has run against my Flipper only to read it (2026-11-19, section 6), and `argus-cli` not at all: every
+  change to the device (writes, restore, erase, the update, recovery, the repair) is proven against the fakes only. The
+  Qt app stays the one to use until then.
 - No USB transport for recovery: `flipper_dfu::usb` exists behind the `usb` feature, but neither argus-cli nor the app uses
   it, so a Flipper on USB in recovery mode cannot be repaired from them, and the app never reboots a running one into its
   bootloader. Recovery reaches a bootloader only through `--dfu-socket` (the fake).
