@@ -19,6 +19,8 @@ on:
       - 'VERSION'
       - '.github/workflows/argus-tools.yml'
   workflow_dispatch:
+  schedule:
+    - cron: '41 5 * * 1' # the audit weekly, for advisories published after the last change
 
 permissions:
   contents: read
@@ -66,3 +68,20 @@ jobs:
           git submodule update --init 3rdparty/nanopb
           sh argus-tools/crates/flipper-rpc/tests/nanopb/gen.sh
           git diff --exit-code -- argus-tools/crates/flipper-rpc/tests/fixtures/nanopb_frames.txt
+
+  # argus-tools' lock file against RustSec's advisories (the fuzz crate's is not committed)
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0, pinned by commit
+        with:
+          persist-credentials: false
+      - run: cargo install --locked cargo-audit
+      # Unmaintained notices (no vulnerability, no fixed version) for crates the desktop app gets from eframe 0.36:
+      # RUSTSEC-2026-0192 ttf-parser (window decorations' font) and RUSTSEC-2026-0370 to 0372 zvariant/zbus_names (the
+      # screen reader link). Revisit at each eframe update.
+      - run: >-
+          cargo audit --file argus-tools/Cargo.lock --deny warnings --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0370
+          --ignore RUSTSEC-2026-0371 --ignore RUSTSEC-2026-0372

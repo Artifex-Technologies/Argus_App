@@ -35,6 +35,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0, pinned by commit
         with:
+          persist-credentials: false
           # The version is the VERSION file; the full history stays for the commit the app names.
           fetch-depth: 0
           submodules: recursive

@@ -6,9 +6,12 @@ name: 'CI'
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
 jobs:
   build_mac:
     runs-on: [self-hosted, ARM64, macOS, qFlipper]
+    timeout-minutes: 60
     env:
       MAC_OS_KEYCHAIN_NAME: ${{ secrets.MAC_OS_KEYCHAIN_NAME }}
       MAC_OS_KEYCHAIN_PASSWORD: ${{ secrets.MAC_OS_KEYCHAIN_PASSWORD }}
@@ -18,8 +21,9 @@ jobs:
       MAC_OS_SIGNING_PASSWORD: ${{ secrets.MAC_OS_SIGNING_PASSWORD }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0, pinned by commit
         with:
+          persist-credentials: false
           submodules: true
           fetch-depth: 0
 
@@ -27,7 +31,7 @@ jobs:
         run: ./build_mac.sh
 
       - name: Publish application
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2, pinned by commit
         with:
           name: qflipper.dmg
           path: |
@@ -37,12 +41,14 @@ jobs:
 
   build_windows:
     runs-on: [self-hosted, X64, Windows]
+    timeout-minutes: 60
     env:
         SIGNING_TOOL: ${{ secrets.WIN_SIGNING_TOOL }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0, pinned by commit
         with:
+          persist-credentials: false
           submodules: true
           fetch-depth: 0  # must to be there, see installer_windows.nsi file for details
 
@@ -50,7 +56,7 @@ jobs:
         run: .\build_windows.bat
 
       - name: Publish application
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2, pinned by commit
         with:
           name: qFlipperSetup-64bit.exe
           path: |
@@ -63,11 +69,13 @@ jobs:
     name: Upload apps to storage
     needs: [build_windows, build_mac]
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0, pinned by commit
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: 'Make artifacts directory'
@@ -87,10 +95,10 @@ jobs:
           echo "REF=$(git rev-parse --abbrev-ref HEAD)" >> $GITHUB_ENV
           echo "SUFFIX=$(git rev-parse --abbrev-ref HEAD | sed 's/\//_/g')-$(date +'%d%m%Y')-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0, pinned by commit
         with:
           name: qFlipperSetup-64bit.exe
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0, pinned by commit
         with:
           name: qflipper.dmg
 
